@@ -1,4 +1,20 @@
-# Migrated project sources
-.legacy-project/
-.legacy-project
-RUBNBOOK.md
+# Local-only migration context
+RUNBOOK.md
+
+# Legacy project baseline
+.env
+**/.env
+.venv*/
+**/.venv*/
+.claude/
+.pytest_cache/
+__pycache__/
+*.pyc
+.vscode/
+spectrogram-analyzer/audio_quality_batch_results.json
+spectrogram-analyzer/audio_quality_batch_smoke.json
+
+# Private planning docs
+.PLANNING
+.PLANNING/
+.PLANNING/**

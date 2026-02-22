@@ -44,5 +44,11 @@ bin/audlint.sh
 - The browser can run in read-only DB mode, but mutation actions require write access.
 
 ## License
-This project is released under the `Audlint Non-Commercial License v1.0`.
-Commercial use is not permitted. See `LICENSE`.
+This project is dual-licensed:
+- `AGPL-3.0-or-later` (open-source path)
+- commercial license (for proprietary/closed-source use)
+
+See `LICENSE` and `LICENSES/COMMERCIAL.md`.
+
+## Feedback
+Bug reports and feature requests are welcome via GitHub Issues.

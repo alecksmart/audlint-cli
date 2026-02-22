@@ -36,7 +36,10 @@ EOF
 
 expand_value() {
 	local raw="$1"
-	eval "printf '%s' \"$raw\""
+	# Safely expand $HOME and ~ only; no eval on arbitrary user input.
+	raw="${raw/#\~/$HOME}"
+	raw="${raw//\$HOME/$HOME}"
+	printf '%s' "$raw"
 }
 
 prompt_required() {
@@ -251,10 +254,65 @@ TABLE_PYTHON_BIN="$TABLE_PYTHON_BIN"
 MEDIA_PLAYER_PATH="$MEDIA_PLAYER_PATH"
 # Optional: Last.fm API key for genre lookup fallback (free at last.fm/api)
 LASTFM_API_KEY="$LASTFM_API_KEY"
-CRON_INTERVAL_MIN=$CRON_INTERVAL_MIN
 QTY_SEEK_MAX_ALBUMS=$QTY_SEEK_MAX_ALBUMS
 QTY_SEEK_LOG="$QTY_SEEK_LOG"
 EOF
+}
+
+sanity_check() {
+	local ok=1
+	printf '\n--- Sanity check ---\n'
+
+	# Required system binaries
+	local bin
+	for bin in sqlite3 ffmpeg ffprobe rsync ssh; do
+		if command -v "$bin" >/dev/null 2>&1; then
+			printf 'OK      %s (%s)\n' "$bin" "$(command -v "$bin")"
+		else
+			printf 'MISSING %s\n' "$bin"
+			ok=0
+		fi
+	done
+
+	# Python binary from prompt
+	local py_expanded
+	py_expanded="$(expand_value "$PYTHON_BIN")"
+	if command -v "$py_expanded" >/dev/null 2>&1 || [[ -x "$py_expanded" ]]; then
+		printf 'OK      PYTHON_BIN (%s)\n' "$py_expanded"
+	else
+		printf 'MISSING PYTHON_BIN: %s\n' "$py_expanded"
+		ok=0
+	fi
+
+	# Optional tag-writer tools
+	printf '\n'
+	for bin in sox vorbiscomment metaflac AtomicParsley eyeD3 wvtag; do
+		if command -v "$bin" >/dev/null 2>&1; then
+			printf 'OK      %s (optional)\n' "$bin"
+		else
+			printf 'absent  %s (optional — some tag actions limited)\n' "$bin"
+		fi
+	done
+
+	# SSH key if provided
+	if [[ -n "$SSH_KEY" ]]; then
+		local sk_expanded
+		sk_expanded="$(expand_value "$SSH_KEY")"
+		if [[ -f "$sk_expanded" && -r "$sk_expanded" ]]; then
+			printf '\nOK      SSH_KEY (%s)\n' "$sk_expanded"
+		else
+			printf '\nWARN    SSH_KEY not found: %s\n' "$sk_expanded"
+		fi
+	fi
+
+	printf '\n'
+	if [[ "$ok" -eq 1 ]]; then
+		printf 'Verdict: READY — all required dependencies found.\n'
+	else
+		printf 'Verdict: NOT READY — missing required dependencies above.\n'
+		printf '         .env will still be written; fix missing tools before running.\n'
+	fi
+	printf '--------------------\n'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -296,14 +354,15 @@ prompt_optional "DST_PATH (remote destination path)" DST_PATH
 prompt_optional_until_valid_label "SSH_KEY path" SSH_KEY validate_optional_file_readable "SSH_KEY"
 
 prompt_until_valid_label "PYTHON_BIN (command or absolute path)" PYTHON_BIN validate_bin "PYTHON_BIN"
-prompt_until_valid_label "TABLE_PYTHON_BIN (command or absolute path)" TABLE_PYTHON_BIN validate_bin "TABLE_PYTHON_BIN"
+TABLE_PYTHON_BIN="$PYTHON_BIN"
 
 prompt_optional_until_valid "MEDIA_PLAYER_PATH (local mount path)" MEDIA_PLAYER_PATH validate_optional_media_path
 prompt_optional "LASTFM_API_KEY" LASTFM_API_KEY
 
-prompt_until_valid_label "CRON_INTERVAL_MIN" CRON_INTERVAL_MIN validate_int_ge_1 "CRON_INTERVAL_MIN"
 prompt_until_valid_label "QTY_SEEK_MAX_ALBUMS" QTY_SEEK_MAX_ALBUMS validate_int_ge_1 "QTY_SEEK_MAX_ALBUMS"
 prompt_until_valid "QTY_SEEK_LOG path" QTY_SEEK_LOG validate_log_path
+
+sanity_check
 
 if [[ "$DRY_RUN" == "1" ]]; then
 	render_env

@@ -59,5 +59,8 @@ Optional development tools:
 This project is released under `Audlint Non-Commercial License v1.1`.
 Commercial use is currently not permitted. See `LICENSE`.
 
+## Credits
+Development assisted by [Claude Code](https://claude.ai/code) (Anthropic).
+
 ## Feedback
 Bug reports and feature requests are welcome via GitHub Issues.

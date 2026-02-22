@@ -1728,6 +1728,12 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
         self.assertIn('transfer_year="$(transfer_year_for_source "$source_path" "$year")"', script)
         self.assertIn('"$artist" "$album" "$transfer_year" "$source_path" "$dest_dir"', script)
 
+    def test_library_browser_status_overlay_clears_row_before_redraw(self) -> None:
+        script = LIBRARY_BROWSER.read_text(encoding="utf-8")
+        redraw = "printf '\\033[s\\033[%s;1H\\033[K\\033[%s;%sH%s\\033[u'"
+        # transfer, lyrics, and recode+autoboost status overlays
+        self.assertGreaterEqual(script.count(redraw), 3)
+
     def test_library_browser_default_page_and_class_filter(self) -> None:
         if shutil.which("sqlite3") is None:
             self.skipTest("sqlite3 is required")

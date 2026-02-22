@@ -2121,8 +2121,6 @@ player_path="$4"
 log_file="${5:-}"
 title_row="${VIRTWIN_TITLE_ROW:-}"
 term_cols="${VIRTWIN_TERM_COLS:-0}"
-status_last_len=0
-
 log_note() {
   local msg="$1"
   [[ -n "$log_file" ]] || return 0
@@ -2163,16 +2161,9 @@ virtwin_status_set() {
     rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
     rendered+=$'\033[1;38;2;208;179;255m'"$part3"$'\033[0m'
   fi
-  local pad_len=0
-  if ((status_last_len > ${#text})); then
-    pad_len=$((status_last_len - ${#text}))
-  fi
-  printf '\033[s\033[%s;%sH%s' "$title_row" "$col" "$rendered"
-  if ((pad_len > 0)); then
-    printf '%*s' "$pad_len" ''
-  fi
-  printf '\033[u'
-  status_last_len=${#text}
+  # Right-aligned titles shift horizontally as text length changes; clear the
+  # whole row first to avoid stale glyphs from prior renders.
+  printf '\033[s\033[%s;1H\033[K\033[%s;%sH%s\033[u' "$title_row" "$title_row" "$col" "$rendered"
 }
 
 printf 'Media player path: %s\n\n' "$player_path"
@@ -2326,7 +2317,6 @@ lyrics_seek_bin="$2"
 success_file="$3"
 title_row="${VIRTWIN_TITLE_ROW:-}"
 term_cols="${VIRTWIN_TERM_COLS:-0}"
-status_last_len=0
 total=0
 ok=0
 failed=0
@@ -2363,16 +2353,7 @@ virtwin_status_set() {
     rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
     rendered+=$'\033[1;38;2;208;179;255m'"$part3"$'\033[0m'
   fi
-  local pad_len=0
-  if ((status_last_len > ${#text})); then
-    pad_len=$((status_last_len - ${#text}))
-  fi
-  printf '\033[s\033[%s;%sH%s' "$title_row" "$col" "$rendered"
-  if ((pad_len > 0)); then
-    printf '%*s' "$pad_len" ''
-  fi
-  printf '\033[u'
-  status_last_len=${#text}
+  printf '\033[s\033[%s;1H\033[K\033[%s;%sH%s\033[u' "$title_row" "$title_row" "$col" "$rendered"
 }
 
 while IFS=$'\x1f' read -r row_id artist album year source_path; do
@@ -2529,7 +2510,7 @@ virtwin_status_set() {
     rendered_status+=$'\033[1;38;2;179;140;255m | \033[0m'
     rendered_status+=$'\033[1;38;2;208;179;255m'"$part3"$'\033[0m'
   fi
-  printf '\033[s\033[%s;%sH%s\033[u' "$title_row" "$status_col" "$rendered_status"
+  printf '\033[s\033[%s;1H\033[K\033[%s;%sH%s\033[u' "$title_row" "$title_row" "$status_col" "$rendered_status"
 }
 
 virtwin_status_set "planning..."

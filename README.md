@@ -1,6 +1,6 @@
 # audlint-cli
 
-Open-source CLI toolkit centered on interactive music library quality browsing.
+Source-available CLI toolkit centered on interactive music library quality browsing.
 
 ## Scope
 - Primary tool: `bin/audlint.sh`
@@ -42,3 +42,10 @@ bin/audlint.sh
 ## Notes
 - `LIBRARY_DB` defaults to `$SRC/library.sqlite`.
 - The browser can run in read-only DB mode, but mutation actions require write access.
+
+## License
+This project is released under `Audlint Non-Commercial License v1.1`.
+Commercial use is currently not permitted. See `LICENSE`.
+
+## Feedback
+Bug reports and feature requests are welcome via GitHub Issues.

@@ -42,3 +42,7 @@ bin/audlint.sh
 ## Notes
 - `LIBRARY_DB` defaults to `$SRC/library.sqlite`.
 - The browser can run in read-only DB mode, but mutation actions require write access.
+
+## License
+This project is released under the `Audlint Non-Commercial License v1.0`.
+Commercial use is not permitted. See `LICENSE`.

@@ -11,7 +11,7 @@
 #
 # Usage:
 #   tests/sh/bash5_consistency.sh
-#   tests/sh/bash5_consistency.sh lib/sh spectrogram-analyzer tags
+#   tests/sh/bash5_consistency.sh lib/sh bin
 #
 # Env overrides:
 #   EXPECTED_BASH=/opt/homebrew/bin/bash

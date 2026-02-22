@@ -107,7 +107,7 @@ Purge mode (--purge-missing):
   Use --dry-run to preview without making any changes.
 
 Cron example:
-  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; cd encoding-tools/spectrogram-analyzer && ./qty_seek.sh --max-albums 15 /Volumes/Music/Library >> "\$HOME/qty_seek.log" 2>&1
+  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; ~/bin/qty_seek.sh --max-albums 15 /Volumes/Music/Library >> "\$HOME/qty_seek.log" 2>&1
 EOF_HELP
 }
 

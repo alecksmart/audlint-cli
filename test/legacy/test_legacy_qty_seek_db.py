@@ -36,7 +36,7 @@ class QtySeekDbTests(unittest.TestCase):
         self.bin_dir.mkdir(parents=True, exist_ok=True)
 
         self.work_dir = self.tmpdir / "work"
-        self.script_dir = self.work_dir / "spectrogram-analyzer"
+        self.script_dir = self.work_dir / "bin"
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.lib_sh_dir = self.work_dir / "lib" / "sh"
         self.lib_sh_dir.mkdir(parents=True, exist_ok=True)

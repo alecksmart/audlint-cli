@@ -19,25 +19,37 @@ Source-available CLI toolkit centered on interactive music library quality brows
 - `Makefile`: single project make entrypoint
 
 ## Quick start
-1. Generate `.env`:
+1. Install scripts into your `~/bin` (or custom prefix):
+```bash
+make install
+# or:
+make install PREFIX="$HOME/bin"
+```
+2. Generate `.env`:
 ```bash
 ./install.sh
 ```
-2. Run tests:
+3. Run tests:
 ```bash
 make test
 ```
-3. Launch browser:
+4. Launch browser:
 ```bash
-bin/audlint.sh
+audlint.sh
 ```
 
-## Runtime requirements
+## Dependencies
+Required runtime tools:
 - Bash 5 (`/opt/homebrew/bin/bash`)
 - `sqlite3`
 - `ffmpeg`, `ffprobe`
+- `rsync` and `ssh` (for transfer/sync workflows)
 - Python with `numpy`
 - Python with `rich` (or set `RICH_TABLE_CMD` to a compatible renderer)
+
+Optional development tools:
+- `shellcheck` (used by `make lint`)
+- `shfmt` (used by `make fmt-check`)
 
 ## Notes
 - `LIBRARY_DB` defaults to `$SRC/library.sqlite`.
@@ -46,6 +58,10 @@ bin/audlint.sh
 ## License
 This project is released under `Audlint Non-Commercial License v1.1`.
 Commercial use is currently not permitted. See `LICENSE`.
+
+## Credits
+Migration assisted by [OpenAI Codex](https://openai.com/blog/openai-codex).
+Ongoing development assisted by [Claude Code](https://claude.ai/code) (Anthropic).
 
 ## Feedback
 Bug reports and feature requests are welcome via GitHub Issues.

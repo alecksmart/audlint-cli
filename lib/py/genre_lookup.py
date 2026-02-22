@@ -85,9 +85,9 @@ def _mb_fetch(artist: str, album: str) -> list[str]:
         return []
 
     mb.set_useragent(
-        "encoding-tools-genre-lookup",
+        "audlint-genre-lookup",
         "1.0",
-        "https://github.com/encoding-tools",
+        "https://github.com/audlint/audlint-cli",
     )
 
     # Rate-limit: honour 1 req/s
@@ -139,7 +139,7 @@ def _discogs_fetch(artist: str, album: str) -> list[str]:
     })
     url = f"https://api.discogs.com/database/search?{params}"
     headers = {
-        "User-Agent": "encoding-tools-genre-lookup/1.0",
+        "User-Agent": "audlint-genre-lookup/1.0",
     }
     try:
         req = urllib.request.Request(url, headers=headers)

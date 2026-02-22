@@ -130,6 +130,7 @@ if [[ "$USE_COLOR" == true ]]; then
   C_DIM="$DIM"
   C_CYAN="$CYAN"
   C_GREEN="$GREEN"
+  # shellcheck disable=SC2153
   C_YELLOW="$YELLOW"
   C_RED="$RED"
   C_BOLD="$(tput bold 2>/dev/null || printf '')"
@@ -660,7 +661,8 @@ build_batch_tables() {
 
 analyze_file() {
   local in="$1"
-  local filename=$(basename "$in")
+  local filename
+  filename=$(basename "$in")
   local ext="${filename##*.}"
   local stem="${filename%.*}"
   ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
@@ -678,10 +680,11 @@ analyze_file() {
     render_track_png=true
   fi
 
-  local outdir="$(dirname "$in")"
-  local sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$in" </dev/null)
-  local bps=$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 "$in" </dev/null)
-  local sfmt=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_fmt -of csv=p=0 "$in" </dev/null)
+  local outdir sr bps sfmt
+  outdir="$(dirname "$in")"
+  sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$in" </dev/null)
+  bps=$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 "$in" </dev/null)
+  sfmt=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_fmt -of csv=p=0 "$in" </dev/null)
   local codec_name
   codec_name="$(audio_codec_name "$in")"
   local is_lossy_track="NO"
@@ -697,7 +700,8 @@ analyze_file() {
     echo "         Try a different ffmpeg build or convert the file first."
     return 1
   fi
-  local dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in" </dev/null)
+  local dur
+  dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in" </dev/null)
   dur="${dur%%,*}"
 
   local tmpdir
@@ -717,7 +721,8 @@ analyze_file() {
   if [[ "$ext" == "dsf" || "$ext" == "dff" ]]; then
     dsd_hint=1
   fi
-  local EVAL_OUT=$("$PYTHON_BIN" "$PY_HELPER" "$excerpt" "$sr" "$dsd_hint" </dev/null)
+  local EVAL_OUT
+  EVAL_OUT=$("$PYTHON_BIN" "$PY_HELPER" "$excerpt" "$sr" "$dsd_hint" </dev/null)
   local REC
   REC=$(kv_get "RECOMMEND" "$EVAL_OUT")
   local REASON

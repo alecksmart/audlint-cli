@@ -294,6 +294,7 @@ for f in "${FILES[@]}"; do
       echo "$f|$NEW_NAME" >> "$MAP_FILE"
 
       mv "$f" "$BACKUP_DIR/"
+      # shellcheck disable=SC2086
       ffmpeg -hide_banner $STRICT_FLAG -i "$BACKUP_DIR/$f" \
         -af "volume=${POSSIBLE_GAIN}dB" $ENC_FLAGS \
         -c:v copy -map_metadata 0 -metadata CUESHEET= "$NEW_NAME" -y </dev/null

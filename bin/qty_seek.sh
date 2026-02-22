@@ -75,7 +75,7 @@ declare -A AQ_SOURCE_PATH_CHECKED=()  # source_path → last_checked_at; used fo
 show_help() {
   cat <<EOF_HELP
 Quick use:
-  $(basename "$0") --max-albums 15 /Volumes/Music/Library
+  $(basename "$0") --max-albums 15 /path/to/library
 
 Usage:
   $(basename "$0") [--max-albums N] [--full-discovery] <library_root>
@@ -107,7 +107,7 @@ Purge mode (--purge-missing):
   Use --dry-run to preview without making any changes.
 
 Cron example:
-  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; cd encoding-tools/spectrogram-analyzer && ./qty_seek.sh --max-albums 15 /Volumes/Music/Library >> "\$HOME/qty_seek.log" 2>&1
+  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; ~/bin/qty_seek.sh --max-albums 15 /path/to/library >> "\$HOME/qty_seek.log" 2>&1
 EOF_HELP
 }
 

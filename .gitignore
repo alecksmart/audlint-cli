@@ -1,6 +1,3 @@
-# Local-only migration context
-RUNBOOK.md
-
 # Legacy project baseline
 .env
 **/.env

@@ -19,7 +19,8 @@ analyze_file() {
     local file="$1"
     
     # 1. Detect Genre for Thresholds
-    local genre_tag=$(ffprobe -v error -show_entries format_tags=genre -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    local genre_tag
+    genre_tag=$(ffprobe -v error -show_entries format_tags=genre -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]')
     
     if [[ "$genre_tag" =~ (classical|jazz|blues|folk|acoustic) ]]; then
         s_thr=15; a_thr=12; b_thr=10; c_thr=7; profile="Audiophile"
@@ -30,17 +31,20 @@ analyze_file() {
     fi
 
     # 2. Extract DR Score
-    local dr_val=$(ffmpeg -i "$file" -af drmeter -f null - 2>&1 | grep "Overall DR" | awk '{print $NF}')
+    local dr_val
+    dr_val=$(ffmpeg -i "$file" -af drmeter -f null - 2>&1 | grep "Overall DR" | awk '{print $NF}')
     [[ -z "$dr_val" ]] && dr_val="0.00"
     
     # 3. Get TRUE PEAK (dBTP)
-    local tp_db=$(ffmpeg -i "$file" -af ebur128=peak=true -f null - 2>&1 | grep "True peak" | awk 'NR==1{print $3}')
+    local tp_db
+    tp_db=$(ffmpeg -i "$file" -af ebur128=peak=true -f null - 2>&1 | grep "True peak" | awk 'NR==1{print $3}')
     [[ -z "$tp_db" ]] && tp_db="0.00"
 
     # 4. Frequency Cutoff & Bit Depth via SoX
-    local sox_out=$(sox "$file" -n stat stats 2>&1)
-    local cutoff=$(echo "$sox_out" | grep "Rough frequency" | awk '{print $4}')
-    local bit_info=$(echo "$sox_out" | grep "Bit-depth" | awk '{print $3}')
+    local sox_out cutoff bit_info
+    sox_out=$(sox "$file" -n stat stats 2>&1)
+    cutoff=$(echo "$sox_out" | grep "Rough frequency" | awk '{print $4}')
+    bit_info=$(echo "$sox_out" | grep "Bit-depth" | awk '{print $3}')
     
     [[ -z "$cutoff" ]] && cutoff="N/A"
     [[ -z "$bit_info" ]] && bit_info="??"
@@ -57,7 +61,8 @@ analyze_file() {
         grade="C"; color="\033[0;33m"
     fi
 
-    local track_name=$(basename "$file")
+    local track_name
+    track_name=$(basename "$file")
     printf "%-25.25s | %-6s | %-6s | %-6s | %-7s | %b%-3s\033[0m\n" \
            "$track_name" "$dr_val" "$tp_db" "$bit_info" "$cutoff" "$color" "$grade"
 

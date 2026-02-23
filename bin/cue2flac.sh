@@ -53,7 +53,7 @@ require_bins ffmpeg ffprobe >/dev/null || exit 2
 
 # === DEFAULTS ===
 INPUT_ARG="."
-DEFAULT_PROFILE="96/24"
+DEFAULT_PROFILE="192/24"
 TARGET_PROFILE=""
 OUTPUT_ROOT_ARG=""
 DRY_RUN=0

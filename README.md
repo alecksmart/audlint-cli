@@ -10,6 +10,20 @@ Source-available CLI toolkit centered on interactive music library quality brows
   - lyrics workflow: `bin/lyrics_seek.sh`, `bin/lyrics_album.sh`
   - transfer sync: `bin/sync_music.sh`
 
+## Additional tools
+
+| Script | Description |
+| --- | --- |
+| `bin/boost_album.sh` | Bake headroom gain into a FLAC or lossy album in-place; handles Opus/Ogg cover edge cases |
+| `bin/boost_seek.sh` | Walk library and invoke `boost_album.sh` on qualifying albums with stdin forwarded correctly |
+| `bin/clear_tags.sh` | Clear lyrics tags and cached lyrics DB entries for files in the current folder |
+| `bin/cue2flac.sh` | Split a high-res audio file into per-track FLACs using a .cue sheet (FLAC/WAV/WV/APE/DSF/DFF) |
+| `bin/dff2flac.sh` | Convert a folder of DFF files into tagged FLACs using a sidecar .cue file |
+| `bin/qty_compare.sh` | Compare two albums side-by-side using spectre quality metrics |
+| `bin/qty_test.sh` | Per-file audio analysis: dynamic range, true peak, bit depth, and frequency cutoff grading |
+| `bin/spectre.sh` | Spectrogram + header + recode recommendation + batch summary for an album folder |
+| `bin/tag_writer.sh` | Write metadata tags to audio files across all supported formats (FLAC, MP3, M4A, OGG, Opus, WV, WAV, DSF, WMA) |
+
 ## Project layout
 - `bin/`: executable scripts
 - `lib/sh/`: shared shell libraries

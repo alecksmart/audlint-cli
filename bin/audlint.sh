@@ -2432,7 +2432,8 @@ run_flac_recode_for_row_id() {
          COALESCE(year_int,0),
          COALESCE(source_path,''),
          COALESCE(recode_recommendation,''),
-         COALESCE(needs_recode,0)
+         COALESCE(needs_recode,0),
+         COALESCE(last_recoded_at,0)
        FROM album_quality
        WHERE id=$row_id
        LIMIT 1;" 2>/dev/null || true
@@ -2441,10 +2442,16 @@ run_flac_recode_for_row_id() {
     ACTION_MESSAGE="Row not found for FLAC action."
     return 1
   fi
-  IFS=$'\t' read -r row_artist row_album row_year row_source_path row_recode row_needs_recode <<< "$row"
+  IFS=$'\t' read -r row_artist row_album row_year row_source_path row_recode row_needs_recode row_last_recoded <<< "$row"
   [[ "$row_needs_recode" =~ ^[0-9]+$ ]] || row_needs_recode=0
   if ((row_needs_recode != 1)); then
     ACTION_MESSAGE="Selected row is not actionable (needs_recode != Y)."
+    return 1
+  fi
+  [[ "$row_last_recoded" =~ ^[0-9]+$ ]] || row_last_recoded=0
+  if ((HAS_COL_LAST_RECODED_AT == 1)) && ((row_last_recoded > 0)); then
+    _recode_date="$(awk -v t="$row_last_recoded" 'BEGIN{printf strftime("%Y-%m-%d",t+0)}')"
+    ACTION_MESSAGE="Already recoded on ${_recode_date} (green star). Clear last_recoded_at in DB to re-encode."
     return 1
   fi
   if [[ -z "$row_source_path" || ! -d "$row_source_path" ]]; then

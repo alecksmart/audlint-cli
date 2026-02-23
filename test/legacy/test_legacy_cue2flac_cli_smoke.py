@@ -366,7 +366,7 @@ class Cue2FlacCliSmokeTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("no supported audio file found", proc.stderr)
+        self.assertIn("audio file referenced in CUE not found", proc.stderr)
 
     # -------------------------------------------------------------------------
     # Test: boost gain applied when headroom available (true peak -3 dBTP → +2.7 dB boost)

@@ -14,6 +14,7 @@
 # Gain/boost:    album-wide headroom: -0.3 - max_true_peak (applied before SRC in sox chain)
 # Tagging:       metaflac --import-tags-from (explicit TAG=value from CUE metadata)
 # Formats:       FLAC, WAV (native sox); WavPack/APE/DSF/DFF (pre-convert to temp WAV via ffmpeg)
+# Multi-file:    CUE sheets with multiple FILE directives (e.g. vinyl Side A / Side B) are supported.
 # --check-upscale: spectral bandwidth analysis via spectre_eval.py to detect fake hi-res;
 #                  auto-selects the recommended encode profile instead of defaulting to 192/24.
 
@@ -163,25 +164,6 @@ if [[ -z "$CUE_FILE" || ! -f "$CUE_FILE" ]]; then
   exit 1
 fi
 
-# === LOCATE SOURCE AUDIO (prefer FLAC > WAV > WV > APE > DSF > DFF) ===
-AUDIO_SOURCE=""
-for ext in flac wav wv ape dsf dff; do
-  found="$(find "$SOURCE_DIR" -maxdepth 1 -iname "*.${ext}" | head -n 1 || true)"
-  if [[ -n "$found" ]]; then
-    AUDIO_SOURCE="$found"
-    break
-  fi
-done
-
-if [[ -z "$AUDIO_SOURCE" ]]; then
-  echo "Error: no supported audio file found in '$SOURCE_DIR'." >&2
-  echo "       Supported: .flac .wav .wv .ape .dsf .dff" >&2
-  exit 1
-fi
-
-AUDIO_EXT="${AUDIO_SOURCE##*.}"
-AUDIO_EXT_LC="${AUDIO_EXT,,}"
-
 # === PARSE CUE: GLOBAL METADATA ===
 ALBUM=""
 DATE=""
@@ -203,19 +185,44 @@ else
   YEAR="YYYY"
 fi
 
-# === PARSE CUE: PER-TRACK METADATA (titles, performers, INDEX 01 timestamps) ===
+# === PARSE CUE: PER-TRACK METADATA + FILE ASSOCIATIONS ===
+# TRACK_FILE_KEY[t]        = basename of the FILE directive that owns this track
+# TRACK_IS_LAST_IN_FILE[t] = 1 if this track is the last one in its FILE block (no -t on extract)
 declare -a TITLES=()
 declare -a PERFORMERS=()
 declare -a INDEXES=()
+declare -a TRACK_FILE_KEY=()
+declare -a TRACK_IS_LAST_IN_FILE=()
+# Ordered list of unique FILE basenames as they appear in the CUE (for pre-convert ordering)
+declare -a CUE_FILE_KEYS=()
 TOTAL_TRACKS=0
 
+_current_file_key=""
 current_track=0
 in_track=0
+_prev_track_in_file=0  # track number of the last track seen for the current FILE block
 while IFS= read -r line; do
-  if [[ "$line" =~ ^[[:space:]]*TRACK[[:space:]]+([0-9]+) ]]; then
+  if [[ "$line" =~ ^[[:space:]]*FILE[[:space:]]+ ]]; then
+    # Mark the previous track (last in its file block) before switching files
+    if ((_prev_track_in_file > 0)); then
+      TRACK_IS_LAST_IN_FILE[$_prev_track_in_file]=1
+    fi
+    _current_file_key="$(printf '%s' "$line" | sed -n 's/.*FILE[[:space:]]*"\(.*\)".*/\1/p')"
+    # Record unique file keys in order
+    local_found=0
+    for _k in "${CUE_FILE_KEYS[@]+"${CUE_FILE_KEYS[@]}"}"; do
+      [[ "$_k" == "$_current_file_key" ]] && { local_found=1; break; }
+    done
+    ((local_found == 0)) && CUE_FILE_KEYS+=("$_current_file_key")
+    in_track=0
+    _prev_track_in_file=0
+  elif [[ "$line" =~ ^[[:space:]]*TRACK[[:space:]]+([0-9]+) ]]; then
     current_track="$((10#${BASH_REMATCH[1]}))"
     in_track=1
     TOTAL_TRACKS=$((current_track > TOTAL_TRACKS ? current_track : TOTAL_TRACKS))
+    TRACK_FILE_KEY[$current_track]="${_current_file_key}"
+    TRACK_IS_LAST_IN_FILE[$current_track]=0
+    _prev_track_in_file=$current_track
   elif ((in_track == 1)) && [[ "$line" =~ ^[[:space:]]*TITLE[[:space:]] ]]; then
     title=$(printf '%s' "$line" | sed -n 's/.*TITLE[[:space:]]*"\(.*\)"/\1/p')
     TITLES[$current_track]="$title"
@@ -226,10 +233,48 @@ while IFS= read -r line; do
     INDEXES[$current_track]="${BASH_REMATCH[1]}"
   fi
 done <"$CUE_FILE"
+# Mark the very last track as last-in-file
+if ((_prev_track_in_file > 0)); then
+  TRACK_IS_LAST_IN_FILE[$_prev_track_in_file]=1
+fi
 
 if ((TOTAL_TRACKS == 0)); then
   echo "Error: no TRACK entries found in '$CUE_FILE'." >&2
   exit 1
+fi
+
+if ((${#CUE_FILE_KEYS[@]} == 0)); then
+  echo "Error: no FILE directives found in '$CUE_FILE'." >&2
+  exit 1
+fi
+
+# === RESOLVE + VALIDATE SOURCE AUDIO FILES ===
+# Map each CUE FILE key (basename) to its full path on disk.
+declare -A CUE_FILE_PATHS=()
+for _key in "${CUE_FILE_KEYS[@]}"; do
+  # Try exact basename match first, then case-insensitive search
+  _candidate="$SOURCE_DIR/$_key"
+  if [[ ! -f "$_candidate" ]]; then
+    _candidate="$(find "$SOURCE_DIR" -maxdepth 1 -iname "$_key" | head -n 1 || true)"
+  fi
+  if [[ -z "$_candidate" || ! -f "$_candidate" ]]; then
+    echo "Error: audio file referenced in CUE not found: '$_key' (looked in '$SOURCE_DIR')" >&2
+    exit 1
+  fi
+  CUE_FILE_PATHS["$_key"]="$_candidate"
+done
+
+# AUDIO_SOURCE = first file referenced (used for ext detection, probe, upscale check)
+AUDIO_SOURCE="${CUE_FILE_PATHS[${CUE_FILE_KEYS[0]}]}"
+AUDIO_EXT="${AUDIO_SOURCE##*.}"
+AUDIO_EXT_LC="${AUDIO_EXT,,}"
+
+# Validate all files exist (already done above) and warn if multiple files present
+if ((${#CUE_FILE_KEYS[@]} > 1)); then
+  printf 'Multi-file CUE sheet: %s source file(s) referenced.\n' "${#CUE_FILE_KEYS[@]}"
+  for _k in "${CUE_FILE_KEYS[@]}"; do
+    printf '  %s\n' "${CUE_FILE_PATHS[$_k]}"
+  done
 fi
 
 # === CUE INDEX → SECONDS ===
@@ -294,56 +339,70 @@ TARGET_SR_HZ="$PARSED_SR_HZ"
 TARGET_BITS="$PARSED_BITS"
 
 # === PRE-CONVERT OPAQUE SOURCES ===
-# sox cannot read WV/APE/DSF/DFF — convert to temp WAV first.
-WORK_SOURCE="$AUDIO_SOURCE"
+# sox cannot read WV/APE/DSF/DFF — convert each unique source file to a temp WAV.
+# WORK_SOURCE_MAP: maps CUE FILE key → work path (original or converted WAV)
+declare -A WORK_SOURCE_MAP=()
 NEEDS_PRECONVERT=0
 case "$AUDIO_EXT_LC" in
-wv | ape) NEEDS_PRECONVERT=1 ;;
-dsf | dff) NEEDS_PRECONVERT=1 ;;
+wv | ape | dsf | dff) NEEDS_PRECONVERT=1 ;;
 esac
 
-if ((NEEDS_PRECONVERT == 1)); then
-  echo "Pre-converting source to temporary PCM WAV..."
-  WORK_SOURCE="$_TMPDIR/source_pcm.wav"
+_dsd_target_sr=0
+_dsd_target_bits=0
+
+for _key in "${CUE_FILE_KEYS[@]}"; do
+  _src="${CUE_FILE_PATHS[$_key]}"
+  if ((NEEDS_PRECONVERT == 0)); then
+    WORK_SOURCE_MAP["$_key"]="$_src"
+    continue
+  fi
+
+  _safe_key="$(printf '%s' "$_key" | tr -cs 'a-zA-Z0-9._-' '_')"
+  _work_wav="$_TMPDIR/preconv_${_safe_key}.wav"
+  echo "Pre-converting '$(basename "$_src")' to temporary PCM WAV..."
 
   if [[ "$AUDIO_EXT_LC" == "dsf" || "$AUDIO_EXT_LC" == "dff" ]]; then
-    # DSD: determine max PCM SR via audio_dsd_max_pcm_profile
-    src_sr_hz="$(audio_probe_sample_rate_hz "$AUDIO_SOURCE")"
-    dsd_profile="$(audio_dsd_max_pcm_profile "$src_sr_hz")"
-    dsd_target_sr="${dsd_profile%%|*}"
-    dsd_target_bits_rest="${dsd_profile#*|}"
-    dsd_target_bits="${dsd_target_bits_rest%%|*}"
-    # Use DSD-derived SR as both pre-convert SR and encode target (cap if lower than --profile)
-    if ((dsd_target_sr < TARGET_SR_HZ)); then
-      TARGET_SR_HZ="$dsd_target_sr"
-    fi
-    if ((dsd_target_bits < TARGET_BITS)); then
-      TARGET_BITS="$dsd_target_bits"
+    if ((_dsd_target_sr == 0)); then
+      _src_sr_hz="$(audio_probe_sample_rate_hz "$_src")"
+      _dsd_profile="$(audio_dsd_max_pcm_profile "$_src_sr_hz")"
+      _dsd_target_sr="${_dsd_profile%%|*}"
+      _dsd_target_bits_rest="${_dsd_profile#*|}"
+      _dsd_target_bits="${_dsd_target_bits_rest%%|*}"
+      if ((_dsd_target_sr < TARGET_SR_HZ)); then
+        TARGET_SR_HZ="$_dsd_target_sr"
+      fi
+      if ((_dsd_target_bits < TARGET_BITS)); then
+        TARGET_BITS="$_dsd_target_bits"
+      fi
     fi
     ffmpeg -hide_banner -loglevel error -nostdin -y \
-      -i "$AUDIO_SOURCE" \
-      -vn -c:a pcm_s32 -ar "$dsd_target_sr" \
-      "$WORK_SOURCE" </dev/null
+      -i "$_src" \
+      -vn -c:a pcm_s32 -ar "$_dsd_target_sr" \
+      "$_work_wav" </dev/null
   else
-    wvape_bits="$(ffprobe -v error -select_streams a:0 \
+    _wvape_bits="$(ffprobe -v error -select_streams a:0 \
       -show_entries stream=bits_per_raw_sample -of csv=p=0 \
-      "$AUDIO_SOURCE" </dev/null 2>/dev/null || true)"
-    wvape_bits="${wvape_bits%%,*}"
-    wvape_bits="$(printf '%s' "$wvape_bits" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    if [[ ! "$wvape_bits" =~ ^[0-9]+$ ]] || ((wvape_bits <= 0)); then
-      wvape_bits=24
+      "$_src" </dev/null 2>/dev/null || true)"
+    _wvape_bits="${_wvape_bits%%,*}"
+    _wvape_bits="$(printf '%s' "$_wvape_bits" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ ! "$_wvape_bits" =~ ^[0-9]+$ ]] || ((_wvape_bits <= 0)); then
+      _wvape_bits=24
     fi
-    if   ((wvape_bits <= 16)); then preconv_codec="pcm_s16le"
-    elif ((wvape_bits <= 24)); then preconv_codec="pcm_s24le"
-    else                           preconv_codec="pcm_s32le"
+    if   ((_wvape_bits <= 16)); then _preconv_codec="pcm_s16le"
+    elif ((_wvape_bits <= 24)); then _preconv_codec="pcm_s24le"
+    else                             _preconv_codec="pcm_s32le"
     fi
     ffmpeg -hide_banner -loglevel error -nostdin -y \
-      -i "$AUDIO_SOURCE" \
-      -vn -c:a "$preconv_codec" \
-      "$WORK_SOURCE" </dev/null
+      -i "$_src" \
+      -vn -c:a "$_preconv_codec" \
+      "$_work_wav" </dev/null
   fi
-  echo "   Pre-convert complete: $(basename "$WORK_SOURCE")"
-fi
+  echo "   Pre-convert complete: $(basename "$_work_wav")"
+  WORK_SOURCE_MAP["$_key"]="$_work_wav"
+done
+
+# WORK_SOURCE = work path of the first file (used for probe + upscale check)
+WORK_SOURCE="${WORK_SOURCE_MAP[${CUE_FILE_KEYS[0]}]}"
 
 # === PROBE SOURCE SR AND BIT DEPTH (cap target to source) ===
 SRC_SR_HZ="$(audio_probe_sample_rate_hz "$WORK_SOURCE")"
@@ -385,7 +444,7 @@ if ((CHECK_UPSCALE == 1)); then
   ffmpeg -hide_banner -loglevel error -nostdin -y \
     -ss "$_excerpt_start" -t 60 \
     -i "$WORK_SOURCE" \
-    -ac 1 -c:a pcm_s24le \
+    -ac 1 -ar "$TARGET_SR_HZ" -c:a pcm_s24le \
     "$_excerpt_wav" </dev/null
 
   _dsd_hint=0
@@ -443,6 +502,9 @@ fi
 printf '\n'
 printf '%sCUE file  :%s %s\n' "$DIM" "$RESET" "$CUE_FILE"
 printf '%sSource    :%s %s (%s)\n' "$DIM" "$RESET" "$(basename "$AUDIO_SOURCE")" "$AUDIO_EXT_LC"
+if ((${#CUE_FILE_KEYS[@]} > 1)); then
+  printf '%sFiles     :%s %s file(s) in CUE sheet\n' "$DIM" "$RESET" "${#CUE_FILE_KEYS[@]}"
+fi
 printf '%sSource SR :%s %s Hz / %s-bit\n' "$DIM" "$RESET" "$SRC_SR_HZ" "$SRC_BITS"
 printf '%sTarget    :%s %s%s (FLAC compression level 8)%s\n' "$DIM" "$RESET" "$CYAN" "$TARGET_PROFILE_LABEL" "$RESET"
 if ((CHECK_UPSCALE == 1)); then
@@ -512,6 +574,10 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
   out_name="$(printf '%02d' "$t") $(sanitize_path_component "$title").flac"
   out_path="$OUTPUT_DIR/$out_name"
 
+  # Resolve work source for this track's file
+  _track_key="${TRACK_FILE_KEY[$t]:-${CUE_FILE_KEYS[0]}}"
+  _track_work_src="${WORK_SOURCE_MAP[$_track_key]}"
+
   printf '\n%s▶ [%02d/%02d] ENCODING%s %s\n' "$GREEN" "$t" "$TOTAL_TRACKS" "$RESET" "$out_name"
   printf '     %sTitle    :%s %s\n' "$DIM" "$RESET" "$title"
   printf '     %sArtist   :%s %s\n' "$DIM" "$RESET" "$artist"
@@ -525,12 +591,13 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
     printf '     %sBoost    :%s %sskipped%s\n' "$DIM" "$RESET" "$YELLOW" "$RESET"
   fi
 
-  # Duration: distance to next track's start, or EOF for last track
+  # Duration: distance to next track within the same file, or EOF for the last track in the file.
   # NOTE: -ss/-t are placed AFTER -i (output-side seek) to avoid the ffmpeg atrim
   # nanosecond overflow bug that triggers "Value out of range" errors on large seek
   # positions (tracks late in long albums at high sample rates).
   split_args=(-ss "$start_sec")
-  if ((t < TOTAL_TRACKS)); then
+  _is_last_in_file="${TRACK_IS_LAST_IN_FILE[$t]:-0}"
+  if ((_is_last_in_file == 0)); then
     next_start="${TRACK_START_SEC[$((t + 1))]}"
     duration="$(awk -v e="$next_start" -v s="$start_sec" 'BEGIN{printf "%.6f", e-s}')"
     split_args+=(-t "$duration")
@@ -540,7 +607,7 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
 
   # Extract segment via ffmpeg (output-side seek: -i first, then -ss/-t)
   if ! ffmpeg -hide_banner -loglevel error -nostdin -y \
-    -i "$WORK_SOURCE" \
+    -i "$_track_work_src" \
     -vn "${split_args[@]}" -c:a "$SEG_PCM_CODEC" \
     "$tmp_seg" </dev/null; then
     printf '%s❌ Segment extract failed for track %s%s\n' "$RED" "$t" "$RESET" >&2

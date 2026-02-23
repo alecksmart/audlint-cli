@@ -34,8 +34,6 @@ source "$BOOTSTRAP_DIR/../lib/sh/table.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ffprobe.sh"
-# shellcheck source=/dev/null
-source "$BOOTSTRAP_DIR/../lib/sh/quality_gate.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 ENV_PYTHON_BIN_OVERRIDE="${PYTHON_BIN:-}"
@@ -746,9 +744,7 @@ analyze_file() {
   local Q_UPS="N/A"
   local Q_REC="N/A"
   local Q_SPEC="N/A"
-  local quality_available=false
   if QUALITY_OUT=$("$PYTHON_BIN" "$PY_HELPER" --quality "$in" "--genre-profile=${ALBUM_GENRE_PROFILE}" </dev/null 2>/dev/null); then
-    quality_available=true
     Q_SCORE=$(kv_get "QUALITY_SCORE" "$QUALITY_OUT")
     Q_GRADE=$(kv_get "MASTERING_GRADE" "$QUALITY_OUT")
     Q_DYN=$(kv_get "DYNAMIC_RANGE_SCORE" "$QUALITY_OUT")
@@ -771,11 +767,6 @@ analyze_file() {
     REC="LOSSY"
     REASON="Lossy codec (${codec_name:-unknown})"
     Q_REC="Replace with Lossless Rip"
-  fi
-
-  # MX3 — mastering guard (shared lib).
-  if [[ "$quality_available" == true ]]; then
-    REC="$(apply_mastering_guard "$REC" "$Q_GRADE" "$Q_REC" "")"
   fi
 
   local bit_label=""
@@ -938,9 +929,6 @@ render_album_spectrogram() {
     q_grade="${BATCH_Q_GRADE[0]:-N/A}"
     q_rec="${BATCH_Q_REC_FINAL[0]:-${BATCH_Q_REC_BASE[0]:-N/A}}"
   fi
-
-  # MX3 — mastering guard for album report.
-  rec="$(apply_mastering_guard "$rec" "$q_grade" "$q_rec" "")"
 
   local bit_label=""
   if [[ -n "$src_bps" && "$src_bps" != "N/A" ]]; then

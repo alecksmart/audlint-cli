@@ -37,8 +37,6 @@ source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/ffprobe.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/sqlite.sh"
-# shellcheck source=/dev/null
-source "$BOOTSTRAP_DIR/../lib/sh/quality_gate.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
@@ -634,33 +632,6 @@ merged_spectral_recommendation() {
   rec="$(kv_get "RECOMMEND" "$eval_out")"
   [[ -n "$rec" ]] || return 1
 
-  # ── Pass 2: if recommendation is a downgrade, re-analyse at target SR ────
-  # Extract the recommended target sample rate from "… Store as <sr>/<bits>".
-  if [[ "$rec" == *"Store as "* ]]; then
-    local target_profile target_sr_k target_sr_hz
-    target_profile="${rec##*Store as }"
-    target_profile="${target_profile%%[[:space:]]*}"   # e.g. "96/24"
-    target_sr_k="${target_profile%%/*}"                # e.g. "96"
-    # Convert kHz string (may be decimal like "44.1") to Hz integer.
-    target_sr_hz="$(awk -v k="$target_sr_k" 'BEGIN{printf "%d", k * 1000 + 0.5}')"
-
-    if [[ "$target_sr_hz" =~ ^[0-9]+$ ]] && (( target_sr_hz > 0 && target_sr_hz < sr )); then
-      # Genuine downgrade: second pass at the recommended target SR.
-      local excerpt2
-      excerpt2="$tmpdir/merged-excerpt-p2.wav"
-      if ffmpeg -y -hide_banner -loglevel error -nostdin \
-          -ss "$start_sec" -t 60 -i "$merged_file" \
-          -ac 1 -ar "$target_sr_hz" -c:a pcm_s24le "$excerpt2" </dev/null 2>/dev/null; then
-        local eval_out2 rec2
-        eval_out2="$("$PYTHON_BIN" "$PY_HELPER" "$excerpt2" "$sr" "0" \
-                     </dev/null 2>/dev/null || true)"
-        rec2="$(kv_get "RECOMMEND" "$eval_out2")"
-        # Use the second-pass result if it is a valid recommendation.
-        [[ -n "$rec2" ]] && rec="$rec2"
-      fi
-    fi
-  fi
-
   printf '%s\n' "$rec"
 }
 
@@ -770,8 +741,6 @@ scan_album_dir_merged() {
     rec="Replace with Lossless Rip"
     [[ -n "$recode_rec" ]] || recode_rec="Lossy source detected -> replace with lossless rip"
   fi
-
-  recode_rec="$(apply_mastering_guard "$recode_rec" "$grade" "$rec" "$source_quality")"
 
   local needs_recode=0
   if recode_is_actionable "$recode_rec"; then
@@ -1249,36 +1218,6 @@ process_scan_roadmap_item() {
 
   if source_policy_force_upscale files "$q_curr"; then
     q_ups="1"
-  fi
-
-  # MX2: Cascade downgrade guard.
-  # If this album was previously recoded (last_recoded_at > 0) and the new
-  # recommendation is to downgrade the sample rate further, suppress it.
-  # A file already brought down from hi-res should not be automatically
-  # downgraded again — that's a sign of a spectral confidence loop, not a
-  # genuine quality problem.
-  if ((q_needs_recode == 1)) && [[ "$q_recode" == *"Store as "* ]]; then
-    local last_recoded_at_db
-    last_recoded_at_db="$(sqlite3 -noheader "$DB_PATH" \
-      "SELECT COALESCE(last_recoded_at, 0) FROM album_quality
-       WHERE artist_lc='$(sql_escape "$(norm_lc "$artist")")' AND album_lc='$(sql_escape "$(norm_lc "$album")")' AND year_int='$(sql_escape "$year")'
-       LIMIT 1;" 2>/dev/null || echo 0)"
-    [[ "$last_recoded_at_db" =~ ^[0-9]+$ ]] || last_recoded_at_db=0
-
-    if ((last_recoded_at_db > 0)); then
-      local recode_target_sr current_sr
-      recode_target_sr="${q_recode##*Store as }"
-      recode_target_sr="${recode_target_sr%%/*}"
-      recode_target_sr="${recode_target_sr%%[[:space:]]*}"
-      current_sr="${q_curr%%/*}"
-      # Suppress if target sample rate is lower than current (downgrade on already-recoded album).
-      if [[ "$recode_target_sr" =~ ^[0-9.]+$ && "$current_sr" =~ ^[0-9.]+$ ]]; then
-        if awk -v t="$recode_target_sr" -v c="$current_sr" 'BEGIN{exit !(t < c)}'; then
-          q_recode="Keep as-is — cascade-downgrade suppressed (album already recoded from higher SR)"
-          q_needs_recode=0
-        fi
-      fi
-    fi
   fi
 
   needs_replace=0

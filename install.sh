@@ -256,6 +256,7 @@ MEDIA_PLAYER_PATH="$MEDIA_PLAYER_PATH"
 LASTFM_API_KEY="$LASTFM_API_KEY"
 QTY_SEEK_MAX_ALBUMS=$QTY_SEEK_MAX_ALBUMS
 QTY_SEEK_LOG="$QTY_SEEK_LOG"
+CUE2FLAC_OUTPUT_DIR="$CUE2FLAC_OUTPUT_DIR"
 EOF
 }
 
@@ -265,7 +266,7 @@ sanity_check() {
 
 	# Required system binaries
 	local bin
-	for bin in sqlite3 ffmpeg ffprobe rsync ssh; do
+	for bin in sqlite3 ffmpeg ffprobe sox metaflac rsync ssh; do
 		if command -v "$bin" >/dev/null 2>&1; then
 			printf 'OK      %s (%s)\n' "$bin" "$(command -v "$bin")"
 		else
@@ -286,7 +287,7 @@ sanity_check() {
 
 	# Optional tag-writer tools
 	printf '\n'
-	for bin in sox vorbiscomment metaflac AtomicParsley eyeD3 wvtag; do
+	for bin in vorbiscomment AtomicParsley eyeD3 wvtag; do
 		if command -v "$bin" >/dev/null 2>&1; then
 			printf 'OK      %s (optional)\n' "$bin"
 		else
@@ -361,6 +362,7 @@ prompt_optional "LASTFM_API_KEY" LASTFM_API_KEY
 
 prompt_until_valid_label "QTY_SEEK_MAX_ALBUMS" QTY_SEEK_MAX_ALBUMS validate_int_ge_1 "QTY_SEEK_MAX_ALBUMS"
 prompt_until_valid "QTY_SEEK_LOG path" QTY_SEEK_LOG validate_log_path
+prompt_until_valid_label "CUE2FLAC_OUTPUT_DIR (output root for cue2flac splits)" CUE2FLAC_OUTPUT_DIR validate_existing_dir "CUE2FLAC_OUTPUT_DIR"
 
 sanity_check
 

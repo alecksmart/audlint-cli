@@ -114,6 +114,39 @@ class Any2FlacCliSmokeTests(unittest.TestCase):
                 """
             ),
         )
+        # sox stub: write an empty output file (second positional arg after skipping options).
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                f"""\
+                #!/bin/bash
+                printf '%s\\n' "$*" >> "{self.tmpdir / 'sox.log'}"
+                args=("$@")
+                positionals=()
+                i=0
+                while (( i < ${{#args[@]}} )); do
+                  case "${{args[$i]}}" in
+                    -b|-r|-c|-e|-t|-L|-R|-C|--compression) (( i += 2 )) || true ;;
+                    -*) (( i++ )) || true ;;
+                    *) positionals+=("${{args[$i]}}"); (( i++ )) || true ;;
+                  esac
+                done
+                out="${{positionals[1]:-}}"
+                [[ -n "$out" ]] && {{ mkdir -p "$(dirname "$out")"; : > "$out"; }}
+                exit 0
+                """
+            ),
+        )
+        # metaflac stub: succeed silently.
+        _write_exec(
+            self.bin_dir / "metaflac",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                exit 0
+                """
+            ),
+        )
 
     def _run(self, args, cwd=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
@@ -181,11 +214,11 @@ class Any2FlacCliSmokeTests(unittest.TestCase):
         self.assertTrue((self.album_dir / "01-hr.flac").exists())
         self.assertTrue(src_flac.exists())
 
-        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
-        self.assertIn("-compression_level 8", ffmpeg_log)
-        self.assertIn("-f flac", ffmpeg_log)
-        self.assertIn("-ar 48000", ffmpeg_log)
-        self.assertIn("-bits_per_raw_sample 24", ffmpeg_log)
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("rate", sox_log)
+        self.assertIn("48k", sox_log)
+        self.assertIn("dither", sox_log)
+        self.assertIn("-b 24", sox_log)
 
     def test_dsd_source_allows_24bit_target_when_probe_reports_1bit(self) -> None:
         src_dsf = self.album_dir / "01-source.dsf"
@@ -198,9 +231,9 @@ class Any2FlacCliSmokeTests(unittest.TestCase):
         self.assertFalse(src_dsf.exists())
         self.assertTrue((self.album_dir / "01-source.flac").exists())
 
-        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
-        self.assertIn("-ar 176400", ffmpeg_log)
-        self.assertIn("-bits_per_raw_sample 24", ffmpeg_log)
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("176400", sox_log)
+        self.assertIn("-b 24", sox_log)
 
     def test_with_boost_applies_single_pass_volume_filter(self) -> None:
         (self.album_dir / "01-hr.wav").write_text("", encoding="utf-8")
@@ -211,7 +244,8 @@ class Any2FlacCliSmokeTests(unittest.TestCase):
 
         ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
         self.assertIn("loudnorm=I=-23:TP=-1.5:LRA=11:print_format=summary", ffmpeg_log)
-        self.assertIn("-af volume=", ffmpeg_log)
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("gain", sox_log)
 
     def test_with_boost_plan_only_reuses_true_peak_cache(self) -> None:
         (self.album_dir / "01-hr.wav").write_text("", encoding="utf-8")

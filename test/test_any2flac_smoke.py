@@ -79,6 +79,42 @@ class Any2FlacSmokeTests(unittest.TestCase):
                 """
             ),
         )
+        # sox stub: write an empty output file (last positional arg before effects chain).
+        # The effects chain args (rate, dither, gain, ...) follow the output path,
+        # so the output is the first non-option arg after the input.
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                f"""\
+                #!/opt/homebrew/bin/bash
+                printf '%s\\n' "$*" >> "{self.tmpdir / 'sox.log'}"
+                # Find output: positional args, skipping -b <val> and input (first positional).
+                args=("$@")
+                positionals=()
+                i=0
+                while (( i < ${{#args[@]}} )); do
+                  case "${{args[$i]}}" in
+                    -b|-r|-c|-e|-t|-L|-R|-C|--compression) (( i += 2 )) || true ;;
+                    -*) (( i++ )) || true ;;
+                    *) positionals+=("${{args[$i]}}"); (( i++ )) || true ;;
+                  esac
+                done
+                out="${{positionals[1]:-}}"
+                [[ -n "$out" ]] && {{ mkdir -p "$(dirname "$out")"; : > "$out"; }}
+                exit 0
+                """
+            ),
+        )
+        # metaflac stub: succeed silently for tag export/import operations.
+        _write_exec(
+            self.bin_dir / "metaflac",
+            textwrap.dedent(
+                """\
+                #!/opt/homebrew/bin/bash
+                exit 0
+                """
+            ),
+        )
 
     def _run(self, args) -> subprocess.CompletedProcess:
         env = os.environ.copy()

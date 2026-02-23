@@ -1155,28 +1155,80 @@ analyze_album_quality_merged() {
     return 0
   fi
   log "Album-wide quality: merged stream ready."
-
-  local quality_out=""
-  if quality_out=$("$PYTHON_BIN" "$PY_HELPER" --quality "$merged_file" "--genre-profile=${ALBUM_GENRE_PROFILE}" </dev/null 2>/dev/null); then
-    ALBUM_Q_SCORE="$(kv_get "QUALITY_SCORE" "$quality_out")"
-    ALBUM_Q_GRADE="$(kv_get "MASTERING_GRADE" "$quality_out")"
-    ALBUM_Q_DYN="$(kv_get "DYNAMIC_RANGE_SCORE" "$quality_out")"
-    ALBUM_Q_LRA="$(kv_get "LRA_LU" "$quality_out")"
-    ALBUM_Q_PEAK="$(kv_get "TRUE_PEAK_DBFS" "$quality_out")"
-    ALBUM_Q_CLIP="$(kv_get "LIKELY_CLIPPED_DISTORTED" "$quality_out")"
-    ALBUM_Q_UPS="$(kv_get "IS_UPSCALED" "$quality_out")"
-    ALBUM_Q_REC="$(kv_get "RECOMMENDATION" "$quality_out")"
-    if [[ "$ALBUM_Q_UPS" == "1" ]]; then
-      ALBUM_Q_UPS="YES"
-    elif [[ "$ALBUM_Q_UPS" == "0" ]]; then
-      ALBUM_Q_UPS="NO"
-    fi
-    ALBUM_Q_AVAILABLE=true
-    log "Album-wide merged quality: score=${ALBUM_Q_SCORE} grade=${ALBUM_Q_GRADE} dyn=${ALBUM_Q_DYN} upscaled=${ALBUM_Q_UPS} peak=${ALBUM_Q_PEAK} clip=${ALBUM_Q_CLIP} rec=${ALBUM_Q_REC}"
-  else
-    log "Album-wide merged quality unavailable; continuing with per-track results."
-  fi
   render_album_spectrogram "$merged_file" "$TARGET" "$ALBUM_Q_TRACKS" || true
+
+  local -a grade_ranks=()
+  local grade
+  for grade in "${BATCH_Q_GRADE[@]}"; do
+    case "$grade" in
+    F) grade_ranks+=(0) ;;
+    C) grade_ranks+=(1) ;;
+    B) grade_ranks+=(2) ;;
+    A) grade_ranks+=(3) ;;
+    S) grade_ranks+=(4) ;;
+    *) grade_ranks+=(0) ;;
+    esac
+  done
+
+  local -a sorted_ranks=()
+  local rank
+  while IFS= read -r rank; do
+    sorted_ranks+=("$rank")
+  done < <(printf '%s\n' "${grade_ranks[@]}" | sort -n)
+
+  local percentile_rank=0
+  if ((${#sorted_ranks[@]} > 0)); then
+    local percentile_idx=$(( ${#sorted_ranks[@]} * 25 / 100 ))
+    percentile_rank="${sorted_ranks[$percentile_idx]}"
+  fi
+
+  case "$percentile_rank" in
+  0) ALBUM_Q_GRADE="F" ;;
+  1) ALBUM_Q_GRADE="C" ;;
+  2) ALBUM_Q_GRADE="B" ;;
+  3) ALBUM_Q_GRADE="A" ;;
+  4) ALBUM_Q_GRADE="S" ;;
+  *) ALBUM_Q_GRADE="F" ;;
+  esac
+
+  local score_sum="0"
+  local score_count=0
+  local score
+  for score in "${BATCH_Q_SCORE[@]}"; do
+    if is_numeric "$score"; then
+      score_sum="$(awk -v a="$score_sum" -v b="$score" 'BEGIN { printf "%.6f", a + b }')"
+      ((score_count += 1))
+    fi
+  done
+  if ((score_count > 0)); then
+    ALBUM_Q_SCORE="$(awk -v sum="$score_sum" -v n="$score_count" 'BEGIN { printf "%.1f", sum / n }')"
+  else
+    ALBUM_Q_SCORE="N/A"
+  fi
+
+  ALBUM_Q_UPS="NO"
+  local ups
+  for ups in "${BATCH_Q_UPS[@]}"; do
+    if [[ "$ups" == "YES" ]]; then
+      ALBUM_Q_UPS="YES"
+      break
+    fi
+  done
+
+  case "$ALBUM_Q_GRADE" in
+  F) ALBUM_Q_REC="Trash" ;;
+  C) ALBUM_Q_REC="Replace with CD Rip" ;;
+  B | A | S) ALBUM_Q_REC="Keep" ;;
+  *) ALBUM_Q_REC="Keep" ;;
+  esac
+
+  ALBUM_Q_AVAILABLE=true
+  ALBUM_Q_DYN="N/A"
+  ALBUM_Q_LRA="N/A"
+  ALBUM_Q_PEAK="N/A"
+  ALBUM_Q_CLIP="N/A"
+
+  log "Album grade (per-track 25th-pct): grade=${ALBUM_Q_GRADE} score=${ALBUM_Q_SCORE} upscaled=${ALBUM_Q_UPS} rec=${ALBUM_Q_REC}"
   rm -rf "$tmpdir"
 }
 

@@ -1037,7 +1037,7 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
         proc = self._run(SPECTRE, ["--all", str(album)])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("ALBUM (MERGED 2 TRACKS)", proc.stdout)
-        self.assertIn("8.2", proc.stdout)
+        self.assertIn("6.1", proc.stdout)
 
     def test_qty_seek_help_and_bad_option(self) -> None:
         help_proc = self._run(QTY_SEEK, ["--help"])

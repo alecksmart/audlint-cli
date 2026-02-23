@@ -102,6 +102,27 @@ def estimate_fmax(freqs, spec, nyq_hz):
     fmax = float(freqs[idx].max()) if idx.size else 0.0
     return fmax, spec_db, noise_db
 
+def estimate_bw99(freqs, spec, nyq_hz, percentile=99.0):
+    """Return (bw99_hz, total_energy) — the frequency at which *percentile*% of
+    total spectral power lies below.
+
+    *spec* must be linear power (output of band_energy_spectrum / aggregate_spectrum).
+    Do NOT pass spec_db here.
+
+    For vinyl/tape masters at 192kHz the analog-chain noise tail (45kHz+) carries
+    < 1% of total energy, so bw99 correctly ignores it and reports the true audio
+    bandwidth.  fmax (last bin above noise_floor+8dB) would see that tail and
+    over-estimate bandwidth, causing a cascade recode recommendation.
+    """
+    total = float(np.sum(spec))
+    if total <= 0.0:
+        return 0.0, 0.0
+    cumulative = np.cumsum(spec) / total
+    idx = int(np.searchsorted(cumulative, percentile / 100.0))
+    idx = min(idx, len(freqs) - 1)
+    return float(freqs[idx]), total
+
+
 def detect_dsd_noise(freqs, spec_db, nyq_hz, noise_db):
     # DSD noise typically starts its steep climb between 25kHz and 55kHz.
     # If Nyquist is too low, we can't detect it reliably.
@@ -195,6 +216,28 @@ def recommend_by_fmax(fmax_khz, is_44k_family):
     if fmax_khz < 55.0:
         return "Hi-Res (mid) → Store as 96/24" if not is_44k_family else "Hi-Res (mid) → Store as 88.2/24"
     return "Ultra Hi-Res → Store as 192/24" if not is_44k_family else "Ultra Hi-Res → Store as 176.4/24"
+
+
+def recommend_by_bw(bw99_khz, is_44k_family):
+    """Profile recommendation driven by BW99 bandwidth (preferred over fmax)."""
+    if bw99_khz < 20.0:
+        return "Standard Definition → Store as 48/24" if not is_44k_family else "Standard Definition → Store as 44.1/24"
+    if bw99_khz < 30.0:
+        return "Hi-Res (entry) → Store as 48/24" if not is_44k_family else "Hi-Res (entry) → Store as 44.1/24"
+    if bw99_khz < 55.0:
+        return "Hi-Res (mid) → Store as 96/24" if not is_44k_family else "Hi-Res (mid) → Store as 88.2/24"
+    return "Ultra Hi-Res → Store as 192/24" if not is_44k_family else "Ultra Hi-Res → Store as 176.4/24"
+
+
+def confidence_from_bw(bw99_khz):
+    """Confidence based on distance of bw99 from recommendation boundaries."""
+    boundaries = [20.0, 30.0, 55.0]
+    dist = min(abs(bw99_khz - b) for b in boundaries)
+    if dist < 2.0:
+        return "LOW"
+    if dist < 5.0:
+        return "MED"
+    return "HIGH"
 
 
 QUALITY_RULES = {
@@ -536,11 +579,14 @@ def analyze_audio_quality(
         x = pcm - np.mean(pcm)
         freqs, spec = aggregate_spectrum(x, sample_rate, nfft=16384, seg_dur=10.0, segs=4)
         fmax_hz, spec_db, noise_db = estimate_fmax(freqs, spec, nyq_hz)
+        bw99_hz, _ = estimate_bw99(freqs, spec, nyq_hz)
         thr_db = noise_db + 8.0
-        upsample_like, cutoff_hz, up_conf = detect_upsample(freqs, spec_db, nyq_hz, noise_db, thr_db, fmax_hz)
+        # Use bw99_hz as the bandwidth estimator for upsample detection and fake hi-res.
+        # bw99 is immune to low-energy noise tails that inflate fmax at high sample rates.
+        upsample_like, cutoff_hz, up_conf = detect_upsample(freqs, spec_db, nyq_hz, noise_db, thr_db, bw99_hz)
 
         if sample_rate >= 192000 and bit_depth >= 24:
-            fake_hires, fake_hires_details = _detect_fake_hires_192k(freqs, spec_db, nyq_hz, fmax_hz, noise_db)
+            fake_hires, fake_hires_details = _detect_fake_hires_192k(freqs, spec_db, nyq_hz, bw99_hz, noise_db)
     else:
         fake_hires_details = {"reason": "spectral_analysis_disabled"}
 
@@ -570,7 +616,7 @@ def analyze_audio_quality(
     recommendation = _recommendation(fake_hires=fake_hires, likely_clipped=likely_clipped, mastering_grade=mastering_grade)
     if use_spectral:
         spectrogram_summary = (
-            f"fmax={fmax_hz/1000.0:.1f}kHz, nyquist={nyq_hz/1000.0:.1f}kHz, "
+            f"bw99={bw99_hz/1000.0:.1f}kHz, fmax={fmax_hz/1000.0:.1f}kHz, nyquist={nyq_hz/1000.0:.1f}kHz, "
             f"upsample_like={int(upsample_like)} (conf={up_conf}, cutoff={cutoff_hz/1000.0:.1f}kHz)"
         )
     else:
@@ -611,6 +657,7 @@ def analyze_audio_quality(
                 "duration_s": spectral_seconds if use_spectral else 0.0,
                 "noise_floor_db": round(float(noise_db), 2) if use_spectral else None,
                 "threshold_db": round(float(thr_db), 2) if use_spectral else None,
+                "bw99_hz": round(float(bw99_hz), 2),
                 "fmax_hz": round(float(fmax_hz), 2),
                 "cutoff_hz": round(float(cutoff_hz), 2),
                 "upsample_confidence": up_conf,
@@ -622,7 +669,94 @@ def analyze_audio_quality(
         }
     return result
 
+def _selftest():
+    """Synthetic BW99 unit test.  Run with: spectre_eval.py --selftest"""
+    import math
+    PASS = "\033[32mPASS\033[0m"
+    FAIL = "\033[31mFAIL\033[0m"
+    all_ok = True
+
+    # --- Build a synthetic spectrum at 192kHz Nyquist (96kHz) ---
+    nfft = 16384
+    sr = 192000
+    nyq_hz = sr / 2.0
+    freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
+
+    def make_spec(content_khz, tail_start_khz, tail_energy_fraction):
+        """Content energy up to content_khz, noise tail from tail_start_khz."""
+        spec = np.zeros(len(freqs), dtype=np.float64)
+        content = (freqs <= content_khz * 1000.0)
+        spec[content] = 1.0
+        tail = freqs >= tail_start_khz * 1000.0
+        # tail_energy_fraction of total; so tail_val * tail_bins = fraction * total_bins (approx)
+        content_bins = int(np.sum(content))
+        tail_bins = int(np.sum(tail))
+        if content_bins > 0 and tail_bins > 0:
+            # tail_energy = fraction * content_energy  → tail_val = fraction * content_bins / tail_bins
+            tail_val = tail_energy_fraction * content_bins / tail_bins
+            spec[tail] = tail_val
+        return spec
+
+    def run_case(name, spec, expected_lt_khz=None, expected_gt_khz=None):
+        nonlocal all_ok
+        bw99, _ = estimate_bw99(freqs, spec, nyq_hz)
+        bw99_k = bw99 / 1000.0
+        ok = True
+        if expected_lt_khz is not None and bw99_k >= expected_lt_khz:
+            ok = False
+        if expected_gt_khz is not None and bw99_k <= expected_gt_khz:
+            ok = False
+        status = PASS if ok else FAIL
+        if not ok:
+            all_ok = False
+        print(f"  {status}  {name}: bw99={bw99_k:.1f} kHz", end="")
+        if expected_lt_khz is not None:
+            print(f"  (expected < {expected_lt_khz} kHz)", end="")
+        if expected_gt_khz:
+            print(f"  (expected > {expected_gt_khz} kHz)", end="")
+        print()
+
+    print("=== BW99 self-test ===")
+
+    # Case 1: Vinyl 192kHz — content up to 18kHz, noise tail 45kHz+ (0.5% of energy)
+    # BW99 must be < 22kHz → recommend 48/24 (correct), NOT 96/24 (fmax would say)
+    run_case("Vinyl 192kHz (noise tail 45kHz, 0.5%)",
+             make_spec(18, 45, 0.005),
+             expected_lt_khz=22.0)
+
+    # Case 2: Genuine 96/24 studio content — content up to 40kHz
+    # BW99 must be > 30kHz and < 55kHz → recommend 96/24
+    run_case("Genuine 96/24 (content to 40kHz)",
+             make_spec(40, 80, 0.0),
+             expected_lt_khz=55.0, expected_gt_khz=30.0)
+
+    # Case 3: Genuine 192/24 — content all the way to 70kHz
+    # BW99 must be > 55kHz → recommend 192/24
+    run_case("Genuine 192/24 (content to 70kHz)",
+             make_spec(70, 92, 0.0),
+             expected_gt_khz=55.0)
+
+    # Case 4: CD-quality 44.1kHz upsampled to 192kHz — content only to 20kHz
+    # BW99 must be < 22kHz → recommend 48/24
+    run_case("CD upsampled to 192kHz (content to 20kHz)",
+             make_spec(20, 24, 0.0),
+             expected_lt_khz=22.0)
+
+    # Case 5: Vinyl with 1% noise tail energy — still < 22kHz.
+    # Real vinyl tails are < 0.5% energy; 1% is the plausible worst case.
+    # (5%+ would be unrealistic and IS enough to shift bw99 into the tail by design.)
+    run_case("Vinyl 192kHz (tail=1% energy, worst case)",
+             make_spec(18, 30, 0.01),
+             expected_lt_khz=22.0)
+
+    print(f"{'All tests passed.' if all_ok else 'SOME TESTS FAILED.'}")
+    sys.exit(0 if all_ok else 1)
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--selftest":
+        _selftest()
+
     if len(sys.argv) >= 3 and sys.argv[1] == "--quality":
         file_path = sys.argv[2]
         debug = False
@@ -662,24 +796,27 @@ def main():
     nyq_hz = sr / 2.0
     freqs, spec = aggregate_spectrum(x, sr, nfft=16384, seg_dur=10.0, segs=4)
     fmax, spec_db, noise_db = estimate_fmax(freqs, spec, nyq_hz)
+    bw99_hz, _ = estimate_bw99(freqs, spec, nyq_hz)
     thr_db = noise_db + 8.0
     dsd_like, dsd_conf = detect_dsd_noise(freqs, spec_db, nyq_hz, noise_db)
     if dsd_hint == 1:
         dsd_like = True
         dsd_conf = "HIGH"
-    upsample_like, cutoff_hz, up_conf = detect_upsample(freqs, spec_db, nyq_hz, noise_db, thr_db, fmax)
+    # Use bw99_hz for upsample detection — immune to vinyl/tape noise-tail inflation.
+    upsample_like, cutoff_hz, up_conf = detect_upsample(freqs, spec_db, nyq_hz, noise_db, thr_db, bw99_hz)
 
     fmax_khz = fmax/1000.0
+    bw99_khz = bw99_hz/1000.0
     nyq_khz  = sr/2000.0
-    
+
     # 1. FAMILY DETECTION (44.1k vs 48k family)
     # DSD is fundamentally in the 44.1k family
     if orig_sr <= 0:
         orig_sr = sr
     is_44k_family = (orig_sr % 44100 == 0)
 
-    # 2. INTELLIGENT RECOMMENDATION
-    # FIX: Rely solely on spectral DSD detection, not sample rate assumptions
+    # 2. INTELLIGENT RECOMMENDATION — driven by BW99 (99th-percentile energy).
+    # BW99 is robust against analog-chain noise tails at high sample rates.
     reason = ""
     confidence = "MED"
     if dsd_like:
@@ -688,22 +825,22 @@ def main():
         reason = "DSD detected (noise-shaping tilt or DSD file hint)"
         confidence = dsd_conf
     else:
-        rec = recommend_by_fmax(fmax_khz, is_44k_family)
-        confidence = confidence_from_fmax(fmax_khz)
+        rec = recommend_by_bw(bw99_khz, is_44k_family)
+        confidence = confidence_from_bw(bw99_khz)
 
     # 3. TRANSCODE ERROR DETECTION
-    # FIX: Warn about ANY 48k-family file with DSD characteristics
     if not is_44k_family and dsd_like:
         rec = f"WARNING: Non-integer DSD transcode detected ({orig_sr/1000:.1f}k). RECODE from original DSF to 88.2/24."
         reason = "DSD detected in 48k-family file (non-integer transcode)"
     elif upsample_like and not dsd_like:
-        rec = f"Upsample detected → {recommend_by_fmax(cutoff_hz / 1000.0, is_44k_family)}"
+        rec = f"Upsample detected → {recommend_by_bw(cutoff_hz / 1000.0, is_44k_family)}"
         reason = f"Upsample pattern (cutoff≈{cutoff_hz/1000.0:.1f} kHz, HF near noise)"
         confidence = up_conf
     elif not reason:
-        reason = f"Bandwidth fmax≈{fmax_khz:.1f} kHz vs nyquist≈{nyq_khz:.1f} kHz"
+        reason = f"Bandwidth bw99≈{bw99_khz:.1f} kHz (fmax≈{fmax_khz:.1f} kHz) vs nyquist≈{nyq_khz:.1f} kHz"
 
-    print(f"SUMMARY=FMAX≈{fmax_khz:.1f}kHz, NYQ≈{nyq_khz:.1f}kHz, DSD={int(dsd_like)}, UPSAMPLE={int(upsample_like)}, CONF={confidence}")
+    print(f"SUMMARY=BW99≈{bw99_khz:.1f}kHz, FMAX≈{fmax_khz:.1f}kHz, NYQ≈{nyq_khz:.1f}kHz, DSD={int(dsd_like)}, UPSAMPLE={int(upsample_like)}, CONF={confidence}")
+    print(f"BW99_KHZ={bw99_khz:.2f}")
     print(f"FMAX_KHZ={fmax_khz:.2f}")
     print(f"NYQUIST_KHZ={nyq_khz:.2f}")
     print(f"DSD_LIKE={'1' if dsd_like else '0'}")

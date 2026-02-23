@@ -18,3 +18,4 @@ spectrogram-analyzer/audio_quality_batch_smoke.json
 .PLANNING
 .PLANNING/
 .PLANNING/**
+STABILIZATION_PLAN.md

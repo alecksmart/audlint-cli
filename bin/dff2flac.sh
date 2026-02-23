@@ -32,6 +32,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
+# shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
@@ -334,32 +336,21 @@ for idx in "${!dff_files[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    meta_args=()
-    filter_args=()
-    [[ -n "$title" ]] && meta_args+=(-metadata "title=$title")
-    [[ -n "$performer" ]] && meta_args+=(-metadata "artist=$performer")
-    [[ -n "$ALBUM" ]] && meta_args+=(-metadata "album=$ALBUM")
-    [[ -n "$DATE" ]] && meta_args+=(-metadata "date=$DATE")
-    meta_args+=(-metadata "track=$track_no")
+    enc_args=(--in "$dff_file" --out "$flac_file" --sr "$target_sr_hz" --bits "$target_bits" --src-is-flac 0)
     if ((APPLY_BOOST == 1)); then
-      filter_args=(-af "volume=${BOOST_GAIN_DB}dB")
+      enc_args+=(--gain "$BOOST_GAIN_DB")
     fi
+    # Inject explicit tags (DSD source has no Vorbis comments for metaflac to read).
+    [[ -n "$title" ]]     && enc_args+=(--tags "TITLE=$title")
+    [[ -n "$performer" ]] && enc_args+=(--tags "ARTIST=$performer")
+    [[ -n "$ALBUM" ]]     && enc_args+=(--tags "ALBUM=$ALBUM")
+    [[ -n "$DATE" ]]      && enc_args+=(--tags "DATE=$DATE")
+    enc_args+=(--tags "TRACKNUMBER=$track_no")
 
-    ffmpeg -nostdin -i "$dff_file" \
-      "${filter_args[@]}" \
-      -c:a flac \
-      -ar "$target_sr_hz" \
-      -sample_fmt s32 \
-      -bits_per_raw_sample "$target_bits" \
-      -compression_level 8 \
-      -vn \
-      "${meta_args[@]}" \
-      "$flac_file"
-
-    if [[ $? -ne 0 ]]; then
-      echo "❌ Failed to convert \"$dff_file\"" >&2
-    else
+    if encoder_to_flac "${enc_args[@]}"; then
       echo "✅ Saved: \"$flac_file\""
+    else
+      echo "❌ Failed to convert \"$dff_file\"" >&2
     fi
   fi
 done

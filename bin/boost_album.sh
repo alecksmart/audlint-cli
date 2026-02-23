@@ -27,6 +27,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
+# shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/table.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
@@ -279,26 +281,28 @@ for f in "${FILES[@]}"; do
       OUT_EXT="$EXT"
       [[ "$CODEC" == "alac" ]] && OUT_EXT="m4a"
 
-      STRICT_FLAG=""
       CALC_DEPTH=24
-      [[ "$BIT_DEPTH" -gt 24 ]] && { CALC_DEPTH=32; STRICT_FLAG="-strict experimental"; }
-
-      if [[ "$CODEC" == "alac" ]]; then
-          ENC_FLAGS="-c:a alac -sample_fmt s32p"
-      else
-          ENC_FLAGS="-c:a flac -bits_per_raw_sample $CALC_DEPTH -compression_level 8"
-      fi
+      [[ "$BIT_DEPTH" -gt 24 ]] && CALC_DEPTH=32
 
       BASENAME="${f%.*}"
       NEW_NAME="$BASENAME.$OUT_EXT"
       echo "$f|$NEW_NAME" >> "$MAP_FILE"
 
       mv "$f" "$BACKUP_DIR/"
-      # shellcheck disable=SC2086
-      ffmpeg -hide_banner $STRICT_FLAG -i "$BACKUP_DIR/$f" \
-        -af "volume=${POSSIBLE_GAIN}dB" $ENC_FLAGS \
-        -c:v copy -map_metadata 0 -metadata CUESHEET= "$NEW_NAME" -y </dev/null
-      if [[ $? -ne 0 ]]; then
+      if [[ "$CODEC" == "alac" ]]; then
+        # ALAC: sox cannot write ALAC; stay on ffmpeg path.
+        ffmpeg -hide_banner -strict experimental -i "$BACKUP_DIR/$f" \
+          -af "volume=${POSSIBLE_GAIN}dB" \
+          -c:a alac -sample_fmt s32p \
+          -c:v copy -map_metadata 0 -metadata CUESHEET= "$NEW_NAME" -y </dev/null
+        bake_rc=$?
+      else
+        encoder_bake_gain_flac \
+          --in "$BACKUP_DIR/$f" --out "$NEW_NAME" \
+          --bits "$CALC_DEPTH" --gain "$POSSIBLE_GAIN"
+        bake_rc=$?
+      fi
+      if [[ $bake_rc -ne 0 ]]; then
         echo "${RED}FAILED:${RESET} $f"
         echo "$f" >> "$FAIL_FILE"
         continue

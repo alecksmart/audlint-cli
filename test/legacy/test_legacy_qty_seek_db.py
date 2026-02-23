@@ -995,11 +995,10 @@ OUT
         self.assertEqual(row[1], "Keep as-is", f"32f→24 recode should be suppressed, got: {row[1]}")
         self.assertEqual(row[2], 0, "needs_recode must be 0 for a 32f no-op")
 
-    def test_scan_mode_suppresses_cascade_downgrade_for_recoded_album(self) -> None:
-        """An album that was previously recoded (last_recoded_at > 0) and is at
-        96/24 must NOT be flagged needs_recode=1 when the spectral recommendation
-        is 'Store as 48/24' — that is a cascade downgrade, not a genuine defect.
-        The recode recommendation should be suppressed to 'Keep as-is'."""
+    def test_scan_mode_keeps_downgrade_recode_after_previous_recode(self) -> None:
+        """A previous recode timestamp does not suppress a later downgrade recode
+        recommendation. If spectral analysis says 'Store as 48/24', needs_recode
+        remains actionable."""
         root = self.tmpdir / "library"
         album_dir = root / "Artist Name" / "2005 - Album Name"
         album_dir.mkdir(parents=True)
@@ -1044,8 +1043,8 @@ OUT
         finally:
             conn.close()
         self.assertIsNotNone(row)
-        self.assertEqual(row[1], 0, f"needs_recode must be 0 for cascade-downgrade, got recode_rec={row[0]!r}")
-        self.assertIn("cascade-downgrade suppressed", row[0], f"Expected cascade-downgrade message, got: {row[0]!r}")
+        self.assertEqual(row[1], 1, f"needs_recode must stay actionable, got recode_rec={row[0]!r}")
+        self.assertIn("Store as 48/24", row[0], f"Expected downgrade recode target, got: {row[0]!r}")
 
     def test_scan_mode_adjusts_recode_bit_depth_for_16bit_source(self) -> None:
         root = self.tmpdir / "library"

@@ -610,19 +610,28 @@ merged_spectral_recommendation() {
   local tmpdir="$2"
 
   local sr dur start_sec excerpt eval_out rec
-  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
-  dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
+  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate \
+        -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
+  dur="$(ffprobe -v error -show_entries format=duration \
+         -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
   sr="${sr%%,*}"
   dur="${dur%%,*}"
   [[ "$sr" =~ ^[0-9]+$ ]] || return 1
 
   start_sec="$(awk -v d="${dur:-0}" 'BEGIN{s=(d>60)?(d/2 - 30):0; printf "%.3f", s}')"
-  excerpt="$tmpdir/merged-excerpt.wav"
-  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$merged_file" -ac 1 -c:a pcm_s24le "$excerpt" </dev/null || return 1
+
+  # ── Pass 1: analyse at min(source_sr, 192 kHz) ───────────────────────────
+  local eval_sr_1
+  eval_sr_1=$(( sr > 192000 ? 192000 : sr ))
+  excerpt="$tmpdir/merged-excerpt-p1.wav"
+  ffmpeg -y -hide_banner -loglevel error -nostdin \
+    -ss "$start_sec" -t 60 -i "$merged_file" \
+    -ac 1 -ar "$eval_sr_1" -c:a pcm_s24le "$excerpt" </dev/null || return 1
 
   eval_out="$("$PYTHON_BIN" "$PY_HELPER" "$excerpt" "$sr" "0" </dev/null 2>/dev/null || true)"
   rec="$(kv_get "RECOMMEND" "$eval_out")"
   [[ -n "$rec" ]] || return 1
+
   printf '%s\n' "$rec"
 }
 
@@ -1209,36 +1218,6 @@ process_scan_roadmap_item() {
 
   if source_policy_force_upscale files "$q_curr"; then
     q_ups="1"
-  fi
-
-  # MX2: Cascade downgrade guard.
-  # If this album was previously recoded (last_recoded_at > 0) and the new
-  # recommendation is to downgrade the sample rate further, suppress it.
-  # A file already brought down from hi-res should not be automatically
-  # downgraded again — that's a sign of a spectral confidence loop, not a
-  # genuine quality problem.
-  if ((q_needs_recode == 1)) && [[ "$q_recode" == *"Store as "* ]]; then
-    local last_recoded_at_db
-    last_recoded_at_db="$(sqlite3 -noheader "$DB_PATH" \
-      "SELECT COALESCE(last_recoded_at, 0) FROM album_quality
-       WHERE artist_lc='$(sql_escape "$(norm_lc "$artist")")' AND album_lc='$(sql_escape "$(norm_lc "$album")")' AND year_int='$(sql_escape "$year")'
-       LIMIT 1;" 2>/dev/null || echo 0)"
-    [[ "$last_recoded_at_db" =~ ^[0-9]+$ ]] || last_recoded_at_db=0
-
-    if ((last_recoded_at_db > 0)); then
-      local recode_target_sr current_sr
-      recode_target_sr="${q_recode##*Store as }"
-      recode_target_sr="${recode_target_sr%%/*}"
-      recode_target_sr="${recode_target_sr%%[[:space:]]*}"
-      current_sr="${q_curr%%/*}"
-      # Suppress if target sample rate is lower than current (downgrade on already-recoded album).
-      if [[ "$recode_target_sr" =~ ^[0-9.]+$ && "$current_sr" =~ ^[0-9.]+$ ]]; then
-        if awk -v t="$recode_target_sr" -v c="$current_sr" 'BEGIN{exit !(t < c)}'; then
-          q_recode="Keep as-is — cascade-downgrade suppressed (album already recoded from higher SR)"
-          q_needs_recode=0
-        fi
-      fi
-    fi
   fi
 
   needs_replace=0

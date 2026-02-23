@@ -2121,8 +2121,6 @@ player_path="$4"
 log_file="${5:-}"
 title_row="${VIRTWIN_TITLE_ROW:-}"
 term_cols="${VIRTWIN_TERM_COLS:-0}"
-status_last_len=0
-
 log_note() {
   local msg="$1"
   [[ -n "$log_file" ]] || return 0
@@ -2163,16 +2161,9 @@ virtwin_status_set() {
     rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
     rendered+=$'\033[1;38;2;208;179;255m'"$part3"$'\033[0m'
   fi
-  local pad_len=0
-  if ((status_last_len > ${#text})); then
-    pad_len=$((status_last_len - ${#text}))
-  fi
-  printf '\033[s\033[%s;%sH%s' "$title_row" "$col" "$rendered"
-  if ((pad_len > 0)); then
-    printf '%*s' "$pad_len" ''
-  fi
-  printf '\033[u'
-  status_last_len=${#text}
+  # Right-aligned titles shift horizontally as text length changes; clear the
+  # whole row first to avoid stale glyphs from prior renders.
+  printf '\033[s\033[%s;1H\033[K\033[%s;%sH%s\033[u' "$title_row" "$title_row" "$col" "$rendered"
 }
 
 printf 'Media player path: %s\n\n' "$player_path"
@@ -2326,7 +2317,6 @@ lyrics_seek_bin="$2"
 success_file="$3"
 title_row="${VIRTWIN_TITLE_ROW:-}"
 term_cols="${VIRTWIN_TERM_COLS:-0}"
-status_last_len=0
 total=0
 ok=0
 failed=0
@@ -2363,16 +2353,7 @@ virtwin_status_set() {
     rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
     rendered+=$'\033[1;38;2;208;179;255m'"$part3"$'\033[0m'
   fi
-  local pad_len=0
-  if ((status_last_len > ${#text})); then
-    pad_len=$((status_last_len - ${#text}))
-  fi
-  printf '\033[s\033[%s;%sH%s' "$title_row" "$col" "$rendered"
-  if ((pad_len > 0)); then
-    printf '%*s' "$pad_len" ''
-  fi
-  printf '\033[u'
-  status_last_len=${#text}
+  printf '\033[s\033[%s;1H\033[K\033[%s;%sH%s\033[u' "$title_row" "$title_row" "$col" "$rendered"
 }
 
 while IFS=$'\x1f' read -r row_id artist album year source_path; do
@@ -2451,7 +2432,8 @@ run_flac_recode_for_row_id() {
          COALESCE(year_int,0),
          COALESCE(source_path,''),
          COALESCE(recode_recommendation,''),
-         COALESCE(needs_recode,0)
+         COALESCE(needs_recode,0),
+         COALESCE(last_recoded_at,0)
        FROM album_quality
        WHERE id=$row_id
        LIMIT 1;" 2>/dev/null || true
@@ -2460,10 +2442,16 @@ run_flac_recode_for_row_id() {
     ACTION_MESSAGE="Row not found for FLAC action."
     return 1
   fi
-  IFS=$'\t' read -r row_artist row_album row_year row_source_path row_recode row_needs_recode <<< "$row"
+  IFS=$'\t' read -r row_artist row_album row_year row_source_path row_recode row_needs_recode row_last_recoded <<< "$row"
   [[ "$row_needs_recode" =~ ^[0-9]+$ ]] || row_needs_recode=0
   if ((row_needs_recode != 1)); then
     ACTION_MESSAGE="Selected row is not actionable (needs_recode != Y)."
+    return 1
+  fi
+  [[ "$row_last_recoded" =~ ^[0-9]+$ ]] || row_last_recoded=0
+  if ((HAS_COL_LAST_RECODED_AT == 1)) && ((row_last_recoded > 0)); then
+    _recode_date="$(awk -v t="$row_last_recoded" 'BEGIN{printf strftime("%Y-%m-%d",t+0)}')"
+    ACTION_MESSAGE="Already recoded on ${_recode_date} (green star). Clear last_recoded_at in DB to re-encode."
     return 1
   fi
   if [[ -z "$row_source_path" || ! -d "$row_source_path" ]]; then
@@ -2529,7 +2517,7 @@ virtwin_status_set() {
     rendered_status+=$'\033[1;38;2;179;140;255m | \033[0m'
     rendered_status+=$'\033[1;38;2;208;179;255m'"$part3"$'\033[0m'
   fi
-  printf '\033[s\033[%s;%sH%s\033[u' "$title_row" "$status_col" "$rendered_status"
+  printf '\033[s\033[%s;1H\033[K\033[%s;%sH%s\033[u' "$title_row" "$title_row" "$status_col" "$rendered_status"
 }
 
 virtwin_status_set "planning..."

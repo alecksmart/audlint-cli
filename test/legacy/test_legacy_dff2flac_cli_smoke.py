@@ -101,6 +101,40 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
                 """
             ),
         )
+        sox_log = self.tmpdir / "sox.log"
+        # sox stub: write an empty output file (second positional arg after skipping options).
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                f"""\
+                #!/bin/bash
+                printf '%s\\n' "$*" >> "{sox_log}"
+                args=("$@")
+                positionals=()
+                i=0
+                while (( i < ${{#args[@]}} )); do
+                  case "${{args[$i]}}" in
+                    -b|-r|-c|-e|-t|-L|-R|-C|--compression) (( i += 2 )) || true ;;
+                    -*) (( i++ )) || true ;;
+                    *) positionals+=("${{args[$i]}}"); (( i++ )) || true ;;
+                  esac
+                done
+                out="${{positionals[1]:-}}"
+                [[ -n "$out" ]] && {{ mkdir -p "$(dirname "$out")"; : > "$out"; }}
+                exit 0
+                """
+            ),
+        )
+        # metaflac stub: succeed silently.
+        _write_exec(
+            self.bin_dir / "metaflac",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                exit 0
+                """
+            ),
+        )
 
     def _run(self, args) -> subprocess.CompletedProcess:
         env = os.environ.copy()
@@ -144,15 +178,14 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         self.assertTrue(out_file.exists())
         self.assertIn("Saved", proc.stdout)
 
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("176400", sox_log)
+        self.assertIn("-b 24", sox_log)
+        self.assertIn("dither", sox_log)
+        # gain applied: boost is always on for dff2flac (true-peak auto-boost)
+        self.assertIn("gain", sox_log)
+        # metadata tags are passed via metaflac --import-tags-from (stubbed); not in ffmpeg log
         ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
-        self.assertIn("title=Track Title", ffmpeg_log)
-        self.assertIn("artist=Track Artist", ffmpeg_log)
-        self.assertIn("album=Album Title", ffmpeg_log)
-        self.assertIn("-ar 176400", ffmpeg_log)
-        self.assertIn("-compression_level 8", ffmpeg_log)
-        self.assertIn("-bits_per_raw_sample 24", ffmpeg_log)
-        self.assertIn("-sample_fmt s32", ffmpeg_log)
-        self.assertIn("-af volume=", ffmpeg_log)
         self.assertNotIn("volumedetect", ffmpeg_log)
 
     def test_48k_family_dff_uses_192k_target(self) -> None:
@@ -162,10 +195,10 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         proc = self._run([])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
-        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
-        self.assertIn("-ar 192000", ffmpeg_log)
-        self.assertIn("-bits_per_raw_sample 24", ffmpeg_log)
-        self.assertIn("-af volume=", ffmpeg_log)
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("192k", sox_log)
+        self.assertIn("-b 24", sox_log)
+        self.assertIn("gain", sox_log)
 
     def test_low_44_profile_does_not_upscale_sample_rate(self) -> None:
         (self.album_dir / "01 Song.dff").unlink()
@@ -174,11 +207,10 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         proc = self._run([])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
-        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
-        self.assertIn("-ar 88200", ffmpeg_log)
-        self.assertNotIn("-ar 96000", ffmpeg_log)
-        self.assertIn("-bits_per_raw_sample 24", ffmpeg_log)
-        self.assertIn("-sample_fmt s32", ffmpeg_log)
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("88200", sox_log)
+        self.assertNotIn("96k", sox_log)
+        self.assertIn("-b 24", sox_log)
 
     def test_low_48_profile_does_not_upscale_sample_rate(self) -> None:
         (self.album_dir / "01 Song.dff").unlink()
@@ -187,11 +219,10 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         proc = self._run([])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
-        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
-        self.assertIn("-ar 96000", ffmpeg_log)
-        self.assertNotIn("-ar 88200", ffmpeg_log)
-        self.assertIn("-bits_per_raw_sample 24", ffmpeg_log)
-        self.assertIn("-sample_fmt s32", ffmpeg_log)
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("96k", sox_log)
+        self.assertNotIn("88200", sox_log)
+        self.assertIn("-b 24", sox_log)
 
     def test_mixed_source_profiles_fail_with_consistency_error(self) -> None:
         (self.album_dir / "02 Song 48fam.dff").write_text("", encoding="utf-8")

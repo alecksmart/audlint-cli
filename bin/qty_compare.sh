@@ -272,7 +272,9 @@ analyze_track() {
   fi
   tmpdir="$(mktemp -d)"
   excerpt="$tmpdir/excerpt.wav"
-  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$file" -ac 1 -c:a pcm_s24le "$excerpt" </dev/null 2>/dev/null || true
+  local cmp_eval_sr
+  cmp_eval_sr=$(( sr > 192000 ? 192000 : sr ))
+  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$file" -ac 1 -ar "$cmp_eval_sr" -c:a pcm_s24le "$excerpt" </dev/null 2>/dev/null || true
 
   local spec_rec spec_conf spec_reason spec_fmax
   spec_rec="N/A"

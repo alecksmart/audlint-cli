@@ -1037,7 +1037,7 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
         proc = self._run(SPECTRE, ["--all", str(album)])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("ALBUM (MERGED 2 TRACKS)", proc.stdout)
-        self.assertIn("8.2", proc.stdout)
+        self.assertIn("6.1", proc.stdout)
 
     def test_qty_seek_help_and_bad_option(self) -> None:
         help_proc = self._run(QTY_SEEK, ["--help"])
@@ -1728,6 +1728,12 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
         self.assertIn('transfer_year="$(transfer_year_for_source "$source_path" "$year")"', script)
         self.assertIn('"$artist" "$album" "$transfer_year" "$source_path" "$dest_dir"', script)
 
+    def test_library_browser_status_overlay_clears_row_before_redraw(self) -> None:
+        script = LIBRARY_BROWSER.read_text(encoding="utf-8")
+        redraw = "printf '\\033[s\\033[%s;1H\\033[K\\033[%s;%sH%s\\033[u'"
+        # transfer, lyrics, and recode+autoboost status overlays
+        self.assertGreaterEqual(script.count(redraw), 3)
+
     def test_library_browser_default_page_and_class_filter(self) -> None:
         if shutil.which("sqlite3") is None:
             self.skipTest("sqlite3 is required")
@@ -1808,10 +1814,10 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE album_quality
-                SET artist='Квітка Цісик',
-                    artist_lc='Квітка Цісик',
-                    album='You Light Up My Life',
-                    album_lc='you light up my life',
+                SET artist='Вигадана Артистка',
+                    artist_lc='вигадана артистка',
+                    album='Вигаданий Альбом',
+                    album_lc='вигаданий альбом',
                     scan_failed=1
                 WHERE artist='Artist 2'
                 """
@@ -1848,16 +1854,16 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
 
         proc_search_cyrillic = self._run(
             LIBRARY_BROWSER,
-            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "Квітка"],
+            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "Вигадана"],
         )
         self.assertEqual(proc_search_cyrillic.returncode, 0, msg=proc_search_cyrillic.stderr + "\n" + proc_search_cyrillic.stdout)
         rows_search_cyrillic = [line for line in proc_search_cyrillic.stdout.splitlines() if "\t" in line]
         self.assertEqual(len(rows_search_cyrillic), 1, msg=proc_search_cyrillic.stdout)
-        self.assertTrue(rows_search_cyrillic[0].startswith("Квітка Цісик\t"), msg=proc_search_cyrillic.stdout)
+        self.assertTrue(rows_search_cyrillic[0].startswith("Вигадана Артистка\t"), msg=proc_search_cyrillic.stdout)
 
         proc_search_cyrillic_lower = self._run(
             LIBRARY_BROWSER,
-            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "квітка"],
+            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "вигадана"],
         )
         self.assertEqual(
             proc_search_cyrillic_lower.returncode,
@@ -1866,7 +1872,7 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
         )
         rows_search_cyrillic_lower = [line for line in proc_search_cyrillic_lower.stdout.splitlines() if "\t" in line]
         self.assertEqual(len(rows_search_cyrillic_lower), 1, msg=proc_search_cyrillic_lower.stdout)
-        self.assertTrue(rows_search_cyrillic_lower[0].startswith("Квітка Цісик\t"), msg=proc_search_cyrillic_lower.stdout)
+        self.assertTrue(rows_search_cyrillic_lower[0].startswith("Вигадана Артистка\t"), msg=proc_search_cyrillic_lower.stdout)
 
         proc_rarity_hidden = self._run(
             LIBRARY_BROWSER,

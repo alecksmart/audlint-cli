@@ -27,9 +27,15 @@ source "$BOOTSTRAP_DIR/../lib/sh/bootstrap.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
-require_bins ffmpeg ffprobe >/dev/null || exit 2
+require_bins ffprobe >/dev/null || exit 2
+if ! encoder_has_sox && ! has_bin ffmpeg; then
+  printf 'Missing dependency: sox or ffmpeg (at least one encoder is required)\n' >&2
+  exit 2
+fi
 
 TARGET_PROFILE=""
 WORK_DIR="."
@@ -44,7 +50,7 @@ TARGET_BITS=0
 TARGET_SAMPLE_FMT=""
 BOOST_GAIN_DB="0.000"
 APPLY_BOOST=0
-BOOST_SAFETY_MARGIN_DB="-0.3"
+BOOST_SAFETY_MARGIN_DB="-1.0"
 BOOST_MIN_APPLY_DB="0.3"
 
 usage() {
@@ -514,6 +520,7 @@ if ! run_boost_analysis_if_enabled; then
 fi
 
 printf 'Target profile: %s (FLAC compression level 8)\n' "$TARGET_SR_LABEL"
+printf 'Encoder: %s\n' "$(encoder_log_backend)"
 printf 'Files to convert: %s\n' "${#audio_files[@]}"
 if ((DRY_RUN == 1)); then
   printf 'Dry run: yes\n'
@@ -562,25 +569,21 @@ for src in "${audio_files[@]}"; do
     continue
   fi
 
-  filter_args=()
+  encode_gain_db=""
   if ((WITH_BOOST == 1 && APPLY_BOOST == 1)); then
-    filter_args=(-af "volume=${BOOST_GAIN_DB}dB")
+    encode_gain_db="$BOOST_GAIN_DB"
   fi
 
-  if ! ffmpeg -hide_banner -loglevel error -nostdin -y \
-    -i "$src" \
-    "${filter_args[@]}" \
-    -map 0:a:0 \
-    -map_metadata 0 \
-    -c:a flac \
-    -f flac \
-    -ar "$TARGET_SR_HZ" \
-    -sample_fmt "$TARGET_SAMPLE_FMT" \
-    -bits_per_raw_sample "$TARGET_BITS" \
-    -compression_level 8 \
-    "$tmp_out" </dev/null; then
+  src_codec="${source_codec_for_source["$src"]:-}"
+  encode_src_is_flac=1
+  [[ "$src_codec" == "flac" ]] || encode_src_is_flac=0
+
+  encode_args=(--in "$src" --out "$tmp_out" --sr "$TARGET_SR_HZ" --bits "$TARGET_BITS" --src-is-flac "$encode_src_is_flac")
+  [[ -n "$encode_gain_db" ]] && encode_args+=(--gain "$encode_gain_db")
+
+  if ! encoder_to_flac "${encode_args[@]}"; then
     rm -f "$tmp_out"
-    echo "Error: ffmpeg failed for '$src'" >&2
+    echo "Error: encode failed for '$src'" >&2
     exit 1
   fi
 

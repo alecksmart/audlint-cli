@@ -1814,10 +1814,10 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE album_quality
-                SET artist='Квітка Цісик',
-                    artist_lc='Квітка Цісик',
-                    album='You Light Up My Life',
-                    album_lc='you light up my life',
+                SET artist='Вигадана Артистка',
+                    artist_lc='вигадана артистка',
+                    album='Вигаданий Альбом',
+                    album_lc='вигаданий альбом',
                     scan_failed=1
                 WHERE artist='Artist 2'
                 """
@@ -1854,16 +1854,16 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
 
         proc_search_cyrillic = self._run(
             LIBRARY_BROWSER,
-            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "Квітка"],
+            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "Вигадана"],
         )
         self.assertEqual(proc_search_cyrillic.returncode, 0, msg=proc_search_cyrillic.stderr + "\n" + proc_search_cyrillic.stdout)
         rows_search_cyrillic = [line for line in proc_search_cyrillic.stdout.splitlines() if "\t" in line]
         self.assertEqual(len(rows_search_cyrillic), 1, msg=proc_search_cyrillic.stdout)
-        self.assertTrue(rows_search_cyrillic[0].startswith("Квітка Цісик\t"), msg=proc_search_cyrillic.stdout)
+        self.assertTrue(rows_search_cyrillic[0].startswith("Вигадана Артистка\t"), msg=proc_search_cyrillic.stdout)
 
         proc_search_cyrillic_lower = self._run(
             LIBRARY_BROWSER,
-            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "квітка"],
+            ["--no-interactive", "--db", str(db_path), "--view", "scan-failed", "--search", "вигадана"],
         )
         self.assertEqual(
             proc_search_cyrillic_lower.returncode,
@@ -1872,7 +1872,7 @@ class SpectrogramCliSmokeTests(unittest.TestCase):
         )
         rows_search_cyrillic_lower = [line for line in proc_search_cyrillic_lower.stdout.splitlines() if "\t" in line]
         self.assertEqual(len(rows_search_cyrillic_lower), 1, msg=proc_search_cyrillic_lower.stdout)
-        self.assertTrue(rows_search_cyrillic_lower[0].startswith("Квітка Цісик\t"), msg=proc_search_cyrillic_lower.stdout)
+        self.assertTrue(rows_search_cyrillic_lower[0].startswith("Вигадана Артистка\t"), msg=proc_search_cyrillic_lower.stdout)
 
         proc_rarity_hidden = self._run(
             LIBRARY_BROWSER,

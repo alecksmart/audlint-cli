@@ -735,6 +735,17 @@ scan_album_dir_merged() {
     [[ -n "$recode_rec" ]] || recode_rec="Lossy source detected -> replace with lossless rip"
   fi
 
+  # MX3 — Pre-encode mastering guard.
+  # If an album already requires replacement (grade C/F → hit=1) AND the spectral tool
+  # only recommends a profile downgrade ("Store as …"), the recode changes container
+  # size but cannot fix the underlying mastering defects.  Mark it immediately so the
+  # UI shows the correct verdict at source-scan time, before any encode is attempted.
+  # The lossy-source branch above sets recode_rec to "Lossy source detected …" which
+  # does not contain "Store as ", so it is unaffected by this guard.
+  if ((hit == 1)) && [[ -n "$recode_rec" && "$recode_rec" == *"Store as "* ]]; then
+    recode_rec="Mastering issue — recode won't help"
+  fi
+
   local needs_recode=0
   if recode_is_actionable "$recode_rec"; then
     needs_recode=1

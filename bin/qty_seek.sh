@@ -612,21 +612,55 @@ merged_spectral_recommendation() {
   local tmpdir="$2"
 
   local sr dur start_sec excerpt eval_out rec
-  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
-  dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
+  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate \
+        -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
+  dur="$(ffprobe -v error -show_entries format=duration \
+         -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
   sr="${sr%%,*}"
   dur="${dur%%,*}"
   [[ "$sr" =~ ^[0-9]+$ ]] || return 1
 
   start_sec="$(awk -v d="${dur:-0}" 'BEGIN{s=(d>60)?(d/2 - 30):0; printf "%.3f", s}')"
-  excerpt="$tmpdir/merged-excerpt.wav"
-  local eval_sr
-  eval_sr=$(( sr > 192000 ? 192000 : sr ))
-  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$merged_file" -ac 1 -ar "$eval_sr" -c:a pcm_s24le "$excerpt" </dev/null || return 1
+
+  # ── Pass 1: analyse at min(source_sr, 192 kHz) ───────────────────────────
+  local eval_sr_1
+  eval_sr_1=$(( sr > 192000 ? 192000 : sr ))
+  excerpt="$tmpdir/merged-excerpt-p1.wav"
+  ffmpeg -y -hide_banner -loglevel error -nostdin \
+    -ss "$start_sec" -t 60 -i "$merged_file" \
+    -ac 1 -ar "$eval_sr_1" -c:a pcm_s24le "$excerpt" </dev/null || return 1
 
   eval_out="$("$PYTHON_BIN" "$PY_HELPER" "$excerpt" "$sr" "0" </dev/null 2>/dev/null || true)"
   rec="$(kv_get "RECOMMEND" "$eval_out")"
   [[ -n "$rec" ]] || return 1
+
+  # ── Pass 2: if recommendation is a downgrade, re-analyse at target SR ────
+  # Extract the recommended target sample rate from "… Store as <sr>/<bits>".
+  if [[ "$rec" == *"Store as "* ]]; then
+    local target_profile target_sr_k target_sr_hz
+    target_profile="${rec##*Store as }"
+    target_profile="${target_profile%%[[:space:]]*}"   # e.g. "96/24"
+    target_sr_k="${target_profile%%/*}"                # e.g. "96"
+    # Convert kHz string (may be decimal like "44.1") to Hz integer.
+    target_sr_hz="$(awk -v k="$target_sr_k" 'BEGIN{printf "%d", k * 1000 + 0.5}')"
+
+    if [[ "$target_sr_hz" =~ ^[0-9]+$ ]] && (( target_sr_hz > 0 && target_sr_hz < sr )); then
+      # Genuine downgrade: second pass at the recommended target SR.
+      local excerpt2
+      excerpt2="$tmpdir/merged-excerpt-p2.wav"
+      if ffmpeg -y -hide_banner -loglevel error -nostdin \
+          -ss "$start_sec" -t 60 -i "$merged_file" \
+          -ac 1 -ar "$target_sr_hz" -c:a pcm_s24le "$excerpt2" </dev/null 2>/dev/null; then
+        local eval_out2 rec2
+        eval_out2="$("$PYTHON_BIN" "$PY_HELPER" "$excerpt2" "$sr" "0" \
+                     </dev/null 2>/dev/null || true)"
+        rec2="$(kv_get "RECOMMEND" "$eval_out2")"
+        # Use the second-pass result if it is a valid recommendation.
+        [[ -n "$rec2" ]] && rec="$rec2"
+      fi
+    fi
+  fi
+
   printf '%s\n' "$rec"
 }
 

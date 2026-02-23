@@ -362,27 +362,27 @@ fi
 
 # === PRINT PLAN ===
 printf '\n'
-printf 'CUE file  : %s\n' "$CUE_FILE"
-printf 'Source    : %s (%s)\n' "$(basename "$AUDIO_SOURCE")" "$AUDIO_EXT_LC"
-printf 'Source SR : %s Hz / %s-bit\n' "$SRC_SR_HZ" "$SRC_BITS"
-printf 'Target    : %s (FLAC compression level 8)\n' "$TARGET_PROFILE_LABEL"
-printf 'Encoder   : %s\n' "$(encoder_log_backend)"
+printf '%sCUE file  :%s %s\n' "$DIM" "$RESET" "$CUE_FILE"
+printf '%sSource    :%s %s (%s)\n' "$DIM" "$RESET" "$(basename "$AUDIO_SOURCE")" "$AUDIO_EXT_LC"
+printf '%sSource SR :%s %s Hz / %s-bit\n' "$DIM" "$RESET" "$SRC_SR_HZ" "$SRC_BITS"
+printf '%sTarget    :%s %s%s (FLAC compression level 8)%s\n' "$DIM" "$RESET" "$CYAN" "$TARGET_PROFILE_LABEL" "$RESET"
+printf '%sEncoder   :%s %s%s%s\n' "$DIM" "$RESET" "$CYAN" "$(encoder_log_backend)" "$RESET"
 if ((APPLY_BOOST == 1)); then
-  printf 'Boost     : +%s dB (true peak: %s dBTP)\n' "$BOOST_GAIN_DB" "$TRUE_PEAK_DB"
+  printf '%sBoost     :%s %s+%s dB (true peak: %s dBTP)%s\n' "$DIM" "$RESET" "$GREEN" "$BOOST_GAIN_DB" "$TRUE_PEAK_DB" "$RESET"
 else
-  printf 'Boost     : skipped (true peak: %s dBTP, gain %s dB < %s dB threshold)\n' \
-    "$TRUE_PEAK_DB" "$BOOST_GAIN_DB" "$MIN_APPLY_GAIN_DB"
+  printf '%sBoost     :%s %sskipped (true peak: %s dBTP, gain %s dB < %s dB threshold)%s\n' \
+    "$DIM" "$RESET" "$YELLOW" "$TRUE_PEAK_DB" "$BOOST_GAIN_DB" "$MIN_APPLY_GAIN_DB" "$RESET"
 fi
-printf 'Output    : %s\n' "$OUTPUT_DIR"
-printf '\nTrack list:\n'
+printf '%sOutput    :%s %s%s%s\n' "$DIM" "$RESET" "$BLUE" "$OUTPUT_DIR" "$RESET"
+printf '\n%sTrack list:%s\n' "$DIM" "$RESET"
 for t in $(seq 1 "$TOTAL_TRACKS"); do
   title="${TITLES[$t]:-Track $t}"
   artist="${PERFORMERS[$t]:-${GLOBAL_ARTIST:-}}"
   [[ -z "$artist" ]] && artist="${GLOBAL_ARTIST:-Unknown Artist}"
   idx="${INDEXES[$t]:-00:00:00}"
   out_name="$(printf '%02d' "$t") $(sanitize_path_component "$title").flac"
-  printf '  [%02d] %s — %s  (INDEX %s)\n' "$t" "$title" "$artist" "$idx"
-  printf '       -> %s\n' "$out_name"
+  printf '  [%02d] %s — %s  %s(INDEX %s)%s\n' "$t" "$title" "$artist" "$DIM" "$idx" "$RESET"
+  printf '       %s-> %s%s\n' "$DIM" "$RESET" "$out_name"
 done
 printf '\n'
 
@@ -397,7 +397,7 @@ if ((ASSUME_YES == 0)); then
     echo "Error: confirmation required but stdin is not interactive. Re-run with --yes." >&2
     exit 1
   fi
-  printf 'Proceed? [y/N] > '
+  printf '%sProceed?%s [y/N] > ' "$YELLOW" "$RESET"
   confirm_choice=""
   if ! IFS= read -r confirm_choice </dev/tty; then
     printf '\n'
@@ -431,16 +431,16 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
   out_path="$OUTPUT_DIR/$out_name"
 
   printf '\n%s▶ [%02d/%02d] ENCODING%s %s\n' "$GREEN" "$t" "$TOTAL_TRACKS" "$RESET" "$out_name"
-  printf '     Title    : %s\n' "$title"
-  printf '     Artist   : %s\n' "$artist"
-  printf '     Album    : %s\n' "${ALBUM:-}"
-  printf '     Date     : %s\n' "${DATE:-}"
-  printf '     Track    : %s/%s\n' "$t" "$TOTAL_TRACKS"
-  printf '     Start    : %s sec\n' "$start_sec"
+  printf '     %sTitle    :%s %s\n' "$DIM" "$RESET" "$title"
+  printf '     %sArtist   :%s %s\n' "$DIM" "$RESET" "$artist"
+  printf '     %sAlbum    :%s %s\n' "$DIM" "$RESET" "${ALBUM:-}"
+  printf '     %sDate     :%s %s\n' "$DIM" "$RESET" "${DATE:-}"
+  printf '     %sTrack    :%s %s/%s\n' "$DIM" "$RESET" "$t" "$TOTAL_TRACKS"
+  printf '     %sStart    :%s %s sec\n' "$DIM" "$RESET" "$start_sec"
   if ((APPLY_BOOST == 1)); then
-    printf '     Boost    : +%s dB\n' "$BOOST_GAIN_DB"
+    printf '     %sBoost    :%s %s+%s dB%s\n' "$DIM" "$RESET" "$GREEN" "$BOOST_GAIN_DB" "$RESET"
   else
-    printf '     Boost    : skipped\n'
+    printf '     %sBoost    :%s %sskipped%s\n' "$DIM" "$RESET" "$YELLOW" "$RESET"
   fi
 
   # Duration: distance to next track's start, or EOF for last track
@@ -494,8 +494,8 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
 done
 
 printf '\n'
-printf 'Done: %s track(s) encoded, %s failed.\n' "$ok_count" "$fail_count"
-printf 'Output: %s\n' "$OUTPUT_DIR"
+printf '%sDone:%s %s track(s) encoded, %s failed.\n' "$DIM" "$RESET" "$ok_count" "$fail_count"
+printf '%sOutput:%s %s%s%s\n' "$DIM" "$RESET" "$BLUE" "$OUTPUT_DIR" "$RESET"
 
 if ((fail_count > 0)); then
   exit 1

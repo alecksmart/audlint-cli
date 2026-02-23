@@ -526,6 +526,9 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
   fi
 
   # Duration: distance to next track's start, or EOF for last track
+  # NOTE: -ss/-t are placed AFTER -i (output-side seek) to avoid the ffmpeg atrim
+  # nanosecond overflow bug that triggers "Value out of range" errors on large seek
+  # positions (tracks late in long albums at high sample rates).
   split_args=(-ss "$start_sec")
   if ((t < TOTAL_TRACKS)); then
     next_start="${TRACK_START_SEC[$((t + 1))]}"
@@ -535,11 +538,10 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
 
   tmp_seg="$_TMPDIR/track_$(printf '%02d' "$t").wav"
 
-  # Extract segment via ffmpeg
+  # Extract segment via ffmpeg (output-side seek: -i first, then -ss/-t)
   if ! ffmpeg -hide_banner -loglevel error -nostdin -y \
-    "${split_args[@]}" \
     -i "$WORK_SOURCE" \
-    -vn -c:a "$SEG_PCM_CODEC" \
+    -vn "${split_args[@]}" -c:a "$SEG_PCM_CODEC" \
     "$tmp_seg" </dev/null; then
     printf '%s❌ Segment extract failed for track %s%s\n' "$RED" "$t" "$RESET" >&2
     ((fail_count += 1))

@@ -225,7 +225,7 @@ encoder_bake_gain_flac() {
       return 1
     fi
 
-    if ! sox "$in" -b "$bits" "$out" gain "$gain_db" dither -s; then
+    if ! sox "$in" -b "$bits" --compression 8 "$out" gain "$gain_db" dither -s; then
       return 1
     fi
 

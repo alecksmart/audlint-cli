@@ -901,7 +901,9 @@ render_album_spectrogram() {
   local start_sec
   start_sec=$(awk -v d="${src_dur:-0}" 'BEGIN{s=(d>60)?(d/2 - 30):0; printf "%.3f", s}')
   log "Album report: extracting analysis excerpt..."
-  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$source_audio" -ac 1 -c:a pcm_s24le "$excerpt" </dev/null || {
+  local rec_eval_sr
+  rec_eval_sr=$(( src_sr > 192000 ? 192000 : src_sr ))
+  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$source_audio" -ac 1 -ar "$rec_eval_sr" -c:a pcm_s24le "$excerpt" </dev/null || {
     rm -rf "$tmpdir"
     log "Album spectrogram excerpt extraction failed."
     return 1

@@ -618,7 +618,9 @@ merged_spectral_recommendation() {
 
   start_sec="$(awk -v d="${dur:-0}" 'BEGIN{s=(d>60)?(d/2 - 30):0; printf "%.3f", s}')"
   excerpt="$tmpdir/merged-excerpt.wav"
-  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$merged_file" -ac 1 -c:a pcm_s24le "$excerpt" </dev/null || return 1
+  local eval_sr
+  eval_sr=$(( sr > 192000 ? 192000 : sr ))
+  ffmpeg -y -hide_banner -loglevel error -nostdin -ss "$start_sec" -t 60 -i "$merged_file" -ac 1 -ar "$eval_sr" -c:a pcm_s24le "$excerpt" </dev/null || return 1
 
   eval_out="$("$PYTHON_BIN" "$PY_HELPER" "$excerpt" "$sr" "0" </dev/null 2>/dev/null || true)"
   rec="$(kv_get "RECOMMEND" "$eval_out")"

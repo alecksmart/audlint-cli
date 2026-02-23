@@ -737,7 +737,7 @@ scan_album_dir_merged() {
     [[ -n "$recode_rec" ]] || recode_rec="Lossy source detected -> replace with lossless rip"
   fi
 
-  recode_rec="$(apply_mastering_guard "$recode_rec" "$grade" "$rec")"
+  recode_rec="$(apply_mastering_guard "$recode_rec" "$grade" "$rec" "$source_quality")"
 
   local needs_recode=0
   if recode_is_actionable "$recode_rec"; then

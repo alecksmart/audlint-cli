@@ -299,7 +299,7 @@ analyze_track() {
   fi
 
   # MX3 — mastering guard (shared lib).
-  spec_rec="$(apply_mastering_guard "$spec_rec" "$grade" "$qrec")"
+  spec_rec="$(apply_mastering_guard "$spec_rec" "$grade" "$qrec" "")"
 
   [[ -n "$q_score" ]] || q_score="N/A"
   [[ -n "$grade" ]] || grade="N/A"

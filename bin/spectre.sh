@@ -775,7 +775,7 @@ analyze_file() {
 
   # MX3 — mastering guard (shared lib).
   if [[ "$quality_available" == true ]]; then
-    REC="$(apply_mastering_guard "$REC" "$Q_GRADE" "$Q_REC")"
+    REC="$(apply_mastering_guard "$REC" "$Q_GRADE" "$Q_REC" "")"
   fi
 
   local bit_label=""
@@ -940,7 +940,7 @@ render_album_spectrogram() {
   fi
 
   # MX3 — mastering guard for album report.
-  rec="$(apply_mastering_guard "$rec" "$q_grade" "$q_rec")"
+  rec="$(apply_mastering_guard "$rec" "$q_grade" "$q_rec" "")"
 
   local bit_label=""
   if [[ -n "$src_bps" && "$src_bps" != "N/A" ]]; then

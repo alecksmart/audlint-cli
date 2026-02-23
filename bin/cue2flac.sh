@@ -58,7 +58,7 @@ TARGET_PROFILE=""
 OUTPUT_ROOT_ARG=""
 DRY_RUN=0
 ASSUME_YES=0
-SAFETY_MARGIN_DB="-0.3"
+SAFETY_MARGIN_DB="-1.0"
 MIN_APPLY_GAIN_DB="0.3"
 
 usage() {
@@ -182,7 +182,7 @@ YEAR=""
 if [[ "$DATE" =~ ^([0-9]{4}) ]]; then
   YEAR="${BASH_REMATCH[1]}"
 else
-  YEAR="Unknown Year"
+  YEAR="YYYY"
 fi
 
 # === PARSE CUE: PER-TRACK METADATA (titles, performers, INDEX 01 timestamps) ===

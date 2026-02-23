@@ -195,7 +195,7 @@ current_track=0
 in_track=0
 while IFS= read -r line; do
   if [[ "$line" =~ ^[[:space:]]*TRACK[[:space:]]+([0-9]+) ]]; then
-    current_track="${BASH_REMATCH[1]}"
+    current_track="$((10#${BASH_REMATCH[1]}))"
     in_track=1
     TOTAL_TRACKS=$((current_track > TOTAL_TRACKS ? current_track : TOTAL_TRACKS))
   elif ((in_track == 1)) && [[ "$line" =~ ^[[:space:]]*TITLE[[:space:]] ]]; then

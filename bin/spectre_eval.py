@@ -557,6 +557,7 @@ def analyze_audio_quality(
     nyq_hz = sample_rate / 2.0
     spectral_start_s = _clip_window_start(duration_s, spectral_seconds, 0.5) if use_spectral else 0.0
     fmax_hz = 0.0
+    bw99_hz = 0.0
     noise_db = float("nan")
     thr_db = float("nan")
     cutoff_hz = 0.0

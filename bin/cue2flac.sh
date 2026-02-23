@@ -2,18 +2,20 @@
 # cue2flac.sh — Split a high-resolution audio file into per-track FLACs using a .cue sheet.
 #
 # Usage:
-#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--out <output_root>] [--dry-run] [--yes]
+#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--check-upscale] [--out <output_root>] [--dry-run] [--yes]
 #
 # Input:  directory containing source audio + .cue, OR direct path to a .cue file.
 # Output: CUE2FLAC_OUTPUT_DIR/<Artist>/<Year> - <Album>/NN Track Title.flac
 #         (CUE2FLAC_OUTPUT_DIR loaded from .env, default: $HOME/Downloads/Encoded)
 #
-# Splitting:   ffmpeg -ss/-t (sector-accurate timecodes from CUE INDEX 01)
-# Encoding:    encoder.sh abstraction (sox preferred, ffmpeg fallback)
-# Resampling:  sox rate -v -s -L <target>k dither -s
-# Gain/boost:  album-wide headroom: -0.3 - max_true_peak (applied before SRC in sox chain)
-# Tagging:     metaflac --import-tags-from (explicit TAG=value from CUE metadata)
-# Formats:     FLAC, WAV (native sox); WavPack/APE/DSF/DFF (pre-convert to temp WAV via ffmpeg)
+# Splitting:     ffmpeg -ss/-t (sector-accurate timecodes from CUE INDEX 01)
+# Encoding:      encoder.sh abstraction (sox preferred, ffmpeg fallback)
+# Resampling:    sox rate -v -s -L <target>k dither -s
+# Gain/boost:    album-wide headroom: -0.3 - max_true_peak (applied before SRC in sox chain)
+# Tagging:       metaflac --import-tags-from (explicit TAG=value from CUE metadata)
+# Formats:       FLAC, WAV (native sox); WavPack/APE/DSF/DFF (pre-convert to temp WAV via ffmpeg)
+# --check-upscale: spectral bandwidth analysis via spectre_eval.py to detect fake hi-res;
+#                  auto-selects the recommended encode profile instead of defaulting to 192/24.
 
 set -Eeuo pipefail
 
@@ -42,6 +44,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 # shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
+# shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
@@ -49,12 +53,16 @@ env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 ui_init_colors
 
+PY_HELPER="${SCRIPT_DIR}/spectre_eval.py"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
 require_bins ffmpeg ffprobe >/dev/null || exit 2
 
 # === DEFAULTS ===
 INPUT_ARG="."
 DEFAULT_PROFILE="192/24"
 TARGET_PROFILE=""
+CHECK_UPSCALE=0
 OUTPUT_ROOT_ARG=""
 DRY_RUN=0
 ASSUME_YES=0
@@ -67,7 +75,8 @@ Usage:
   cue2flac.sh [<dir>|<file.cue>] [options]
 
 Options:
-  --profile <sr/bits>    Target encode profile (default: 96/24). No upscale.
+  --profile <sr/bits>    Target encode profile (default: 192/24). No upscale. Mutually exclusive with --check-upscale.
+  --check-upscale        Run spectral analysis to detect fake hi-res and auto-select the best encode profile.
   --out <path>           Override CUE2FLAC_OUTPUT_DIR from .env.
   --dry-run              Print plan and track list; no files written.
   --yes                  Skip confirmation prompt.
@@ -88,6 +97,9 @@ while [[ $# -gt 0 ]]; do
     shift
     TARGET_PROFILE="${1:-}"
     [[ -n "$TARGET_PROFILE" ]] || { echo "Error: --profile requires a value." >&2; exit 2; }
+    ;;
+  --check-upscale)
+    CHECK_UPSCALE=1
     ;;
   --out)
     shift
@@ -115,6 +127,12 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# Mutual exclusion: --check-upscale and --profile cannot be used together
+if ((CHECK_UPSCALE == 1)) && [[ -n "$TARGET_PROFILE" ]]; then
+  echo "Error: --check-upscale and --profile are mutually exclusive." >&2
+  exit 2
+fi
 
 # === LOCATE CUE FILE ===
 CUE_FILE=""
@@ -348,6 +366,67 @@ fi
 TARGET_SR_KHZ="$(awk -v s="$TARGET_SR_HZ" 'BEGIN{printf "%.4g", s/1000.0;}')"
 TARGET_PROFILE_LABEL="${TARGET_SR_KHZ}/${TARGET_BITS}"
 
+# === SPECTRAL UPSCALE CHECK ===
+UPSCALE_CHECK_LABEL=""
+if ((CHECK_UPSCALE == 1)); then
+  if [[ ! -f "$PY_HELPER" ]]; then
+    echo "Error: --check-upscale requires spectre_eval.py alongside cue2flac.sh (not found: $PY_HELPER)." >&2
+    exit 2
+  fi
+  if ! select_python_with_numpy 2>/dev/null; then
+    echo "Error: --check-upscale requires Python with numpy. Install numpy or set PYTHON_BIN." >&2
+    exit 2
+  fi
+  echo "Running spectral analysis to detect upscaling..."
+  _excerpt_wav="$_TMPDIR/check_upscale_excerpt.wav"
+  _src_dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WORK_SOURCE" </dev/null 2>/dev/null || true)"
+  _src_dur="${_src_dur%%,*}"
+  _excerpt_start="$(awk -v d="${_src_dur:-0}" 'BEGIN{s=(d+0>60)?(d/2 - 30):0; if(s<0)s=0; printf "%.3f", s}')"
+  ffmpeg -hide_banner -loglevel error -nostdin -y \
+    -ss "$_excerpt_start" -t 60 \
+    -i "$WORK_SOURCE" \
+    -ac 1 -c:a pcm_s24le \
+    "$_excerpt_wav" </dev/null
+
+  _dsd_hint=0
+  [[ "$AUDIO_EXT_LC" == "dsf" || "$AUDIO_EXT_LC" == "dff" ]] && _dsd_hint=1
+
+  _eval_out="$("$PYTHON_BIN" "$PY_HELPER" "$_excerpt_wav" "$SRC_SR_HZ" "$_dsd_hint" </dev/null 2>/dev/null || true)"
+  rm -f "$_excerpt_wav"
+
+  _recommend="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^RECOMMEND=/{sub(/^RECOMMEND=/, ""); print; exit}')"
+  _fmax_khz="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^FMAX_KHZ=/{print $2; exit}')"
+  _upsample="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^UPSAMPLE_LIKE=/{print $2; exit}')"
+  _confidence="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^CONFIDENCE=/{print $2; exit}')"
+
+  # Parse "Store as <sr>/<bits>" from the RECOMMEND string
+  _rec_profile=""
+  if [[ "$_recommend" =~ Store\ as\ ([0-9]+(\.[0-9]+)?)/([0-9]{2}) ]]; then
+    _rec_sr_str="${BASH_REMATCH[1]}"
+    _rec_bits="${BASH_REMATCH[3]}"
+    _rec_sr_hz="$(awk -v s="$_rec_sr_str" 'BEGIN{printf "%.0f", s*1000.0}')"
+    _rec_profile="${_rec_sr_str}/${_rec_bits}"
+
+    # Cap to source (no upscale)
+    if ((_rec_sr_hz > SRC_SR_HZ)); then
+      _rec_sr_hz="$SRC_SR_HZ"
+      _rec_sr_str="$(awk -v s="$SRC_SR_HZ" 'BEGIN{printf "%.4g", s/1000.0}')"
+      _rec_profile="${_rec_sr_str}/${_rec_bits}"
+    fi
+    if ((_rec_bits > SRC_BITS)); then
+      _rec_bits="$SRC_BITS"
+      _rec_profile="${_rec_sr_str}/${_rec_bits}"
+    fi
+
+    TARGET_SR_HZ="$_rec_sr_hz"
+    TARGET_BITS="$_rec_bits"
+    TARGET_SR_KHZ="$(awk -v s="$TARGET_SR_HZ" 'BEGIN{printf "%.4g", s/1000.0}')"
+    TARGET_PROFILE_LABEL="${TARGET_SR_KHZ}/${TARGET_BITS}"
+  fi
+
+  UPSCALE_CHECK_LABEL="fmax≈${_fmax_khz}kHz, upsample=${_upsample}, conf=${_confidence} → ${_recommend:-unknown}"
+fi
+
 # === TRUE PEAK / BOOST ===
 echo "Probing true peak for album-wide headroom boost..."
 TRUE_PEAK_DB="$(audio_probe_true_peak_db "$WORK_SOURCE")"
@@ -366,6 +445,9 @@ printf '%sCUE file  :%s %s\n' "$DIM" "$RESET" "$CUE_FILE"
 printf '%sSource    :%s %s (%s)\n' "$DIM" "$RESET" "$(basename "$AUDIO_SOURCE")" "$AUDIO_EXT_LC"
 printf '%sSource SR :%s %s Hz / %s-bit\n' "$DIM" "$RESET" "$SRC_SR_HZ" "$SRC_BITS"
 printf '%sTarget    :%s %s%s (FLAC compression level 8)%s\n' "$DIM" "$RESET" "$CYAN" "$TARGET_PROFILE_LABEL" "$RESET"
+if ((CHECK_UPSCALE == 1)); then
+  printf '%sCheck     :%s %s\n' "$DIM" "$RESET" "$UPSCALE_CHECK_LABEL"
+fi
 printf '%sEncoder   :%s %s%s%s\n' "$DIM" "$RESET" "$CYAN" "$(encoder_log_backend)" "$RESET"
 if ((APPLY_BOOST == 1)); then
   printf '%sBoost     :%s %s+%s dB (true peak: %s dBTP)%s\n' "$DIM" "$RESET" "$GREEN" "$BOOST_GAIN_DB" "$TRUE_PEAK_DB" "$RESET"

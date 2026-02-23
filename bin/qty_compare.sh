@@ -31,6 +31,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/quality_gate.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
@@ -295,6 +297,9 @@ analyze_track() {
     spec_conf="HIGH"
     spec_reason="Lossy codec (${codec:-unknown})"
   fi
+
+  # MX3 — mastering guard (shared lib).
+  spec_rec="$(apply_mastering_guard "$spec_rec" "$grade" "$qrec")"
 
   [[ -n "$q_score" ]] || q_score="N/A"
   [[ -n "$grade" ]] || grade="N/A"

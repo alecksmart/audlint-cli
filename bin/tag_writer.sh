@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # tag_writer.sh — Write metadata tags to audio files across all supported formats.
 #
 # Supported formats and tools:
@@ -23,6 +23,12 @@
 #   0  — tag written successfully
 #   1  — unsupported format or required tool missing
 #   2  — file not found or not readable
+
+_TW_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$_TW_SCRIPT_DIR/../lib/sh/secure_backup.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$_TW_SCRIPT_DIR/../lib/sh/secure_backup.sh"
+fi
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -253,6 +259,15 @@ tag_write() {
   if [[ -z "$tag" ]]; then
     printf '[tag_writer] Empty tag name for: %s\n' "$file" >&2
     return 1
+  fi
+
+  if declare -F secure_backup_album_tracks_once >/dev/null 2>&1; then
+    local album_dir
+    album_dir="$(dirname "$file")"
+    if ! secure_backup_album_tracks_once "$album_dir" "tag write"; then
+      printf '[tag_writer] %s\n' "${SECURE_BACKUP_LAST_ERROR:-secure backup failed}" >&2
+      return 1
+    fi
   fi
 
   local fmt

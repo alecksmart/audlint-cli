@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # audlint.sh - Interactive browser for LIBRARY_DB.album_quality
 
 set -Eeuo pipefail
@@ -29,11 +29,17 @@ source "$BOOTSTRAP_DIR/../lib/sh/table.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/sqlite.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/virtwin.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/rich.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 
-PAGE_SIZE=12
+PAGE_SIZE=15
 PAGE=1
 CLASS_FILTER="all"
 CODEC_FILTER="all"
@@ -52,19 +58,28 @@ ACTION_MESSAGE=""
 DB_WRITABLE=true
 DB_STATUS_LABEL=""
 SYNC_LC_ON_STARTUP="${LIBRARY_BROWSER_SYNC_LC_ON_STARTUP:-0}"
-CRON_INTERVAL_MIN="${LIBRARY_BROWSER_CRON_INTERVAL_MIN:-${CRON_INTERVAL_MIN:-20}}"
+AUDLINT_CRON_INTERVAL_MIN="${AUDLINT_CRON_INTERVAL_MIN:-20}"
 HAS_FTS_SEARCH=0
 KEYSET_ENABLED="${LIBRARY_BROWSER_KEYSET_ON:-1}"
 SYNC_MUSIC_BIN="${SYNC_MUSIC_BIN:-${REPO_ROOT:-}/bin/sync_music.sh}"
-QTY_SEEK_BIN="${QTY_SEEK_BIN:-${REPO_ROOT:-}/bin/qty_seek.sh}"
-QTY_SEEK_MAX_ALBUMS="${QTY_SEEK_MAX_ALBUMS:-30}"
-QTY_SEEK_LOG="${QTY_SEEK_LOG:-$HOME/qty_seek.log}"
-# Discovery cache path mirrors qty_seek.sh derivation (DB_PATH slug).
-_qty_seek_db_slug="$(printf '%s' "${LIBRARY_DB:-}" | tr -cs 'A-Za-z0-9_-' '_')"
-QTY_SEEK_DISCOVERY_CACHE="${DISCOVERY_CACHE_FILE:-${TMPDIR:-/tmp}/qty_seek_last_discovery_${_qty_seek_db_slug}}"
-unset _qty_seek_db_slug
+AUDLINT_TASK_BIN="${AUDLINT_TASK_BIN:-${REPO_ROOT:-}/bin/audlint-task.sh}"
+AUDLINT_TASK_MAX_ALBUMS="${AUDLINT_TASK_MAX_ALBUMS:-30}"
+AUDLINT_TASK_MAX_TIME_SEC="${AUDLINT_TASK_MAX_TIME_SEC:-0}"
+AUDLINT_TASK_LOG="${AUDLINT_TASK_LOG:-$HOME/audlint-task.log}"
+AUDLINT_MAINTAIN_BIN="${AUDLINT_MAINTAIN_BIN:-${REPO_ROOT:-}/bin/audlint-maintain.sh}"
+AUDLINT_VALUE_BIN="${AUDLINT_VALUE_BIN:-${REPO_ROOT:-}/bin/audlint-value.sh}"
+AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-${REPO_ROOT:-}/bin/audlint-analyze.sh}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+CRON_BLOCK_BEGIN="# >>> audlint-cli maintain >>>"
+CRON_BLOCK_END="# <<< audlint-cli maintain <<<"
+# Discovery cache path mirrors audlint-task.sh derivation (DB_PATH slug).
+_audlint_task_db_slug="$(printf '%s' "${LIBRARY_DB:-}" | tr -cs 'A-Za-z0-9_-' '_')"
+AUDLINT_TASK_DISCOVERY_CACHE_FILE="${AUDLINT_TASK_DISCOVERY_CACHE_FILE:-${TMPDIR:-/tmp}/audlint_task_last_discovery_${_audlint_task_db_slug}}"
+unset _audlint_task_db_slug
 LIBRARY_ROOT="${LIBRARY_ROOT:-${SRC:-}}"
 MEDIA_PLAYER_PATH="${MEDIA_PLAYER_PATH:-}"
+DST_USER_HOST="${DST_USER_HOST:-}"
+DST_PATH="${DST_PATH:-}"
 RSYNC_BIN="${RSYNC_BIN:-rsync}"
 SYNC_BIN="${SYNC_BIN:-sync}"
 ANY2FLAC_BIN="${ANY2FLAC_BIN:-${REPO_ROOT:-}/bin/any2flac.sh}"
@@ -94,6 +109,7 @@ CURSOR_LAST_ID=""
 COUNT_CACHE_KEY=""
 COUNT_CACHE_VALUE=""
 COUNT_CACHE_VALID=0
+ALBUM_ANALYSIS_ID=""
 
 FILTER_REPLACE_ONLY=0
 FILTER_UPSCALED_ONLY=0
@@ -101,19 +117,19 @@ FILTER_MIXED_ONLY=0
 FILTER_REPLACE_OR_UPSCALED=0
 FILTER_RARITY_ONLY=0
 
-TABLE_LABELS=("ARTIST" "YEAR" "ALBUM" "GRADE" "RE" "SCAN FAIL" "CODEC" "PROFILE" "BITRATE" "RECODE" "LAST CHECKED")
+TABLE_LABELS=("ARTIST" "YEAR" "ALBUM" "GRADE" "RE" "SCAN FAIL" "CODEC" "BITRATE" "PROFILE" "RECODE" "LAST CHECKED")
 TABLE_WIDTHS=(20 6 24 5 4 10 8 9 9 22 18)
-TABLE_SORT_KEYS=("artist" "year" "album" "grade" "" "fail" "codec" "curr" "" "" "checked")
+TABLE_SORT_KEYS=("artist" "year" "album" "grade" "" "fail" "codec" "" "curr" "" "checked")
 TABLE_SELECT_SQL=(
   "artist"
   "CASE WHEN year_int=0 THEN '-' ELSE CAST(year_int AS TEXT) END"
   "album"
   "COALESCE(quality_grade,'-')"
-  "CASE WHEN COALESCE(needs_recode,0)=1 THEN 'Y' ELSE '-' END"
+  "CASE WHEN COALESCE(needs_replacement,0)=1 OR COALESCE(needs_recode,0)=1 THEN 'Y' ELSE '-' END"
   "CASE WHEN scan_failed=1 THEN 'Y' ELSE '-' END"
   "COALESCE(NULLIF(codec,''),'-')"
-  "COALESCE(NULLIF(current_quality,''),'-')"
   "COALESCE(NULLIF(bitrate,''),'-')"
+  "COALESCE(NULLIF(current_quality,''),'-')"
   "CASE WHEN COALESCE(scan_failed,0)=1 THEN COALESCE(NULLIF(notes,''),NULLIF(recode_recommendation,''),'-') ELSE COALESCE(NULLIF(recode_recommendation,''),'-') END"
   "CASE WHEN last_checked_at IS NULL OR last_checked_at=0 THEN '-' ELSE strftime('%Y-%m-%d %H:%M', last_checked_at,'unixepoch','localtime') END"
 )
@@ -144,9 +160,11 @@ Options:
   --search <text>            Case-insensitive artist/album search (%...% fuzzy-like)
   --codec <name|all|unknown> Filter by one codec value (default: all)
   --profile <name|all|unknown> Filter by one profile value (default: all)
-  --page-size <n>            Rows per page (default: 12)
+  --help-profiles             Show accepted profile filter forms and special values
+  --page-size <n>            Rows per page (default: 15)
   --page <n>                 Start page (default: 1)
   --db <path>                Override LIBRARY_DB path
+  --album-id <id>            Print dedicated album analysis page for one row id and exit
   --interactive              Force interactive paging
   --no-interactive           Disable interactive paging
   --help                     Show this help
@@ -162,6 +180,7 @@ Interactive keys:
   e = show recode queue (needs_recode=Y)
   f = FLAC recode + boost for selected row(s) (recode view only)
   l = lyrics seek + embed for selected row(s)
+  i = inspect selected album (single row) in dedicated analysis page
   t = transfer selected albums to media player (when MEDIA_PLAYER_PATH is writable)
   c = clear all filters/search/sort and reset to primary view
   r = mark rows as rarity (hidden from normal views)
@@ -174,6 +193,15 @@ Interactive keys:
   p = previous page
   q = quit
 EOF_HELP
+}
+
+show_help_profiles() {
+  profile_print_help
+  printf '\n'
+  printf 'audlint profile filter values:\n'
+  printf '  all      clear filter\n'
+  printf '  unknown  match empty/unknown profile rows\n'
+  printf '  <profile> fuzzy profile form (normalized to canonical before matching)\n'
 }
 
 resolve_library_db_path() {
@@ -339,6 +367,7 @@ normalize_codec_filter() {
 
 normalize_profile_filter() {
   local raw="$1"
+  local normalized=""
   raw="$(normalize_search_query "$raw")"
   raw="$(lower_text "$raw")"
   if [[ -z "$raw" || "$raw" == "all" ]]; then
@@ -347,6 +376,11 @@ normalize_profile_filter() {
   fi
   if [[ "$raw" == "unknown" || "$raw" == "~unknown" ]]; then
     printf '~unknown\n'
+    return 0
+  fi
+  normalized="$(profile_normalize "$raw" || true)"
+  if [[ -n "$normalized" ]]; then
+    printf '%s\n' "${normalized,,}"
     return 0
   fi
   printf '%s\n' "$raw"
@@ -446,7 +480,7 @@ read_menu_choice_immediate() {
 
   # Fallback for very large menus where base36 single-key labels are insufficient.
   if ((max_num > 35)); then
-    if ! IFS= read -r line </dev/tty; then
+    if ! tty_read_line line; then
       printf ''
       return 1
     fi
@@ -462,7 +496,7 @@ read_menu_choice_immediate() {
     return 0
   fi
 
-  if ! IFS= read -r -s -n 1 key </dev/tty; then
+  if ! tty_read_key key 1; then
     printf ''
     return 1
   fi
@@ -732,10 +766,6 @@ search_clause_for_query() {
   fi
 
   search_clause_like_for_query "$raw"
-}
-
-rich_escape() {
-  printf '%s' "$1" | sed -e 's/\[/\\[/g' -e 's/\]/\\]/g'
 }
 
 style_sorted_cell() {
@@ -1456,8 +1486,97 @@ roadmap_queue_count() {
   printf '%s' "$count"
 }
 
-next_run_hhmm() {
-  local interval="$CRON_INTERVAL_MIN"
+read_crontab_raw() {
+  crontab -l 2>/dev/null || true
+}
+
+managed_cron_schedule() {
+  command -v crontab >/dev/null 2>&1 || return 1
+  local current schedule
+  current="$(read_crontab_raw)"
+  schedule="$(
+    awk -v begin="$CRON_BLOCK_BEGIN" -v end="$CRON_BLOCK_END" '
+      $0 == begin { in_block=1; next }
+      $0 == end { in_block=0; next }
+      in_block == 1 && $0 !~ /^[[:space:]]*#/ && NF >= 5 {
+        print $1 " " $2 " " $3 " " $4 " " $5
+        exit
+      }
+    ' <<< "$current"
+  )"
+  [[ -n "$schedule" ]] || return 1
+  printf '%s' "$schedule"
+}
+
+cron_next_run_hhmm() {
+  local schedule="$1"
+  local minute hour day_of_month month day_of_week
+  read -r minute hour day_of_month month day_of_week <<< "$schedule"
+  if [[ "$day_of_month $month $day_of_week" != "* * *" ]]; then
+    return 1
+  fi
+
+  local now_hour_raw now_min_raw
+  now_hour_raw="$(date +%H 2>/dev/null || true)"
+  now_min_raw="$(date +%M 2>/dev/null || true)"
+  if [[ ! "$now_hour_raw" =~ ^[0-9]{2}$ || ! "$now_min_raw" =~ ^[0-9]{2}$ ]]; then
+    return 1
+  fi
+  local now_hour now_min
+  now_hour=$((10#$now_hour_raw))
+  now_min=$((10#$now_min_raw))
+
+  if [[ "$minute" =~ ^\*/([0-9]+)$ && "$hour" == "*" ]]; then
+    local step_min next_min next_hour
+    step_min="${BASH_REMATCH[1]}"
+    if ((step_min < 1 || step_min > 59)); then
+      return 1
+    fi
+    next_min=$((((now_min / step_min) + 1) * step_min))
+    next_hour=$now_hour
+    if ((next_min >= 60)); then
+      next_min=0
+      next_hour=$(((next_hour + 1) % 24))
+    fi
+    printf '%02d:%02d' "$next_hour" "$next_min"
+    return 0
+  fi
+
+  if [[ "$minute" == "0" && "$hour" == "*" ]]; then
+    printf '%02d:00' "$(((now_hour + 1) % 24))"
+    return 0
+  fi
+
+  if [[ "$minute" =~ ^0$ && "$hour" =~ ^\*/([0-9]+)$ ]]; then
+    local step_hour next_hour candidate
+    step_hour="${BASH_REMATCH[1]}"
+    if ((step_hour < 1 || step_hour > 23)); then
+      return 1
+    fi
+    next_hour=-1
+    for ((candidate = 0; candidate < 24; candidate += step_hour)); do
+      if ((candidate > now_hour)); then
+        next_hour=$candidate
+        break
+      fi
+    done
+    if ((next_hour < 0)); then
+      next_hour=0
+    fi
+    printf '%02d:00' "$next_hour"
+    return 0
+  fi
+
+  if [[ "$minute $hour" == "0 0" ]]; then
+    printf '00:00'
+    return 0
+  fi
+
+  return 1
+}
+
+next_run_hhmm_from_interval() {
+  local interval="$AUDLINT_CRON_INTERVAL_MIN"
   if [[ ! "$interval" =~ ^[0-9]+$ || "$interval" -lt 1 || "$interval" -gt 720 ]]; then
     interval=20
   fi
@@ -1475,6 +1594,20 @@ next_run_hhmm() {
   fi
   [[ -n "$label" ]] || label="--:--"
   printf '%s' "$label"
+}
+
+next_run_hhmm() {
+  local schedule label
+  if schedule="$(managed_cron_schedule)"; then
+    label="$(cron_next_run_hhmm "$schedule" 2>/dev/null || true)"
+    if [[ -n "$label" ]]; then
+      printf '%s' "$label"
+      return 0
+    fi
+    next_run_hhmm_from_interval
+    return 0
+  fi
+  printf 'manual'
 }
 
 view_button() {
@@ -1527,6 +1660,10 @@ show_transfer_action() {
   [[ -n "$MEDIA_PLAYER_PATH" && -d "$MEDIA_PLAYER_PATH" && -w "$MEDIA_PLAYER_PATH" ]]
 }
 
+show_sync_action() {
+  [[ -n "$DST_USER_HOST" && -n "$DST_PATH" ]]
+}
+
 show_lyrics_action() {
   command_ref_available "$LYRICS_SEEK_BIN"
 }
@@ -1576,7 +1713,6 @@ print_nav_line() {
       "$(hint_button n Next)"
       "$(hint_button p Prev)"
       "$(hint_button x Delete)"
-      "$(hint_button s Sync)"
     )
   else
     hint_buttons=(
@@ -1585,8 +1721,10 @@ print_nav_line() {
       "$(hint_button n Next)"
       "$(hint_button p Prev)"
       "$(hint_button x Delete)"
-      "$(hint_button s Sync)"
     )
+  fi
+  if show_sync_action; then
+    hint_buttons+=("$(hint_button s Sync)")
   fi
   if ((show_flac == 1)); then
     hint_buttons+=("$(hint_button f FLAC)")
@@ -1595,7 +1733,8 @@ print_nav_line() {
     hint_buttons+=("$(hint_button t Transfer)")
   fi
   hint_buttons+=("$(hint_button l Lyrics)")
-  if [[ -n "$LIBRARY_ROOT" && -x "$QTY_SEEK_BIN" ]]; then
+  hint_buttons+=("$(hint_button i Inspect)")
+  if [[ -n "$LIBRARY_ROOT" && -x "$AUDLINT_TASK_BIN" && -x "$AUDLINT_MAINTAIN_BIN" ]]; then
     hint_buttons+=("$(hint_button m Maintain)")
     hint_buttons+=("$(hint_button L Log)")
     hint_buttons+=("$(hint_button P Purge)")
@@ -1712,6 +1851,7 @@ row_action_prompt_for_mode() {
   unmark_rarity) action_label="unmark rarity" ;;
   recode_flac) action_label="select rows for FLAC recode" ;;
   lyrics_seek) action_label="select rows for lyrics seek" ;;
+  album_analysis) action_label="inspect one row (single selection)" ;;
   transfer) action_label="transfer rows to player" ;;
   esac
   printf '%s (%s; blank=cancel) > ' "$action_label" "$(row_selection_options_hint)"
@@ -1719,13 +1859,10 @@ row_action_prompt_for_mode() {
 
 extract_target_profile_from_recode() {
   local recode="$1"
-  local target=""
-  target="$(printf '%s\n' "$recode" | sed -nE 's/.*[Ss]tore[[:space:]]+as[[:space:]]+([0-9]+([.][0-9]+)?\/[0-9]{1,2}).*/\1/p' | head -n 1)"
-  if [[ -z "$target" ]]; then
-    target="$(printf '%s\n' "$recode" | sed -nE 's/.*RECODE[[:space:]]+TO[[:space:]]+([0-9]+([.][0-9]+)?\/[0-9]{1,2}).*/\1/p' | head -n 1)"
-  fi
-  if [[ -z "$target" ]]; then
-    target="$(printf '%s\n' "$recode" | grep -Eo '[0-9]+([.][0-9]+)?/[0-9]{1,2}' | head -n 1 || true)"
+  local candidate="" target=""
+  candidate="$(printf '%s\n' "$recode" | grep -Eio '[0-9]+([.][0-9]+)?(k(hz)?)?[/:-][0-9]{1,3}f?' | head -n 1 || true)"
+  if [[ -n "$candidate" ]]; then
+    target="$(profile_normalize "$candidate" || true)"
   fi
   printf '%s' "$target"
 }
@@ -1790,6 +1927,326 @@ command_ref_available() {
   has_bin "$cmd_ref"
 }
 
+format_epoch_local() {
+  local epoch="$1"
+  [[ "$epoch" =~ ^[0-9]+$ ]] || {
+    printf '-'
+    return 0
+  }
+  if ((epoch <= 0)); then
+    printf '-'
+    return 0
+  fi
+  local label=""
+  label="$(date -r "$epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
+  if [[ -z "$label" ]]; then
+    label="$(date -d "@$epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
+  fi
+  if [[ -z "$label" ]]; then
+    label="$epoch"
+  fi
+  printf '%s' "$label"
+}
+
+print_album_analysis_report_for_row_id() {
+  local row_id="$1"
+  [[ "$row_id" =~ ^[0-9]+$ ]] || return 1
+
+  local row_sep=$'\x1f'
+  local row_data=""
+  row_data="$(
+    sqlite3 -separator "$row_sep" -noheader "$DB_PATH" \
+      "SELECT
+         id,
+         COALESCE(artist,''),
+         COALESCE(album,''),
+         COALESCE(year_int,0),
+         COALESCE(source_path,''),
+         COALESCE(quality_grade,'-'),
+         COALESCE(quality_score,''),
+         COALESCE(dynamic_range_score,''),
+         COALESCE(current_quality,''),
+         COALESCE(codec,''),
+         COALESCE(bitrate,''),
+         COALESCE(recode_recommendation,''),
+         COALESCE(needs_recode,0),
+         COALESCE(needs_replacement,0),
+         COALESCE(scan_failed,0),
+         COALESCE(recommendation,''),
+         COALESCE(notes,''),
+         COALESCE(last_checked_at,0),
+         COALESCE(genre_profile,''),
+         COALESCE(recode_source_profile,'')
+       FROM album_quality
+       WHERE id=$row_id
+       LIMIT 1;" 2>/dev/null || true
+  )"
+  [[ -n "$row_data" ]] || return 1
+
+  local rid artist album year source_path quality_grade quality_score dr_score current_quality codec bitrate recode_rec
+  local needs_recode needs_replace scan_failed recommendation notes last_checked genre_profile recode_source_profile
+  IFS="$row_sep" read -r rid artist album year source_path quality_grade quality_score dr_score current_quality codec bitrate recode_rec needs_recode needs_replace scan_failed recommendation notes last_checked genre_profile recode_source_profile <<< "$row_data"
+
+  local checked_label
+  checked_label="$(format_epoch_local "$last_checked")"
+
+  local value_json value_err analyze_json analyze_err
+  value_json="$(mktemp "${TMPDIR:-/tmp}/audlint_album_value_json.XXXXXX" 2>/dev/null || true)"
+  value_err="$(mktemp "${TMPDIR:-/tmp}/audlint_album_value_err.XXXXXX" 2>/dev/null || true)"
+  analyze_json="$(mktemp "${TMPDIR:-/tmp}/audlint_album_analyze_json.XXXXXX" 2>/dev/null || true)"
+  analyze_err="$(mktemp "${TMPDIR:-/tmp}/audlint_album_analyze_err.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$value_json" || -z "$value_err" || -z "$analyze_json" || -z "$analyze_err" ]]; then
+    rm -f "$value_json" "$value_err" "$analyze_json" "$analyze_err"
+    return 1
+  fi
+
+  local value_status="skipped"
+  local analyze_status="skipped"
+  if [[ -n "$source_path" && -d "$source_path" ]]; then
+    if [[ -x "$AUDLINT_VALUE_BIN" ]]; then
+      if [[ -n "$genre_profile" ]]; then
+        if GENRE_PROFILE="$genre_profile" "$AUDLINT_VALUE_BIN" "$source_path" >"$value_json" 2>"$value_err"; then
+          value_status="ok"
+        else
+          value_status="failed"
+        fi
+      else
+        if "$AUDLINT_VALUE_BIN" "$source_path" >"$value_json" 2>"$value_err"; then
+          value_status="ok"
+        else
+          value_status="failed"
+        fi
+      fi
+    fi
+    if [[ -x "$AUDLINT_ANALYZE_BIN" ]]; then
+      if "$AUDLINT_ANALYZE_BIN" --json "$source_path" >"$analyze_json" 2>"$analyze_err"; then
+        analyze_status="ok"
+      else
+        analyze_status="failed"
+      fi
+    fi
+  fi
+
+  if command_ref_available "$PYTHON_BIN"; then
+    ALBUM_ANALYSIS_ROW_ID="$rid" \
+    ALBUM_ANALYSIS_ARTIST="$artist" \
+    ALBUM_ANALYSIS_ALBUM="$album" \
+    ALBUM_ANALYSIS_YEAR="$year" \
+    ALBUM_ANALYSIS_SOURCE_PATH="$source_path" \
+    ALBUM_ANALYSIS_GRADE="$quality_grade" \
+    ALBUM_ANALYSIS_QUALITY_SCORE="$quality_score" \
+    ALBUM_ANALYSIS_DR_SCORE="$dr_score" \
+    ALBUM_ANALYSIS_CURRENT_QUALITY="$current_quality" \
+    ALBUM_ANALYSIS_CODEC="$codec" \
+    ALBUM_ANALYSIS_BITRATE="$bitrate" \
+    ALBUM_ANALYSIS_RECODE_REC="$recode_rec" \
+    ALBUM_ANALYSIS_NEEDS_RECODE="$needs_recode" \
+    ALBUM_ANALYSIS_NEEDS_REPLACE="$needs_replace" \
+    ALBUM_ANALYSIS_SCAN_FAILED="$scan_failed" \
+    ALBUM_ANALYSIS_RECOMMENDATION="$recommendation" \
+    ALBUM_ANALYSIS_NOTES="$notes" \
+    ALBUM_ANALYSIS_CHECKED_LABEL="$checked_label" \
+    ALBUM_ANALYSIS_GENRE_PROFILE="$genre_profile" \
+    ALBUM_ANALYSIS_RECODE_SOURCE_PROFILE="$recode_source_profile" \
+    ALBUM_ANALYSIS_VALUE_STATUS="$value_status" \
+    ALBUM_ANALYSIS_ANALYZE_STATUS="$analyze_status" \
+    "$PYTHON_BIN" - "$value_json" "$value_err" "$analyze_json" "$analyze_err" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+
+value_json_path = pathlib.Path(sys.argv[1])
+value_err_path = pathlib.Path(sys.argv[2])
+analyze_json_path = pathlib.Path(sys.argv[3])
+analyze_err_path = pathlib.Path(sys.argv[4])
+
+
+def env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default)
+
+
+def first_line(path: pathlib.Path) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    return text.splitlines()[0].strip()
+
+
+def load_json_if_ok(path: pathlib.Path, status: str):
+    if status != "ok" or not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+
+def fmt(v) -> str:
+    if v is None:
+        return "-"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+value_status = env("ALBUM_ANALYSIS_VALUE_STATUS", "skipped")
+analyze_status = env("ALBUM_ANALYSIS_ANALYZE_STATUS", "skipped")
+value_data = load_json_if_ok(value_json_path, value_status)
+analyze_data = load_json_if_ok(analyze_json_path, analyze_status)
+value_err = first_line(value_err_path)
+analyze_err = first_line(analyze_err_path)
+
+print("Album Analysis")
+print("==============")
+print(f"ID: {env('ALBUM_ANALYSIS_ROW_ID')}")
+print(f"Artist: {env('ALBUM_ANALYSIS_ARTIST')}")
+print(f"Album: {env('ALBUM_ANALYSIS_ALBUM')}")
+print(f"Year: {env('ALBUM_ANALYSIS_YEAR')}")
+print(f"Library Path: {env('ALBUM_ANALYSIS_SOURCE_PATH')}")
+print(f"Checked: {env('ALBUM_ANALYSIS_CHECKED_LABEL')}")
+print()
+print("Stored Quality")
+print("--------------")
+print(f"Grade={env('ALBUM_ANALYSIS_GRADE')} score={fmt(env('ALBUM_ANALYSIS_QUALITY_SCORE'))} dr_score={fmt(env('ALBUM_ANALYSIS_DR_SCORE'))}")
+print(f"Current={fmt(env('ALBUM_ANALYSIS_CURRENT_QUALITY'))} codec={fmt(env('ALBUM_ANALYSIS_CODEC'))} bitrate={fmt(env('ALBUM_ANALYSIS_BITRATE'))}")
+print(f"Recode={fmt(env('ALBUM_ANALYSIS_RECODE_REC'))} needs_recode={fmt(env('ALBUM_ANALYSIS_NEEDS_RECODE'))} needs_replace={fmt(env('ALBUM_ANALYSIS_NEEDS_REPLACE'))} scan_failed={fmt(env('ALBUM_ANALYSIS_SCAN_FAILED'))}")
+print(f"Genre profile={fmt(env('ALBUM_ANALYSIS_GENRE_PROFILE'))} source profile={fmt(env('ALBUM_ANALYSIS_RECODE_SOURCE_PROFILE'))}")
+if env("ALBUM_ANALYSIS_RECOMMENDATION"):
+    print(f"Recommendation: {env('ALBUM_ANALYSIS_RECOMMENDATION')}")
+if env("ALBUM_ANALYSIS_NOTES"):
+    print(f"Notes: {env('ALBUM_ANALYSIS_NOTES')}")
+print()
+print("Live Analysis")
+print("-------------")
+print(f"audlint-value: {value_status}{' (' + value_err + ')' if value_status == 'failed' and value_err else ''}")
+print(f"audlint-analyze --json: {analyze_status}{' (' + analyze_err + ')' if analyze_status == 'failed' and analyze_err else ''}")
+
+if value_data:
+    print(
+        "DR total={dr} grade={grade} recodeTo={recode} sr={sr} bits={bits}".format(
+            dr=fmt(value_data.get("drTotal")),
+            grade=fmt(value_data.get("grade")),
+            recode=fmt(value_data.get("recodeTo")),
+            sr=fmt(value_data.get("samplingRateHz")),
+            bits=fmt(value_data.get("bitsPerSample")),
+        )
+    )
+if analyze_data:
+    album_sr = analyze_data.get("album_sr")
+    album_bits = analyze_data.get("album_bits")
+    track_count = len(analyze_data.get("tracks", []) or [])
+    print(f"Spectral target={fmt(album_sr)}/{fmt(album_bits)} tracks={track_count}")
+
+dr_tracks_raw = value_data.get("tracks", {}) if isinstance(value_data, dict) else {}
+if not isinstance(dr_tracks_raw, dict):
+    dr_tracks_raw = {}
+an_tracks_raw = analyze_data.get("tracks", []) if isinstance(analyze_data, dict) else []
+if not isinstance(an_tracks_raw, list):
+    an_tracks_raw = []
+
+merged = {}
+order = []
+
+for item in an_tracks_raw:
+    if not isinstance(item, dict):
+        continue
+    file_name = os.path.basename(str(item.get("file", ""))).strip()
+    key = file_name.lower() if file_name else f"an:{len(order)}"
+    if key not in merged:
+        merged[key] = {"track": file_name or key}
+        order.append(key)
+    merged[key]["cutoff_hz"] = item.get("cutoff_hz")
+    merged[key]["tgt_sr"] = item.get("tgt_sr")
+
+for name, dr in dr_tracks_raw.items():
+    file_name = str(name).strip()
+    key = file_name.lower() if file_name else f"dr:{len(order)}"
+    if key not in merged:
+        merged[key] = {"track": file_name or key}
+        order.append(key)
+    merged[key]["dr"] = dr
+
+if order:
+    print()
+    print("Tracks")
+    print("------")
+    print("#   Track                              DR    CutoffHz  TargetSR")
+    idx = 1
+    for key in order:
+        row = merged.get(key, {})
+        track = str(row.get("track", "-")).replace("\n", " ").replace("\r", " ")
+        if len(track) > 34:
+            track = track[:31] + "..."
+        dr = fmt(row.get("dr"))
+        cutoff = fmt(row.get("cutoff_hz"))
+        target = fmt(row.get("tgt_sr"))
+        print(f"{idx:>2}.  {track:<34} {dr:>5} {cutoff:>9} {target:>8}")
+        idx += 1
+PY
+  else
+    printf 'Album Analysis\n'
+    printf '==============\n'
+    printf 'ID: %s\n' "$rid"
+    printf 'Artist: %s\n' "$artist"
+    printf 'Album: %s\n' "$album"
+    printf 'Year: %s\n' "$year"
+    printf 'Library Path: %s\n' "$source_path"
+    printf 'Checked: %s\n' "$checked_label"
+    printf '\nPython not available for detailed per-track report (%s).\n' "$PYTHON_BIN"
+  fi
+
+  rm -f "$value_json" "$value_err" "$analyze_json" "$analyze_err"
+}
+
+show_album_analysis_page_for_row_id() {
+  local row_id="$1"
+  local report_file
+  report_file="$(mktemp "${TMPDIR:-/tmp}/audlint_album_report.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$report_file" ]]; then
+    ACTION_MESSAGE="Album analysis failed: could not create temporary report."
+    return 1
+  fi
+  if ! print_album_analysis_report_for_row_id "$row_id" >"$report_file"; then
+    rm -f "$report_file"
+    ACTION_MESSAGE="Album analysis failed: row not found (id=$row_id)."
+    return 1
+  fi
+
+  if [[ "$INTERACTIVE" == "yes" ]]; then
+    if virtwin_run_command 5 "${LINES:-$(tput lines)}" "${COLUMNS:-$(tput cols)}" "album-analysis" cat "$report_file"; then
+      ACTION_MESSAGE="Album analysis opened for row id=$row_id."
+      rm -f "$report_file"
+      return 0
+    fi
+    ACTION_MESSAGE="Album analysis window failed for row id=$row_id."
+    rm -f "$report_file"
+    return 1
+  fi
+
+  cat "$report_file"
+  rm -f "$report_file"
+  return 0
+}
+
+run_album_analysis_for_row_ids() {
+  local selected_ids=("$@")
+  local valid_ids=()
+  local row_id
+  for row_id in "${selected_ids[@]}"; do
+    [[ "$row_id" =~ ^[0-9]+$ ]] || continue
+    valid_ids+=("$row_id")
+  done
+  if ((${#valid_ids[@]} != 1)); then
+    ACTION_MESSAGE="Album analysis requires selecting exactly 1 row."
+    return 1
+  fi
+  show_album_analysis_page_for_row_id "${valid_ids[0]}"
+}
+
 player_path_component() {
   local raw="$1"
   raw="${raw//$'\n'/ }"
@@ -1817,54 +2274,23 @@ player_album_dest_dir() {
 
 transfer_first_audio_file() {
   local source_path="$1"
-  local had_nullglob=0
-  local had_nocaseglob=0
+  local files=()
   local f
 
-  shopt -q nullglob && had_nullglob=1
-  shopt -q nocaseglob && had_nocaseglob=1
-  shopt -s nullglob nocaseglob
-
-  for f in \
-    "$source_path"/*.flac \
-    "$source_path"/*.alac \
-    "$source_path"/*.m4a \
-    "$source_path"/*.wav \
-    "$source_path"/*.dsf \
-    "$source_path"/*.dff \
-    "$source_path"/*.wv \
-    "$source_path"/*.ape \
-    "$source_path"/*.mp4 \
-    "$source_path"/*.mp3 \
-    "$source_path"/*.ogg \
-    "$source_path"/*.opus; do
+  # Flat scan first (fast, covers the common case).
+  audio_collect_files "$source_path" files
+  for f in "${files[@]}"; do
     [[ -f "$f" ]] || continue
     printf '%s' "$f"
-    ((had_nullglob == 1)) || shopt -u nullglob
-    ((had_nocaseglob == 1)) || shopt -u nocaseglob
     return 0
   done
 
-  ((had_nullglob == 1)) || shopt -u nullglob
-  ((had_nocaseglob == 1)) || shopt -u nocaseglob
-
+  # Recursive fallback for nested layouts.
+  # shellcheck disable=SC2046
   while IFS= read -r -d '' f; do
     printf '%s' "$f"
     return 0
-  done < <(find "$source_path" -type f \( \
-    -iname '*.flac' -o \
-    -iname '*.alac' -o \
-    -iname '*.m4a' -o \
-    -iname '*.wav' -o \
-    -iname '*.dsf' -o \
-    -iname '*.dff' -o \
-    -iname '*.wv' -o \
-    -iname '*.ape' -o \
-    -iname '*.mp4' -o \
-    -iname '*.mp3' -o \
-    -iname '*.ogg' -o \
-    -iname '*.opus' \
-    \) -print0 2>/dev/null)
+  done < <(find "$source_path" -type f \( $(audio_find_iname_args) \) -print0 2>/dev/null)
 
   return 1
 }
@@ -2112,7 +2538,7 @@ run_transfer_for_row_ids() {
     return 1
   fi
   cat >"$runner_script" <<'EOF'
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 manifest_file="$1"
 rsync_bin="$2"
@@ -2310,7 +2736,7 @@ run_lyrics_seek_for_row_ids() {
     return 1
   fi
   cat >"$runner_script" <<'EOF'
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 manifest_file="$1"
 lyrics_seek_bin="$2"
@@ -2479,7 +2905,7 @@ run_flac_recode_for_row_id() {
     return 1
   fi
   cat >"$runner_script" <<'EOF'
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 source_path="$1"
 target_profile="$2"
@@ -2750,6 +3176,10 @@ while [[ $# -gt 0 ]]; do
     show_help
     exit 0
     ;;
+  --help-profiles)
+    show_help_profiles
+    exit 0
+    ;;
   --view)
     shift
     value="${1:-}"
@@ -2859,6 +3289,15 @@ while [[ $# -gt 0 ]]; do
     }
     DB_PATH="$value"
     ;;
+  --album-id)
+    shift
+    value="${1:-}"
+    if [[ -z "$value" || ! "$value" =~ ^[0-9]+$ || "$value" == "0" ]]; then
+      echo "Error: --album-id requires integer >= 1" >&2
+      exit 2
+    fi
+    ALBUM_ANALYSIS_ID="$value"
+    ;;
   --interactive)
     INTERACTIVE="yes"
     ;;
@@ -2890,9 +3329,11 @@ if ! has_bin sqlite3; then
   exit 1
 fi
 
-if ! table_require_rich; then
-  echo "Error: rich table renderer unavailable" >&2
-  exit 1
+if [[ -z "$ALBUM_ANALYSIS_ID" ]]; then
+  if ! table_require_rich; then
+    echo "Error: rich table renderer unavailable" >&2
+    exit 1
+  fi
 fi
 
 DB_DIR="$(dirname "$DB_PATH")"
@@ -2951,6 +3392,18 @@ if [[ "$has_fts_table" == "1" ]]; then
 fi
 detect_album_quality_columns "$DB_PATH"
 refresh_sort_key_exprs
+
+if [[ -n "$ALBUM_ANALYSIS_ID" ]]; then
+  if ! show_album_analysis_page_for_row_id "$ALBUM_ANALYSIS_ID"; then
+    if [[ -n "$ACTION_MESSAGE" ]]; then
+      echo "$ACTION_MESSAGE" >&2
+    else
+      echo "Album analysis failed for row id=$ALBUM_ANALYSIS_ID" >&2
+    fi
+    exit 1
+  fi
+  exit 0
+fi
 
 if [[ "$INTERACTIVE" == "auto" ]]; then
   if [[ -t 0 && -t 1 ]]; then
@@ -3118,7 +3571,7 @@ while true; do
     fi
     printf '%s' "$(row_action_prompt_for_mode "$ROW_ACTION_MODE")"
     delete_input=""
-    if IFS= read -r delete_input </dev/tty; then
+    if tty_read_line delete_input; then
       compact_delete_input="$(printf '%s' "$delete_input" | tr -d '[:space:]')"
       if [[ -z "$compact_delete_input" ]]; then
         ROW_ACTION_MODE=""
@@ -3154,6 +3607,11 @@ while true; do
         ROW_ACTION_MODE=""
         continue
       fi
+      if [[ "$ROW_ACTION_MODE" == "album_analysis" ]]; then
+        run_album_analysis_for_row_ids "${selected_row_ids[@]}" || true
+        ROW_ACTION_MODE=""
+        continue
+      fi
       if [[ "$ROW_ACTION_MODE" == "recode_flac" ]]; then
         run_flac_recode_for_row_ids "${selected_row_ids[@]}" || true
         ROW_ACTION_MODE=""
@@ -3171,7 +3629,7 @@ while true; do
   if [[ "$QUIT_CONFIRM_MODE" == "1" ]]; then
     printf 'Really Quit? [y|n|c] > '
     quit_choice=""
-    if ! IFS= read -r -n 1 quit_choice </dev/tty; then
+    if ! tty_read_key quit_choice; then
       printf '\n'
       quit_choice="n"
     else
@@ -3198,7 +3656,7 @@ while true; do
 
   print_key_prompt
   key=""
-  if ! IFS= read -r -n 1 key </dev/tty; then
+  if ! tty_read_key key; then
     printf '\n'
     break
   fi
@@ -3336,7 +3794,7 @@ while true; do
   /)
     printf 'search artist/album (blank=clear) > '
     search_value=""
-    if IFS= read -r search_value </dev/tty; then
+    if tty_read_line search_value; then
       SEARCH_QUERY="$(normalize_search_query "$search_value")"
       PAGE=1
     fi
@@ -3375,7 +3833,9 @@ while true; do
     fi
     ;;
   s)
-    if [[ -x "$SYNC_MUSIC_BIN" ]]; then
+    if ! show_sync_action; then
+      ACTION_MESSAGE="Sync unavailable: set DST_USER_HOST and DST_PATH in .env."
+    elif [[ -x "$SYNC_MUSIC_BIN" ]]; then
       if virtwin_run_command 5 "${LINES:-$(tput lines)}" "${COLUMNS:-$(tput cols)}" "sync-music" "$SYNC_MUSIC_BIN"; then
         ACTION_MESSAGE="sync-music completed."
       else
@@ -3410,53 +3870,41 @@ while true; do
       ROW_ACTION_MODE="lyrics_seek"
     fi
     ;;
+  i)
+    ROW_ACTION_MODE="album_analysis"
+    ;;
   m)
-    if [[ -z "$LIBRARY_ROOT" || ! -x "$QTY_SEEK_BIN" ]]; then
-      ACTION_MESSAGE="Maintain unavailable: qty_seek.sh not found or LIBRARY_ROOT not set."
+    if [[ -z "$LIBRARY_ROOT" || ! -x "$AUDLINT_TASK_BIN" || ! -x "$AUDLINT_MAINTAIN_BIN" ]]; then
+      ACTION_MESSAGE="Maintain unavailable: audlint-maintain.sh/audlint-task.sh missing or LIBRARY_ROOT not set."
     else
-      _maintain_rc=0
-      VIRTWIN_LOG_FILE="$QTY_SEEK_LOG" \
-        virtwin_run_command 5 "${LINES:-$(tput lines)}" "${COLUMNS:-$(tput cols)}" "maintain" --no-wait \
-        "$QTY_SEEK_BIN" --max-albums "$QTY_SEEK_MAX_ALBUMS" "$LIBRARY_ROOT" || _maintain_rc=$?
-      # Custom footer: offer full-discovery invalidation on success.
-      if ((_maintain_rc == 0)); then
-        invalidate_count_cache
-        printf ' Press any key to return or [F] full rescan.'
-      else
-        printf ' Press any key to return.'
-      fi
-      _mkey=""
-      IFS= read -r -n 1 -s _mkey </dev/tty || true
-      if ((_maintain_rc == 0)) && [[ "${_mkey,,}" == "f" ]]; then
-        rm -f "$QTY_SEEK_DISCOVERY_CACHE"
-        VIRTWIN_LOG_FILE="$QTY_SEEK_LOG" \
-          virtwin_run_command 5 "${LINES:-$(tput lines)}" "${COLUMNS:-$(tput cols)}" "maintain (full)" \
-          "$QTY_SEEK_BIN" --max-albums "$QTY_SEEK_MAX_ALBUMS" --full-discovery "$LIBRARY_ROOT" || true
-        invalidate_count_cache
-        ACTION_MESSAGE="Full rescan completed. Log: $QTY_SEEK_LOG"
-      elif ((_maintain_rc == 0)); then
-        ACTION_MESSAGE="Maintenance scan completed. Log: $QTY_SEEK_LOG"
-      else
-        ACTION_MESSAGE="Maintenance scan failed. Log: $QTY_SEEK_LOG"
-      fi
+      AUDLINT_TASK_BIN="$AUDLINT_TASK_BIN" \
+      AUDLINT_TASK_MAX_ALBUMS="$AUDLINT_TASK_MAX_ALBUMS" \
+      AUDLINT_TASK_MAX_TIME_SEC="$AUDLINT_TASK_MAX_TIME_SEC" \
+      AUDLINT_TASK_LOG="$AUDLINT_TASK_LOG" \
+      AUDLINT_TASK_DISCOVERY_CACHE_FILE="$AUDLINT_TASK_DISCOVERY_CACHE_FILE" \
+      AUDLINT_LIBRARY_ROOT="$LIBRARY_ROOT" \
+      AUDLINT_CRON_INTERVAL_MIN="$AUDLINT_CRON_INTERVAL_MIN" \
+      virtwin_run_command 5 "${LINES:-$(tput lines)}" "${COLUMNS:-$(tput cols)}" "maintain" --no-wait \
+        "$AUDLINT_MAINTAIN_BIN" || true
+      invalidate_count_cache
     fi
     ;;
   L)
-    if [[ ! -f "$QTY_SEEK_LOG" ]]; then
-      ACTION_MESSAGE="No log yet: $QTY_SEEK_LOG"
+    if [[ ! -f "$AUDLINT_TASK_LOG" ]]; then
+      ACTION_MESSAGE="No log yet: $AUDLINT_TASK_LOG"
     else
       virtwin_run_command 5 "${LINES:-$(tput lines)}" "${COLUMNS:-$(tput cols)}" "log" \
-        cat "$QTY_SEEK_LOG"
+        cat "$AUDLINT_TASK_LOG"
     fi
     ;;
   P)
-    if [[ -z "$LIBRARY_ROOT" || ! -x "$QTY_SEEK_BIN" ]]; then
-      ACTION_MESSAGE="Purge unavailable: qty_seek.sh not found or LIBRARY_ROOT not set."
+    if [[ -z "$LIBRARY_ROOT" || ! -x "$AUDLINT_TASK_BIN" ]]; then
+      ACTION_MESSAGE="Purge unavailable: audlint-task.sh not found or LIBRARY_ROOT not set."
     elif [[ "$DB_WRITABLE" != true ]]; then
       ACTION_MESSAGE="DB is read-only; purge action is disabled."
     else
       if virtwin_run_command 5 "${LINES:-$(tput lines)}" "${COLUMNS:-$(tput cols)}" "purge-missing" \
-          "$QTY_SEEK_BIN" --purge-missing "$LIBRARY_ROOT"; then
+          "$AUDLINT_TASK_BIN" --purge-missing "$LIBRARY_ROOT"; then
         ACTION_MESSAGE="Purge completed."
         invalidate_count_cache
       else

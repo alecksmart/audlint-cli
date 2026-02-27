@@ -217,7 +217,12 @@ class Any2FlacCliSmokeTests(unittest.TestCase):
         sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
         self.assertIn("rate", sox_log)
         self.assertIn("48k", sox_log)
+<<<<<<< HEAD
         self.assertIn("dither", sox_log)
+=======
+        # dither -s is not added for 24-bit output (no bit-depth reduction)
+        self.assertNotIn("dither", sox_log)
+>>>>>>> develop
         self.assertIn("-b 24", sox_log)
 
     def test_dsd_source_allows_24bit_target_when_probe_reports_1bit(self) -> None:
@@ -281,7 +286,7 @@ class Any2FlacCliSmokeTests(unittest.TestCase):
         self.assertIn("Filename\tSize(bytes)\tCodec\tProfile\tBitrate\tTarget Profile", proc.stdout)
         self.assertIn("01-hr.wav", proc.stdout)
         self.assertIn("02-hr.flac", proc.stdout)
-        self.assertIn("48/24", proc.stdout)
+        self.assertIn("48000/24", proc.stdout)
         self.assertIn("Plan-only mode completed: 2 file(s) validated.", proc.stdout)
         self.assertFalse((self.tmpdir / "ffmpeg.log").exists(), "ffmpeg should not run in --plan-only mode")
 

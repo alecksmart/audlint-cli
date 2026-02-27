@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Usage: sync-music.sh [--dry-run] [--debug]
@@ -57,14 +57,17 @@ SSH_KEY="${SSH_KEY:-}"
   echo "ERROR: DST_PATH is not set in .env" >&2
   exit 1
 }
-[[ -n "$SSH_KEY" ]] || {
-  echo "ERROR: SSH_KEY is not set in .env" >&2
+if [[ -n "$SSH_KEY" && ! -r "$SSH_KEY" ]]; then
+  echo "ERROR: SSH_KEY is set but not readable: $SSH_KEY" >&2
   exit 1
-}
+fi
 
-SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+if [[ -n "$SSH_KEY" ]]; then
+  SSH_OPTS=(-i "$SSH_KEY" "${SSH_OPTS[@]}")
+fi
 
-usage() {
+show_help() {
   cat <<EOF
 Usage: $(basename "$0") [--dry-run] [--debug]
   --dry-run   : show what would happen without making changes
@@ -74,7 +77,6 @@ Notes:
 - Config comes from .env in this folder.
 - Destination is reached via SSH as: \$DST_USER_HOST:\$DST_PATH
 EOF
-  exit 1
 }
 
 # Parse args
@@ -88,10 +90,14 @@ while [[ $# -gt 0 ]]; do
     DEBUG=1
     shift
     ;;
-  -h | --help) usage ;;
+  -h | --help)
+    show_help
+    exit 0
+    ;;
   *)
-    echo "Unknown arg: $1"
-    usage
+    echo "Unknown arg: $1" >&2
+    show_help >&2
+    exit 2
     ;;
   esac
 done
@@ -127,7 +133,11 @@ rsync_supports_flag() {
 log "Starting music sync"
 log "Source : $SRC"
 log "Dest   : ${DST_USER_HOST}:${DST_PATH}"
-log "SSH key: $SSH_KEY"
+if [[ -n "$SSH_KEY" ]]; then
+  log "SSH key: $SSH_KEY"
+else
+  log "SSH key: <default identity>"
+fi
 log "Dry-run: ${DRY_RUN:+yes}${DRY_RUN:-no}"
 log "Debug  : $DEBUG"
 

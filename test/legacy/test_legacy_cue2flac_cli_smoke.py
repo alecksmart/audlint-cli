@@ -196,6 +196,18 @@ class Cue2FlacCliSmokeTests(unittest.TestCase):
     # -------------------------------------------------------------------------
     # Test: dry-run prints plan, writes nothing
     # -------------------------------------------------------------------------
+<<<<<<< HEAD
+=======
+    def test_help_profiles(self) -> None:
+        proc = self._run(["--help-profiles"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("Accepted profile input forms", proc.stdout)
+        self.assertIn("Common target profiles", proc.stdout)
+
+    # -------------------------------------------------------------------------
+    # Test: dry-run prints plan, writes nothing
+    # -------------------------------------------------------------------------
+>>>>>>> develop
     def test_dry_run_prints_plan_no_files_written(self) -> None:
         proc = self._run(["--dry-run"])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
@@ -380,6 +392,34 @@ class Cue2FlacCliSmokeTests(unittest.TestCase):
         sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
         self.assertIn("gain", sox_log)
 
+<<<<<<< HEAD
+=======
+    # -------------------------------------------------------------------------
+    # Test: --check-upscale uses audlint-analyze target selection
+    # -------------------------------------------------------------------------
+    def test_check_upscale_low_bw_96k_resolves_to_44100_profile(self) -> None:
+        analyze_stub = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            if [[ "${1:-}" == "--json" ]]; then
+              cat <<'JSON'
+{"album_sr": 44100, "album_bits": 24, "tracks": [{"cutoff_hz": 4930.0}]}
+JSON
+              exit 0
+            fi
+            printf '44100/24\n'
+            """
+        )
+        helper = self.script_dir / "audlint-analyze.sh"
+        helper.write_text(analyze_stub, encoding="utf-8")
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        proc = self._run(["--check-upscale", "--dry-run"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Target    : 44100/24", proc.stdout)
+        self.assertIn("audlint-analyze", proc.stdout)
+
+>>>>>>> develop
 
 if __name__ == "__main__":
     unittest.main()

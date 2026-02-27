@@ -152,7 +152,6 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
     def test_dry_run_without_cue_is_safe(self) -> None:
         proc = self._run(["--dry-run"])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Dry run enabled", proc.stdout)
         self.assertIn("No .cue file found", proc.stdout)
         self.assertFalse((self.album_dir / "flac_out" / "01 Song.flac").exists())
 
@@ -181,7 +180,12 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
         self.assertIn("176400", sox_log)
         self.assertIn("-b 24", sox_log)
+<<<<<<< HEAD
         self.assertIn("dither", sox_log)
+=======
+        # dither -s is not added for 24-bit output (no bit-depth reduction)
+        self.assertNotIn("dither", sox_log)
+>>>>>>> develop
         # gain applied: boost is always on for dff2flac (true-peak auto-boost)
         self.assertIn("gain", sox_log)
         # metadata tags are passed via metaflac --import-tags-from (stubbed); not in ffmpeg log

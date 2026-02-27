@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # clear_tags.sh - Clear lyrics tags and cached lyrics DB entries for files in the current folder.
 
 BOOTSTRAP_SOURCE="${BASH_SOURCE[0]}"
@@ -33,28 +33,45 @@ show_help() {
   cat <<EOF
 Quick use:
   $(basename "$0")
+  $(basename "$0") /abs/path/to/album
 
-Usage: $(basename "$0") [dir]
+Usage: $(basename "$0") [TARGET_DIR]
 
 Options:
-  -h   Show this help message.
+  -h, --help  Show this help message.
+
+Behavior:
+  - Removes embedded lyrics tags from supported files.
+  - Removes local sidecar lyric files (*.lrc, *.txt).
+  - Removes matching rows from lyrics_cache in LIBRARY_DB when metadata is available.
 EOF
 }
 
-if [ "${1:-}" = "--help" ]; then
-  show_help
-  exit 0
-fi
-
-while getopts ":h" opt; do
-  case "$opt" in
-    h) show_help; exit 0 ;;
-    \?) show_help; exit 2 ;;
+TARGET_DIR="."
+target_set=false
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+    -h | --help)
+      show_help
+      exit 0
+      ;;
+    -*)
+      printf 'Unknown argument: %s\n' "${1:-}" >&2
+      show_help
+      exit 2
+      ;;
+    *)
+      if [[ "$target_set" == true ]]; then
+        printf 'Unexpected extra argument: %s\n' "${1:-}" >&2
+        show_help
+        exit 2
+      fi
+      TARGET_DIR="${1:-.}"
+      target_set=true
+      ;;
   esac
+  shift || true
 done
-shift $((OPTIND - 1))
-
-TARGET_DIR="${1:-.}"
 if [ ! -d "$TARGET_DIR" ]; then
   echo "${RED}Not a directory:${RESET} $TARGET_DIR"
   exit 2
@@ -182,6 +199,7 @@ for f in "${FILES[@]}"; do
 
       sqlite3 "$LIBRARY_DB" \
         "DELETE FROM lyrics_cache WHERE artist_lc='$(sql_escape "$ARTIST_LC")' AND title_lc='$(sql_escape "$TITLE_LC")' AND album_lc='$(sql_escape "$ALBUM_LC")' AND abs(duration_int - ${DURATION_INT}) <= 2;"
+      # Remove both relative and absolute path cache rows to cover mixed callers.
       sqlite3 "$LIBRARY_DB" \
         "DELETE FROM lyrics_cache WHERE path='$(sql_escape "$f")';"
       ABS_PATH="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"

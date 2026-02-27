@@ -40,13 +40,13 @@ class LyricsSmokeTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _install_stubs(self) -> None:
-        _write_exec(self.bin_dir / "tput", "#!/opt/homebrew/bin/bash\nexit 0\n")
-        _write_exec(self.bin_dir / "readlink", "#!/opt/homebrew/bin/bash\n/usr/bin/readlink \"$@\"\n")
+        _write_exec(self.bin_dir / "tput", "#!/usr/bin/env bash\nexit 0\n")
+        _write_exec(self.bin_dir / "readlink", "#!/usr/bin/env bash\n/usr/bin/readlink \"$@\"\n")
         _write_exec(
             self.bin_dir / "ffprobe",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 args="$*"
                 if [[ "$args" == *"stream=codec_name"* ]]; then
                   echo "flac"
@@ -59,11 +59,11 @@ class LyricsSmokeTests(unittest.TestCase):
                 """
             ),
         )
-        _write_exec(self.bin_dir / "curl", "#!/opt/homebrew/bin/bash\nprintf '[]'\n")
-        _write_exec(self.bin_dir / "jq", "#!/opt/homebrew/bin/bash\ncat\n")
-        _write_exec(self.bin_dir / "metaflac", "#!/opt/homebrew/bin/bash\nexit 0\n")
-        _write_exec(self.bin_dir / "eyeD3", "#!/opt/homebrew/bin/bash\nexit 0\n")
-        _write_exec(self.bin_dir / "AtomicParsley", "#!/opt/homebrew/bin/bash\nexit 0\n")
+        _write_exec(self.bin_dir / "curl", "#!/usr/bin/env bash\nprintf '[]'\n")
+        _write_exec(self.bin_dir / "jq", "#!/usr/bin/env bash\ncat\n")
+        _write_exec(self.bin_dir / "metaflac", "#!/usr/bin/env bash\nexit 0\n")
+        _write_exec(self.bin_dir / "eyeD3", "#!/usr/bin/env bash\nexit 0\n")
+        _write_exec(self.bin_dir / "AtomicParsley", "#!/usr/bin/env bash\nexit 0\n")
 
     def _run(self, script: Path, args, cwd: Path, env=None) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -93,7 +93,7 @@ class LyricsSmokeTests(unittest.TestCase):
             stub,
             textwrap.dedent(
                 f"""\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 printf "%s|%s\\n" "$(pwd)" "$*" >> "{seek_log}"
                 exit 0
                 """

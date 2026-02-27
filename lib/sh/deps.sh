@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 
 has_bin() {
   command -v "$1" >/dev/null 2>&1
@@ -6,7 +6,7 @@ has_bin() {
 
 deps_ensure_common_path() {
   local dir
-  for dir in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+  for dir in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
     [[ -d "$dir" ]] || continue
     case ":${PATH:-}:" in
     *":$dir:"*) ;;

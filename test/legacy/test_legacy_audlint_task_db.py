@@ -12,7 +12,7 @@ from typing import Dict, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC_QTY_SEEK = REPO_ROOT / "bin" / "qty_seek.sh"
+SRC_AUDLINT_TASK = REPO_ROOT / "bin" / "audlint-task.sh"
 SRC_TAG_WRITER = REPO_ROOT / "bin" / "tag_writer.sh"
 SRC_LIB_SH = REPO_ROOT / "lib" / "sh"
 
@@ -22,7 +22,7 @@ def _write_exec(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-class QtySeekDbTests(unittest.TestCase):
+class AudlintTaskDbTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         if shutil.which("sqlite3") is None:
@@ -31,7 +31,7 @@ class QtySeekDbTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmpdir = Path(self._tmp.name)
-        self.lock_dir = self.tmpdir / "qty_seek.lock"
+        self.lock_dir = self.tmpdir / "audlint-task.lock"
         self.bin_dir = self.tmpdir / "bin"
         self.bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -40,10 +40,9 @@ class QtySeekDbTests(unittest.TestCase):
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.lib_sh_dir = self.work_dir / "lib" / "sh"
         self.lib_sh_dir.mkdir(parents=True, exist_ok=True)
-        self.qty_seek = self.script_dir / "qty_seek.sh"
-        self.qty_seek.write_text(SRC_QTY_SEEK.read_text(encoding="utf-8"), encoding="utf-8")
-        self.qty_seek.chmod(self.qty_seek.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        (self.script_dir / "spectre_eval.py").write_text("# helper path placeholder\n", encoding="utf-8")
+        self.audlint_task = self.script_dir / "audlint-task.sh"
+        self.audlint_task.write_text(SRC_AUDLINT_TASK.read_text(encoding="utf-8"), encoding="utf-8")
+        self.audlint_task.chmod(self.audlint_task.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         tag_writer = self.script_dir / "tag_writer.sh"
         tag_writer.write_text(SRC_TAG_WRITER.read_text(encoding="utf-8"), encoding="utf-8")
         tag_writer.chmod(tag_writer.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -56,7 +55,7 @@ class QtySeekDbTests(unittest.TestCase):
             self.bin_dir / "ffmpeg",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 if [[ "${STUB_FFMPEG_FAIL:-0}" == "1" ]]; then
                   echo "ffmpeg merge failed" >&2
                   exit 1
@@ -85,7 +84,7 @@ class QtySeekDbTests(unittest.TestCase):
             self.bin_dir / "ffprobe",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 args="$*"
                 if [[ "${STUB_FFPROBE_NO_TAGS:-0}" != "1" && "$*" == *"format_tags="*"artist"*"album"*"date"* ]]; then
                   echo "TAG:artist=Stub Artist"
@@ -197,7 +196,7 @@ class QtySeekDbTests(unittest.TestCase):
             self.bin_dir / "pystub",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 if [[ "${1:-}" == "-" ]]; then
                   exit 0
                 fi
@@ -214,7 +213,7 @@ class QtySeekDbTests(unittest.TestCase):
 
                 if [[ -z "$f" ]]; then
                   # Allow tests to override the spectral recommendation via env var.
-                  rec="${STUB_SPECTRAL_REC:-Standard Definition → Store as 96/24}"
+                  rec="${STUB_SPECTRAL_REC:-Standard Definition → Store as 96000/24}"
                   printf 'RECOMMEND=%s\n' "$rec"
                   printf 'REASON=full bandwidth\nSUMMARY=ok\nCONFIDENCE=HIGH\n'
                   exit 0
@@ -245,23 +244,78 @@ OUT
                 """
             ),
         )
+        # audlint-value.sh stub: replaces the DR14+recode analysis tool.
+        # Outputs JSON controlled by STUB_AUDVALUE_GRADE / STUB_AUDVALUE_DR /
+        # STUB_AUDVALUE_RECODE_TO env vars.  Defaults: grade=A, DR=9, recode=96000/24.
+        # Set STUB_AUDVALUE_FAIL=1 to simulate tool failure (exits 1).
+        _write_exec(
+            self.script_dir / "audlint-value.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                # Stub for audlint-value.sh used in unit tests.
+                if [[ "${STUB_AUDVALUE_FAIL:-0}" == "1" ]]; then
+                  echo "audlint-value: simulated failure" >&2
+                  exit 1
+                fi
+                if [[ "${STUB_AUDVALUE_DELAY_SEC:-0}" != "0" ]]; then
+                  sleep "${STUB_AUDVALUE_DELAY_SEC}"
+                fi
+                grade="${STUB_AUDVALUE_GRADE:-A}"
+                dr="${STUB_AUDVALUE_DR:-9}"
+                recode_to="${STUB_AUDVALUE_RECODE_TO:-96000/24}"
+                cat <<JSON
+                {
+                  "recodeTo": "${recode_to}",
+                  "drTotal": ${dr},
+                  "grade": "${grade}",
+                  "genreProfile": "standard",
+                  "samplingRateHz": 96000,
+                  "averageBitrateKbs": null,
+                  "bitsPerSample": 24,
+                  "tracks": {}
+                }
+                JSON
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.script_dir / "audlint-analyze.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                if [[ "${STUB_AUDANALYZE_FAIL:-0}" == "1" ]]; then
+                  echo "audlint-analyze: simulated failure" >&2
+                  exit 1
+                fi
+                echo "${STUB_AUDANALYZE_RECODE_TO:-96000/24}"
+                exit 0
+                """
+            ),
+        )
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
     def _run(self, args, cwd: Path, db_path: Path, extra_env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
+        import shutil as _shutil
         env = os.environ.copy()
-        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{self.script_dir}{os.pathsep}{env.get('PATH', '')}"
         env["TERM"] = "xterm"
         env["LIBRARY_DB"] = str(db_path)
-        env["PYTHON_BIN"] = str(self.bin_dir / "pystub")
+        # Use real python3 for JSON parsing in audio.sh.
+        real_py = _shutil.which("python3") or _shutil.which("python") or "python3"
+        env["PYTHON_BIN"] = real_py
         env["NO_COLOR"] = "1"
-        env["QTY_SEEK_LOCK_DIR"] = str(self.lock_dir)
-        env["DISCOVERY_CACHE_FILE"] = str(self.tmpdir / "qty_seek_last_discovery")
+        env["AUDLINT_TASK_LOCK_DIR"] = str(self.lock_dir)
+        env["AUDLINT_TASK_DISCOVERY_CACHE_FILE"] = str(self.tmpdir / "audlint_task_last_discovery")
+        # Point directly at the audlint-value.sh stub so audio.sh resolves it correctly.
+        env["AUDLINT_VALUE_BIN"] = str(self.script_dir / "audlint-value.sh")
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
-            [str(self.qty_seek), *args],
+            [str(self.audlint_task), *args],
             cwd=str(cwd),
             env=env,
             text=True,
@@ -269,17 +323,20 @@ OUT
             check=False,
         )
 
-    def test_scan_mode_creates_album_quality_and_marks_replace_from_merged(self) -> None:
+    def test_scan_mode_creates_album_quality_from_dr14_stub(self) -> None:
+        """DR14 stub returns grade=A, DR=9, recodeTo=96000/24 (same as source).
+        FLAC albums with a keep grade are stored with recommendation=Keep and
+        recode_recommendation=Keep as-is (no-op recode suppressed)."""
         root = self.tmpdir / "library"
         album = root / "Artist Name" / "2005 - Album Name"
         album.mkdir(parents=True)
-        (album / "01-good.flac").write_text("", encoding="utf-8")
-        (album / "02-bad.flac").write_text("", encoding="utf-8")
+        (album / "01-track.flac").write_text("", encoding="utf-8")
+        (album / "02-track.flac").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
         proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Replace]", proc.stdout)
+        self.assertIn("[A]", proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
@@ -296,34 +353,30 @@ OUT
         self.assertEqual(row[0], "Stub Artist")
         self.assertEqual(row[1], "Stub Album")
         self.assertEqual(row[2], 2005)
-        self.assertEqual(row[3], "F")
-        self.assertEqual(row[4], "Trash")
-        self.assertEqual(row[5], 1)
+        self.assertEqual(row[3], "A")           # DR14 stub grade
+        self.assertEqual(row[4], "Keep")
+        self.assertEqual(row[5], 0)             # FLAC is never needs_replacement
         self.assertEqual(row[6], 0)
-        self.assertEqual(row[7], "96/24")
+        self.assertEqual(row[7], "96000/24")
         self.assertEqual(row[8], "1411k")
         self.assertEqual(row[9], "flac")
-        # Source is 96/24 and Trash grade → no-op recode suppressed.
-        self.assertEqual(row[10], "Mastering issue — recode won't help")
+        # recodeTo=96000/24 == source 96000/24 -> no-op suppressed.
+        self.assertEqual(row[10], "Keep as-is")
 
     def test_scan_mode_samples_tracks_when_estimated_merge_is_oversized(self) -> None:
         root = self.tmpdir / "library"
         album = root / "Artist Name" / "2005 - Album Name"
         album.mkdir(parents=True)
         for idx in range(1, 21):
-            name = f"{idx:02d}-good.flac"
-            payload = ""
-            if idx == 2:
-                name = f"{idx:02d}-bad.flac"
-                payload = "bad"
-            (album / name).write_text(payload, encoding="utf-8")
+            name = f"{idx:02d}-track.flac"
+            (album / name).write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
         proc = self._run(
             ["--max-albums", "15", str(root)],
             cwd=self.tmpdir,
             db_path=db_path,
-            extra_env={"QTY_SEEK_MERGE_PCM_MAX_BYTES": "1"},
+            extra_env={"AUDLINT_TASK_MERGE_PCM_MAX_BYTES": "1"},
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
@@ -417,6 +470,62 @@ OUT
         run2 = self._run(["--max-albums", "1", str(root)], cwd=self.tmpdir, db_path=db_path, extra_env={"STUB_FFPROBE_NO_TAGS": "1"})
         self.assertEqual(run2.returncode, 0, msg=run2.stderr + "\n" + run2.stdout)
         self.assertIn("albums_changed_done=1", run2.stdout)
+
+    def test_scan_mode_deadline_pacing_guard_stops_before_next_album(self) -> None:
+        root = self.tmpdir / "library"
+        for idx in range(1, 4):
+            album = root / f"Artist {idx}" / f"200{idx} - Album {idx}"
+            album.mkdir(parents=True)
+            (album / "01-good.flac").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        proc = self._run(
+            ["--max-albums", "10", "--max-time", "9", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={
+                "STUB_FFPROBE_NO_TAGS": "1",
+                "STUB_AUDVALUE_DELAY_SEC": "2",
+                "AUDLINT_TASK_DEADLINE_FINISH_BUFFER_SEC": "2",
+                "AUDLINT_TASK_NEXT_ALBUM_BUDGET_SEC": "2",
+                "AUDLINT_TASK_DEADLINE_MARGIN_SEC": "2",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Deadline pacing guard reached", proc.stdout)
+        self.assertIn("albums_analyzed=1", proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            analyzed_rows = conn.execute("SELECT COUNT(*) FROM album_quality").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(analyzed_rows, 1)
+
+    def test_scan_mode_maps_va_namespace_to_various_artists_when_tags_missing(self) -> None:
+        root = self.tmpdir / "library"
+        album = root / "_VA" / "2000 - O Brother, Where Art Thou_"
+        album.mkdir(parents=True)
+        (album / "01-track.opus").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        proc = self._run(
+            ["--max-albums", "15", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={"STUB_FFPROBE_NO_TAGS": "1"},
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT artist, album, year_int FROM album_quality LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "Various Artists")
+        self.assertEqual(row[1], "O Brother, Where Art Thou_")
+        self.assertEqual(row[2], 2000)
 
     def test_scan_roadmap_persists_pending_items_between_limited_runs(self) -> None:
         root = self.tmpdir / "library"
@@ -598,9 +707,10 @@ OUT
         (album / "01-lossy.m4a").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
-        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path,
+                         extra_env={"STUB_AUDVALUE_GRADE": "C"})
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Replace]", proc.stdout)
+        self.assertIn("[C]", proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
@@ -619,9 +729,10 @@ OUT
         (album / "01-lossy.opus").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
-        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path,
+                         extra_env={"STUB_AUDVALUE_GRADE": "C"})
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Replace]", proc.stdout)
+        self.assertIn("[C]", proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
@@ -640,9 +751,10 @@ OUT
         (album / "01-lossy.mp3").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
-        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path,
+                         extra_env={"STUB_AUDVALUE_GRADE": "C"})
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Replace]", proc.stdout)
+        self.assertIn("[C]", proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
@@ -661,9 +773,10 @@ OUT
         (album / "01-lossy.ogg").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
-        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path,
+                         extra_env={"STUB_AUDVALUE_GRADE": "C"})
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Replace]", proc.stdout)
+        self.assertIn("[C]", proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
@@ -682,9 +795,10 @@ OUT
         (album / "01-lossy.wma").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
-        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path,
+                         extra_env={"STUB_AUDVALUE_GRADE": "C"})
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Replace]", proc.stdout)
+        self.assertIn("[C]", proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
@@ -707,10 +821,10 @@ OUT
             ["--max-albums", "15", str(root)],
             cwd=self.tmpdir,
             db_path=db_path,
-            extra_env={"STUB_FFPROBE_CODEC_EMPTY": "1"},
+            extra_env={"STUB_FFPROBE_CODEC_EMPTY": "1", "STUB_AUDVALUE_GRADE": "C"},
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Replace]", proc.stdout)
+        self.assertIn("[C]", proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
@@ -721,6 +835,36 @@ OUT
         self.assertEqual(row[0], "Replace with Lossless Rip")
         self.assertEqual(row[1], 1)
         self.assertEqual(row[2], "mp3")
+
+    def test_scan_mode_lossy_high_grade_keeps_without_replace_message(self) -> None:
+        """Lossy source with grade S/A/B: keep recommendation, no replacement,
+        recode_recommendation=Keep as-is (no 'replace with lossless' noise)."""
+        root = self.tmpdir / "library"
+        album = root / "Artist Name" / "2005 - Album Name"
+        album.mkdir(parents=True)
+        (album / "01-lossy.opus").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        proc = self._run(
+            ["--max-albums", "15", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={"STUB_AUDVALUE_GRADE": "A"},
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT recommendation, recode_recommendation, needs_replacement, needs_recode FROM album_quality LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "Keep", "S/A/B lossy should not recommend replacement")
+        self.assertEqual(row[1], "Keep as-is", "S/A/B lossy should not show replace message")
+        self.assertEqual(row[2], 0, "S/A/B lossy should not set needs_replacement")
+        self.assertEqual(row[3], 0, "needs_recode must be 0 for lossy")
 
     def test_scan_mode_records_unknown_codec_details_when_unrecognized(self) -> None:
         root = self.tmpdir / "library"
@@ -762,7 +906,7 @@ OUT
         db_path = self.tmpdir / "library.sqlite"
         proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("OK]", proc.stdout)
+        self.assertIn("[A]", proc.stdout)
         self.assertNotIn("Invalid data found when processing input", proc.stdout)
         self.assertNotIn("Invalid data found when processing input", proc.stderr)
 
@@ -847,7 +991,7 @@ OUT
         self.assertEqual(row[2], 1)
         self.assertEqual(row[3], "mixed")
         self.assertEqual(row[4], "mixed")
-        self.assertIn("merge disabled", row[5] or "")
+        self.assertIn("replace source", row[5] or "")
 
     def test_scan_mode_marks_dsf_sources_as_upscaled(self) -> None:
         root = self.tmpdir / "library"
@@ -861,11 +1005,36 @@ OUT
 
         conn = sqlite3.connect(db_path)
         try:
-            row = conn.execute("SELECT is_upscaled FROM album_quality LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT is_upscaled, recode_recommendation, needs_recode FROM album_quality LIMIT 1"
+            ).fetchone()
         finally:
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 1)
+        self.assertIn("96000/24", row[1] or "")
+        self.assertEqual(row[2], 1)
+
+    def test_scan_mode_forces_recode_for_wav_even_when_target_matches_sr(self) -> None:
+        root = self.tmpdir / "library"
+        album = root / "Artist Name" / "2005 - Album Name"
+        album.mkdir(parents=True)
+        (album / "01-source.wav").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT recode_recommendation, needs_recode FROM album_quality LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertIn("96000/24", row[0] or "")
+        self.assertEqual(row[1], 1)
 
     def test_scan_mode_marks_32bit_profiles_as_upscaled(self) -> None:
         root = self.tmpdir / "library"
@@ -884,13 +1053,13 @@ OUT
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 1)
-        self.assertEqual(row[1], "96/32")
+        self.assertEqual(row[1], "96000/32")
 
     def test_scan_mode_does_not_mark_32f_profiles_as_upscaled(self) -> None:
         """32-bit float FLAC (flt/fltp sample format) is a lossless container
         produced by DAW exports and some encoders.  It is semantically equivalent
         to 24-bit at the same sample rate and must NOT be flagged as upscaled.
-        Recoding 44.1/32f → 44.1/24 provides no audible benefit and must be
+        Recoding 44100/32f -> 44100/24 provides no audible benefit and must be
         suppressed by the no-op check."""
         root = self.tmpdir / "library"
         album = root / "Artist Name" / "2005 - Album Name"
@@ -908,7 +1077,7 @@ OUT
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 0, "32f float FLAC should NOT be marked as upscaled")
-        self.assertEqual(row[1], "96/32f")
+        self.assertEqual(row[1], "96000/32f")
 
     def test_scan_mode_marks_above_192khz_profiles_as_upscaled(self) -> None:
         root = self.tmpdir / "library"
@@ -927,7 +1096,7 @@ OUT
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 1)
-        self.assertEqual(row[1], "352.8/24")
+        self.assertEqual(row[1], "352800/24")
 
     def test_scan_mode_marks_hires_16bit_as_upscaled(self) -> None:
         root = self.tmpdir / "library"
@@ -946,13 +1115,13 @@ OUT
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 1, "192kHz/16-bit should be flagged as upscaled")
-        self.assertEqual(row[1], "192/16")
+        self.assertEqual(row[1], "192000/16")
 
     def test_scan_mode_suppresses_noop_recode_for_keep(self) -> None:
         root = self.tmpdir / "library"
         album = root / "Artist Name" / "2005 - Album Name"
         album.mkdir(parents=True)
-        # Only good files → Keep/A grade. Source is 96/24, recode target is 96/24.
+        # Only good files -> Keep/A grade. Source is 96000/24, recode target is 96000/24.
         (album / "01-good.flac").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
@@ -965,13 +1134,13 @@ OUT
         finally:
             conn.close()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0], "96/24")
+        self.assertEqual(row[0], "96000/24")
         self.assertEqual(row[1], "Keep as-is")
         self.assertEqual(row[2], "Keep")
 
     def test_scan_mode_suppresses_noop_recode_for_32f_source(self) -> None:
-        """A 32-bit float FLAC (96/32f) with a spectral recommendation of
-        'Store as 96/24' must be suppressed to 'Keep as-is'.
+        """A 32-bit float FLAC (96000/32f) with a spectral recommendation of
+        'Store as 96000/24' must be suppressed to 'Keep as-is'.
         The float container is lossless and semantically equivalent to 24-bit;
         recoding it provides no benefit.  needs_recode must be 0."""
         root = self.tmpdir / "library"
@@ -991,14 +1160,19 @@ OUT
         finally:
             conn.close()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0], "96/32f", "current_quality should reflect float source")
+        self.assertEqual(row[0], "96000/32f", "current_quality should reflect float source")
         self.assertEqual(row[1], "Keep as-is", f"32f→24 recode should be suppressed, got: {row[1]}")
         self.assertEqual(row[2], 0, "needs_recode must be 0 for a 32f no-op")
 
     def test_scan_mode_keeps_downgrade_recode_after_previous_recode(self) -> None:
         """A previous recode timestamp does not suppress a later downgrade recode
+<<<<<<< HEAD:test/legacy/test_legacy_qty_seek_db.py
         recommendation. If spectral analysis says 'Store as 48/24', needs_recode
         remains actionable."""
+=======
+        recommendation. If audlint-value says recodeTo=48000/24, needs_recode
+        remains actionable (target 48000/24 < source 96000/24)."""
+>>>>>>> develop:test/legacy/test_legacy_audlint_task_db.py
         root = self.tmpdir / "library"
         album_dir = root / "Artist Name" / "2005 - Album Name"
         album_dir.mkdir(parents=True)
@@ -1026,12 +1200,12 @@ OUT
         os.utime(album_dir / "01-good.flac", (now + 5, now + 5))
         os.utime(album_dir, (now + 5, now + 5))
 
-        # Run with a spectral stub that recommends a downgrade: 48/24 < 96/24.
+        # Run with audlint-value stub recommending a downgrade: 48000/24 < 96000/24.
         proc2 = self._run(
             ["--max-albums", "15", str(root)],
             cwd=self.tmpdir,
             db_path=db_path,
-            extra_env={"STUB_SPECTRAL_REC": "Standard Definition → Store as 48/24"},
+            extra_env={"STUB_AUDVALUE_RECODE_TO": "48000/24"},
         )
         self.assertEqual(proc2.returncode, 0, msg=proc2.stderr + "\n" + proc2.stdout)
 
@@ -1044,7 +1218,11 @@ OUT
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[1], 1, f"needs_recode must stay actionable, got recode_rec={row[0]!r}")
+<<<<<<< HEAD:test/legacy/test_legacy_qty_seek_db.py
         self.assertIn("Store as 48/24", row[0], f"Expected downgrade recode target, got: {row[0]!r}")
+=======
+        self.assertIn("48000/24", row[0], f"Expected downgrade recode target, got: {row[0]!r}")
+>>>>>>> develop:test/legacy/test_legacy_audlint_task_db.py
 
     def test_scan_mode_adjusts_recode_bit_depth_for_16bit_source(self) -> None:
         root = self.tmpdir / "library"
@@ -1068,7 +1246,9 @@ OUT
             self.assertIn("/16", row[1], f"Expected /16 in recode for 16-bit source, got: {row[1]}")
             self.assertNotIn("/24", row[1], f"Should not suggest /24 for 16-bit source: {row[1]}")
 
-    def test_scan_mode_marks_failure_without_fallback(self) -> None:
+    def test_scan_mode_marks_failure_when_audlint_value_fails(self) -> None:
+        """When audlint-value fails the album is recorded as scan_failed=1
+        with an appropriate error note."""
         root = self.tmpdir / "library"
         album = root / "Artist Name" / "2005 - Album Name"
         album.mkdir(parents=True)
@@ -1079,7 +1259,7 @@ OUT
             ["--max-albums", "15", str(root)],
             cwd=self.tmpdir,
             db_path=db_path,
-            extra_env={"STUB_FFMPEG_FAIL": "1"},
+            extra_env={"STUB_AUDVALUE_FAIL": "1"},
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Fail]", proc.stdout)
@@ -1091,7 +1271,37 @@ OUT
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 1)
-        self.assertIn("ffmpeg merge failed", (row[1] or ""))
+        self.assertIn("scan failed", (row[1] or ""))
+
+    def test_scan_mode_uses_analyze_fallback_for_wav_when_audlint_value_fails(self) -> None:
+        root = self.tmpdir / "library"
+        album = root / "Artist Name" / "2005 - Album Name"
+        album.mkdir(parents=True)
+        (album / "01-source.wav").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        proc = self._run(
+            ["--max-albums", "15", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={
+                "STUB_AUDVALUE_FAIL": "1",
+                "STUB_AUDANALYZE_RECODE_TO": "44100/24",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT scan_failed, recode_recommendation, needs_recode FROM album_quality LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], 0)
+        self.assertIn("44100/24", row[1] or "")
+        self.assertEqual(row[2], 1)
 
     def test_scan_mode_skips_existing_scan_failed_rows(self) -> None:
         root = self.tmpdir / "library"

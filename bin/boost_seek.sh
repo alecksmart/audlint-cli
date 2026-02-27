@@ -1,6 +1,5 @@
-#!/opt/homebrew/bin/bash
-# boost_seek.sh - Fixed version with File Descriptor redirection
-# This ensures that boost_album.sh can still read your keyboard input.
+#!/usr/bin/env bash
+# boost_seek.sh - Recursively scan for album folders and run boost_album.sh.
 
 trap 'echo -e "\n\n[!] Seeker terminated by user."; exit 1' INT
 
@@ -45,34 +44,37 @@ show_help() {
 Quick use:
   $(basename "$0")
   $(basename "$0") -y
+  $(basename "$0") --yes
 
-Usage: $(basename "$0") [-y]
+Usage: $(basename "$0") [-y|--yes]
 
 Options:
-  -y   Auto-confirm prompts for each album.
-  -h   Show this help message.
+  -y, --yes   Auto-confirm prompts for each album.
+  -h, --help  Show this help message.
+
+Behavior:
+  - Walks subdirectories from the current directory.
+  - Runs boost_album.sh for folders that contain boost-eligible audio files.
 EOF
 }
 
-if [ "${1:-}" = "--help" ]; then
-  show_help
-  exit 0
-fi
-
-while getopts ":yh" opt; do
-  case "$opt" in
-  y) AUTO_YES=true ;;
-  h)
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+  -y | --yes)
+    AUTO_YES=true
+    ;;
+  -h | --help)
     show_help
     exit 0
     ;;
-  \?)
+  *)
+    printf 'Unknown argument: %s\n' "${1:-}" >&2
     show_help
     exit 2
     ;;
   esac
+  shift || true
 done
-shift $((OPTIND - 1))
 
 echo "${BLUE}Starting Library-wide Seek...${RESET}"
 echo "${BLUE}Target:${RESET} $(pwd)"
@@ -127,6 +129,7 @@ has_boost_audio_files() {
 
 walk_dir() {
   local dir="$1"
+  # Root "." is handled once explicitly before recursive walk.
   if [ "$dir" = "." ]; then
     return 1
   fi

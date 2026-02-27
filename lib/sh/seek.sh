@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 
 seek_walk_dirs() {
   local root="${1:-.}"

@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 
 select_python_with_numpy() {
   local candidates=("${PYTHON_BIN:-python3}" python3.13 python3.12 python3.11 python3)

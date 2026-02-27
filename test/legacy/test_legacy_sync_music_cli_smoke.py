@@ -109,12 +109,12 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
 
     def test_help_and_invalid_flag_show_usage(self) -> None:
         help_proc = self._run(["--help"])
-        self.assertNotEqual(help_proc.returncode, 0)
+        self.assertEqual(help_proc.returncode, 0)
         self.assertIn("Usage:", help_proc.stdout)
 
         bad_proc = self._run(["--bad-flag"])
         self.assertNotEqual(bad_proc.returncode, 0)
-        self.assertIn("Usage:", bad_proc.stdout)
+        self.assertIn("Usage:", bad_proc.stderr)
 
     def test_dry_run_debug_runs_with_stubbed_ssh_rsync(self) -> None:
         proc = self._run(["--dry-run", "--debug"])

@@ -34,7 +34,7 @@ class Any2FlacSmokeTests(unittest.TestCase):
             self.bin_dir / "ffprobe",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 args="$*"
                 input="${@: -1}"
                 base="$(basename "$input")"
@@ -70,7 +70,7 @@ class Any2FlacSmokeTests(unittest.TestCase):
             self.bin_dir / "ffmpeg",
             textwrap.dedent(
                 f"""\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 printf '%s\\n' "$*" >> "{self.tmpdir / 'ffmpeg.log'}"
                 out="${{@: -1}}"
                 mkdir -p "$(dirname "$out")"
@@ -86,7 +86,11 @@ class Any2FlacSmokeTests(unittest.TestCase):
             self.bin_dir / "sox",
             textwrap.dedent(
                 f"""\
+<<<<<<< HEAD
                 #!/opt/homebrew/bin/bash
+=======
+                #!/usr/bin/env bash
+>>>>>>> develop
                 printf '%s\\n' "$*" >> "{self.tmpdir / 'sox.log'}"
                 # Find output: positional args, skipping -b <val> and input (first positional).
                 args=("$@")
@@ -110,7 +114,11 @@ class Any2FlacSmokeTests(unittest.TestCase):
             self.bin_dir / "metaflac",
             textwrap.dedent(
                 """\
+<<<<<<< HEAD
                 #!/opt/homebrew/bin/bash
+=======
+                #!/usr/bin/env bash
+>>>>>>> develop
                 exit 0
                 """
             ),
@@ -133,6 +141,12 @@ class Any2FlacSmokeTests(unittest.TestCase):
         proc = self._run([])
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("profile is required", proc.stderr)
+
+    def test_help_profiles(self) -> None:
+        proc = self._run(["--help-profiles"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("Accepted profile input forms", proc.stdout)
+        self.assertIn("Canonical internal format", proc.stdout)
 
     def test_fails_when_no_audio_files(self) -> None:
         proc = self._run(["44.1/16"])

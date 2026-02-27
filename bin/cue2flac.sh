@@ -1,8 +1,16 @@
+<<<<<<< HEAD
 #!/opt/homebrew/bin/bash
 # cue2flac.sh — Split a high-resolution audio file into per-track FLACs using a .cue sheet.
 #
 # Usage:
 #   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--check-upscale] [--out <output_root>] [--dry-run] [--yes]
+=======
+#!/usr/bin/env bash
+# cue2flac.sh — Split a high-resolution audio file into per-track FLACs using a .cue sheet.
+#
+# Usage:
+#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--help-profiles] [--check-upscale] [--out <output_root>] [--dry-run] [--yes]
+>>>>>>> develop
 #
 # Input:  directory containing source audio + .cue, OR direct path to a .cue file.
 # Output: CUE2FLAC_OUTPUT_DIR/<Artist>/<Year> - <Album>/NN Track Title.flac
@@ -15,8 +23,13 @@
 # Tagging:       metaflac --import-tags-from (explicit TAG=value from CUE metadata)
 # Formats:       FLAC, WAV (native sox); WavPack/APE/DSF/DFF (pre-convert to temp WAV via ffmpeg)
 # Multi-file:    CUE sheets with multiple FILE directives (e.g. vinyl Side A / Side B) are supported.
+<<<<<<< HEAD
 # --check-upscale: spectral bandwidth analysis via spectre_eval.py to detect fake hi-res;
 #                  auto-selects the recommended encode profile instead of defaulting to 192/24.
+=======
+# --check-upscale: spectral target analysis via audlint-analyze.sh;
+#                  auto-selects the recommended encode profile instead of defaulting to 192000/24.
+>>>>>>> develop
 
 set -Eeuo pipefail
 
@@ -45,6 +58,11 @@ source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 # shellcheck source=/dev/null
+<<<<<<< HEAD
+=======
+source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
+# shellcheck source=/dev/null
+>>>>>>> develop
 source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
@@ -54,14 +72,22 @@ env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 ui_init_colors
 
+<<<<<<< HEAD
 PY_HELPER="${SCRIPT_DIR}/spectre_eval.py"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+=======
+AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$SCRIPT_DIR/audlint-analyze.sh}"
+>>>>>>> develop
 
 require_bins ffmpeg ffprobe >/dev/null || exit 2
 
 # === DEFAULTS ===
 INPUT_ARG="."
+<<<<<<< HEAD
 DEFAULT_PROFILE="192/24"
+=======
+DEFAULT_PROFILE="192000/24"
+>>>>>>> develop
 TARGET_PROFILE=""
 CHECK_UPSCALE=0
 OUTPUT_ROOT_ARG=""
@@ -70,14 +96,24 @@ ASSUME_YES=0
 SAFETY_MARGIN_DB="-1.0"
 MIN_APPLY_GAIN_DB="0.3"
 
+<<<<<<< HEAD
 usage() {
+=======
+show_help() {
+>>>>>>> develop
   cat <<'EOF_HELP'
 Usage:
   cue2flac.sh [<dir>|<file.cue>] [options]
 
 Options:
+<<<<<<< HEAD
   --profile <sr/bits>    Target encode profile (default: 192/24). No upscale. Mutually exclusive with --check-upscale.
   --check-upscale        Run spectral analysis to detect fake hi-res and auto-select the best encode profile.
+=======
+  --profile <sr/bits>    Target encode profile (default: 192000/24). No upscale. Mutually exclusive with --check-upscale.
+  --help-profiles        Show accepted profile input forms and common targets.
+  --check-upscale        Run audlint-analyze spectral target detection and auto-select the best encode profile.
+>>>>>>> develop
   --out <path>           Override CUE2FLAC_OUTPUT_DIR from .env.
   --dry-run              Print plan and track list; no files written.
   --yes                  Skip confirmation prompt.
@@ -88,10 +124,30 @@ Output: <CUE2FLAC_OUTPUT_DIR>/<Artist>/<Year> - <Album>/NN Track Title.flac
 EOF_HELP
 }
 
+<<<<<<< HEAD
 while [[ $# -gt 0 ]]; do
   case "$1" in
   -h | --help)
     usage
+=======
+show_help_profiles() {
+  profile_print_help
+  printf '\n'
+  profile_print_supported_targets
+  printf '\ncue2flac profile limits:\n'
+  printf '  - Target bits accepted: 16, 24, 32\n'
+  printf '  - Fuzzy inputs accepted; normalized internally before validation.\n'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  -h | --help)
+    show_help
+    exit 0
+    ;;
+  --help-profiles)
+    show_help_profiles
+>>>>>>> develop
     exit 0
     ;;
   --profile)
@@ -119,7 +175,11 @@ while [[ $# -gt 0 ]]; do
     ;;
   -*)
     echo "Error: unknown option: $1" >&2
+<<<<<<< HEAD
     usage
+=======
+    show_help >&2
+>>>>>>> develop
     exit 2
     ;;
   *)
@@ -316,15 +376,26 @@ _TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/cue2flac.XXXXXX")"
 # === PROFILE PARSING ===
 parse_profile() {
   local raw="$1"
+<<<<<<< HEAD
   raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
   [[ "$raw" =~ ^([0-9]+([.][0-9]+)?)/([0-9]{1,2})$ ]] || return 1
   local sr_part="${BASH_REMATCH[1]}"
   local bits_part="${BASH_REMATCH[3]}"
+=======
+  local normalized bits_part
+  normalized="$(profile_normalize "$raw" || true)"
+  [[ -n "$normalized" ]] || return 1
+  bits_part="${normalized#*/}"
+>>>>>>> develop
   case "$bits_part" in
   16 | 24 | 32) ;;
   *) return 1 ;;
   esac
+<<<<<<< HEAD
   PARSED_SR_HZ="$(awk -v s="$sr_part" 'BEGIN{printf "%.0f", s*1000.0;}')"
+=======
+  PARSED_SR_HZ="${normalized%%/*}"
+>>>>>>> develop
   PARSED_BITS="$bits_part"
 }
 
@@ -332,7 +403,11 @@ PARSED_SR_HZ=0
 PARSED_BITS=0
 profile_to_parse="${TARGET_PROFILE:-$DEFAULT_PROFILE}"
 if ! parse_profile "$profile_to_parse"; then
+<<<<<<< HEAD
   echo "Error: invalid profile '$profile_to_parse' (expected format like 96/24, 44.1/16)." >&2
+=======
+  echo "Error: invalid profile '$profile_to_parse' (run --help-profiles for accepted forms)." >&2
+>>>>>>> develop
   exit 2
 fi
 TARGET_SR_HZ="$PARSED_SR_HZ"
@@ -422,12 +497,17 @@ if ((TARGET_BITS > SRC_BITS)); then
   TARGET_BITS="$SRC_BITS"
 fi
 
+<<<<<<< HEAD
 TARGET_SR_KHZ="$(awk -v s="$TARGET_SR_HZ" 'BEGIN{printf "%.4g", s/1000.0;}')"
 TARGET_PROFILE_LABEL="${TARGET_SR_KHZ}/${TARGET_BITS}"
+=======
+TARGET_PROFILE_LABEL="${TARGET_SR_HZ}/${TARGET_BITS}"
+>>>>>>> develop
 
 # === SPECTRAL UPSCALE CHECK ===
 UPSCALE_CHECK_LABEL=""
 if ((CHECK_UPSCALE == 1)); then
+<<<<<<< HEAD
   if [[ ! -f "$PY_HELPER" ]]; then
     echo "Error: --check-upscale requires spectre_eval.py alongside cue2flac.sh (not found: $PY_HELPER)." >&2
     exit 2
@@ -484,6 +564,68 @@ if ((CHECK_UPSCALE == 1)); then
   fi
 
   UPSCALE_CHECK_LABEL="fmax≈${_fmax_khz}kHz, upsample=${_upsample}, conf=${_confidence} → ${_recommend:-unknown}"
+=======
+  if [[ ! -x "$AUDLINT_ANALYZE_BIN" ]]; then
+    echo "Error: --check-upscale requires audlint-analyze.sh alongside cue2flac.sh (not executable: $AUDLINT_ANALYZE_BIN)." >&2
+    exit 2
+  fi
+  echo "Running audlint-analyze spectral target detection..."
+  _analyze_dir="$_TMPDIR/check_upscale_analyze"
+  mkdir -p "$_analyze_dir"
+  _excerpt_wav="$_analyze_dir/excerpt.wav"
+  _src_dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WORK_SOURCE" </dev/null 2>/dev/null || true)"
+  _src_dur="${_src_dur%%,*}"
+  _excerpt_start="$(awk -v d="${_src_dur:-0}" 'BEGIN{s=(d+0>60)?(d/2 - 30):0; if(s<0)s=0; printf "%.3f", s}')"
+  _check_eval_sr=$(( SRC_SR_HZ > 192000 ? 192000 : SRC_SR_HZ ))
+  ffmpeg -hide_banner -loglevel error -nostdin -y \
+    -ss "$_excerpt_start" -t 60 \
+    -i "$WORK_SOURCE" \
+    -ac 1 -ar "$_check_eval_sr" -c:a pcm_s24le \
+    "$_excerpt_wav" </dev/null
+
+  _an_json="$("$AUDLINT_ANALYZE_BIN" --json "$_analyze_dir" </dev/null 2>/dev/null || true)"
+  _an_lines="$(
+    python3 - "$_an_json" <<'PY' 2>/dev/null || true
+import json, sys
+raw = sys.argv[1].strip()
+if not raw:
+    raise SystemExit(0)
+data = json.loads(raw)
+album_sr = data.get("album_sr")
+album_bits = data.get("album_bits")
+tracks = data.get("tracks") or []
+cutoff_hz = None
+if tracks:
+    cutoff_hz = tracks[0].get("cutoff_hz")
+print("" if album_sr is None else int(album_sr))
+print("" if album_bits is None else int(album_bits))
+if cutoff_hz is None:
+    print("")
+else:
+    print(f"{float(cutoff_hz)/1000.0:.2f}")
+PY
+  )"
+  { IFS= read -r _an_sr_hz; IFS= read -r _an_bits; IFS= read -r _an_cutoff_khz; } <<< "$_an_lines"
+
+  if [[ "$_an_sr_hz" =~ ^[0-9]+$ && "$_an_bits" =~ ^[0-9]+$ ]]; then
+    # Cap to source (no upscale)
+    if ((_an_sr_hz > SRC_SR_HZ)); then
+      _an_sr_hz="$SRC_SR_HZ"
+    fi
+    if ((_an_bits > SRC_BITS)); then
+      _an_bits="$SRC_BITS"
+    fi
+    TARGET_SR_HZ="$_an_sr_hz"
+    TARGET_BITS="$_an_bits"
+    TARGET_PROFILE_LABEL="${TARGET_SR_HZ}/${TARGET_BITS}"
+  fi
+
+  if [[ "${_an_cutoff_khz:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    UPSCALE_CHECK_LABEL="audlint-analyze cutoff≈${_an_cutoff_khz}kHz → Store as ${TARGET_PROFILE_LABEL}"
+  else
+    UPSCALE_CHECK_LABEL="audlint-analyze resolved target → Store as ${TARGET_PROFILE_LABEL}"
+  fi
+>>>>>>> develop
 fi
 
 # === TRUE PEAK / BOOST ===
@@ -543,12 +685,19 @@ if ((ASSUME_YES == 0)); then
   fi
   printf '%sProceed?%s [y/N] > ' "$YELLOW" "$RESET"
   confirm_choice=""
+<<<<<<< HEAD
   if ! IFS= read -r confirm_choice </dev/tty; then
     printf '\n'
     echo "Cancelled." >&2
     exit 1
   fi
   printf '\n'
+=======
+  if ! tty_read_line confirm_choice; then
+    echo "Cancelled." >&2
+    exit 1
+  fi
+>>>>>>> develop
   if [[ "$confirm_choice" != "y" ]]; then
     echo "Cancelled."
     exit 1

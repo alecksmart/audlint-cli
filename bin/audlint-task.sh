@@ -1,7 +1,9 @@
-#!/opt/homebrew/bin/bash
-# qty_seek.sh - Cron-oriented library quality scanner.
-# Scans albums, merges tracks to a temporary stream, evaluates quality,
-# and upserts album_quality rows in LIBRARY_DB.
+#!/usr/bin/env bash
+# audlint-task.sh - Cron-oriented library quality scanner.
+# Scans albums via audlint-value (DR14 + spectral recode target) and upserts
+# album_quality rows in LIBRARY_DB.
+# GRADE is derived from DR14 dynamic range (dr_grade.py, genre-adaptive).
+# RECODE target is determined cascade-free by audlint-analyze (FFT on source files).
 
 set -Eeuo pipefail
 
@@ -37,12 +39,17 @@ source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/ffprobe.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/sqlite.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/util.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/secure_backup.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 
-PY_HELPER="${SCRIPT_DIR}/spectre_eval.py"
+AUDLINT_VALUE_BIN="${AUDLINT_VALUE_BIN:-$SCRIPT_DIR/audlint-value.sh}"
+AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$SCRIPT_DIR/audlint-analyze.sh}"
 GENRE_LOOKUP="${SCRIPT_DIR}/../lib/py/genre_lookup.py"
 TAG_WRITER="${SCRIPT_DIR}/tag_writer.sh"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -50,24 +57,41 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 [[ -f "$TAG_WRITER" ]] && source "$TAG_WRITER"
 NO_COLOR="${NO_COLOR:-}"
 MAX_ALBUMS=50
+MAX_TIME=0   # 0 = unlimited; set via --max-time N (seconds)
+# Deadline pacing guard:
+# - finish buffer: keep this much time to flush writes and exit cleanly.
+# - next album budget: minimum time budget required to start another album.
+# - margin: extra cushion to avoid cron-boundary lock overlap due to jitter.
+DEADLINE_FINISH_BUFFER_SEC="${AUDLINT_TASK_DEADLINE_FINISH_BUFFER_SEC:-120}"
+DEADLINE_NEXT_ALBUM_BUDGET_SEC="${AUDLINT_TASK_NEXT_ALBUM_BUDGET_SEC:-120}"
+DEADLINE_MARGIN_SEC="${AUDLINT_TASK_DEADLINE_MARGIN_SEC:-10}"
+LAST_ANALYZED_ELAPSED_SEC=0
+DEADLINE_GUARD_LAST_REMAINING=0
+DEADLINE_GUARD_LAST_REQUIRED=0
+DEADLINE_GUARD_LAST_NEXT_BUDGET=0
 ROOT=""
 PURGE_MISSING=false
 DRY_RUN=false
 FULL_DISCOVERY=false
 # Discovery timestamp cache: written after each successful discovery pass so the
-# next run can skip dirs whose mtime predates it (incremental walk).
-# Override via env var; includes a DB-path suffix to avoid collisions.
-DISCOVERY_CACHE_FILE=""   # resolved at runtime after DB_PATH is known
+# next run can focus discovery on likely-changed albums (incremental walk).
+# Override path via AUDLINT_TASK_DISCOVERY_CACHE_FILE.
+DISCOVERY_CACHE_FILE="${AUDLINT_TASK_DISCOVERY_CACHE_FILE:-}"   # per-DB default resolved at runtime
 # How many seconds to hold off re-queuing a scan_failed album (default 7 days).
-SCAN_FAIL_RETRY_SEC="${QTY_SEEK_SCAN_FAIL_RETRY_SEC:-$((7 * 86400))}"
-LOCK_DIR="${QTY_SEEK_LOCK_DIR:-${TMPDIR:-/tmp}/qty_seek.lock}"
+SCAN_FAIL_RETRY_SEC="${AUDLINT_TASK_SCAN_FAIL_RETRY_SEC:-$((7 * 86400))}"
+# Use a single global default lock path so cron and interactive runs share one lock.
+# Can still be overridden via AUDLINT_TASK_LOCK_DIR for tests/custom environments.
+LOCK_DIR="${AUDLINT_TASK_LOCK_DIR:-/tmp/audlint-task.lock}"
 LOCK_ACQUIRED=false
 MERGE_LAST_ERROR=""
 SCAN_LAST_OUT=""
-MERGE_PCM_MAX_BYTES="${QTY_SEEK_MERGE_PCM_MAX_BYTES:-3800000000}"
-MERGE_SAMPLE_RATIO="${QTY_SEEK_MERGE_SAMPLE_RATIO:-0.25}"
-MERGE_SAMPLE_MIN_TRACKS="${QTY_SEEK_MERGE_SAMPLE_MIN_TRACKS:-4}"
-MERGE_SAMPLE_MAX_TRACKS="${QTY_SEEK_MERGE_SAMPLE_MAX_TRACKS:-5}"
+MERGE_PCM_MAX_BYTES="${AUDLINT_TASK_MERGE_PCM_MAX_BYTES:-3800000000}"
+MERGE_SAMPLE_RATIO="${AUDLINT_TASK_MERGE_SAMPLE_RATIO:-0.25}"
+MERGE_SAMPLE_MIN_TRACKS="${AUDLINT_TASK_MERGE_SAMPLE_MIN_TRACKS:-4}"
+MERGE_SAMPLE_MAX_TRACKS="${AUDLINT_TASK_MERGE_SAMPLE_MAX_TRACKS:-5}"
+FFT_FAST_MODE="${AUDLINT_TASK_FAST_FFT:-0}"
+FFT_FAST_MAX_WINDOWS="${AUDLINT_TASK_FFT_MAX_WINDOWS:-8}"
+FFT_FAST_WINDOW_SEC="${AUDLINT_TASK_FFT_WINDOW_SEC:-6}"
 declare -A AQ_LAST_CHECKED=()
 declare -A AQ_SCAN_FAILED=()
 declare -A AQ_SOURCE_PATH_CHECKED=()  # source_path → last_checked_at; used for dir-mtime fast-path
@@ -75,28 +99,28 @@ declare -A AQ_SOURCE_PATH_CHECKED=()  # source_path → last_checked_at; used fo
 show_help() {
   cat <<EOF_HELP
 Quick use:
-  $(basename "$0") --max-albums 15 /path/to/library
+  $(basename "$0") --max-albums 50 --max-time 1200 /path/to/library
 
 Usage:
-  $(basename "$0") [--max-albums N] [--full-discovery] <library_root>
+  $(basename "$0") [--max-albums N] [--max-time N] [--full-discovery] <library_root>
   $(basename "$0") --purge-missing [--dry-run] <library_root>
 
 Mode:
   Cron scan only. This script is intended for scheduled library scans.
-  Quality is evaluated from merged album streams only (no per-track fallback).
+  Quality is evaluated from source files only (no merged temp streams).
   Albums are scanned in priority order:
     1) albums not present in album_quality
     2) albums changed since album row last_checked_at
 
 Discovery:
   By default, after the first run a timestamp cache file is written to
-  /tmp/qty_seek_last_discovery_<db-slug>. Subsequent runs use
-  'find -newer <cache>' to walk only directories modified since the last
-  discovery pass, greatly reducing disk I/O on large libraries.
+  /tmp/audlint_task_last_discovery_<db-slug>. Subsequent runs use
+  'find -newer <cache>' on directories and audio files to prioritize only
+  albums touched since the last discovery pass, reducing disk I/O.
   Use --full-discovery to force a complete walk (e.g. after adding
   a large batch of albums or when the cache file is stale/missing).
 
-  Failed albums (scan_failed=1) are held for QTY_SEEK_SCAN_FAIL_RETRY_SEC
+  Failed albums (scan_failed=1) are held for AUDLINT_TASK_SCAN_FAIL_RETRY_SEC
   seconds (default: 7 days) before being re-queued, to avoid hammering
   chronic scan failures on every cron run.
 
@@ -106,13 +130,40 @@ Purge mode (--purge-missing):
   unmounted volumes). Prompts for confirmation before deleting.
   Use --dry-run to preview without making any changes.
 
-Cron example:
-  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; ~/bin/qty_seek.sh --max-albums 15 /path/to/library >> "\$HOME/qty_seek.log" 2>&1
+Options:
+  --max-albums N    Maximum albums to analyze per run (default: 50).
+  --max-time N      Stop accepting new albums N seconds after start.
+                    Pacing guard requires enough remaining time for:
+                    finish buffer + next album budget + margin
+                    (defaults: 120s + max(120s,last album time) + 10s).
+                    Set N to your full cron interval in seconds (e.g. 1200
+                    for a 20-minute cron). Default: 0 (unlimited).
+  --full-discovery  Force a full library walk instead of incremental.
+
+Performance (env):
+  AUDLINT_TASK_FAST_FFT=1          Enable faster FFT analysis for backlog catch-up.
+  AUDLINT_TASK_FFT_MAX_WINDOWS=N   Override fast mode max windows (default: 8).
+  AUDLINT_TASK_FFT_WINDOW_SEC=N    Override fast mode window seconds (default: 6).
+  AUDLINT_TASK_DEADLINE_FINISH_BUFFER_SEC=N  Deadline flush buffer (default: 120).
+  AUDLINT_TASK_NEXT_ALBUM_BUDGET_SEC=N       Min budget to start next album (default: 120).
+  AUDLINT_TASK_DEADLINE_MARGIN_SEC=N          Extra deadline jitter cushion (default: 10).
+
+Cron example (20-minute window):
+  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; ~/bin/audlint-task.sh --max-albums 50 --max-time 1200 /path/to/library >> "\$HOME/audlint-task.log" 2>&1
 EOF_HELP
 }
 
 log() { log_ts "$@"; }
 elapsed_s() { echo $(( $(date +%s) - T_START )); }
+
+normalize_nonneg_int() {
+  local var_name="$1"
+  local fallback="$2"
+  local -n ref="$var_name"
+  if [[ ! "$ref" =~ ^[0-9]+$ ]]; then
+    ref="$fallback"
+  fi
+}
 
 USE_COLOR=false
 if [[ -t 1 && -z "$NO_COLOR" ]]; then
@@ -131,14 +182,8 @@ else
   C_CYAN=""
 fi
 
-kv_get() {
-  local key="$1"
-  local payload="$2"
-  printf '%s\n' "$payload" | awk -v k="$key" '$0 ~ ("^" k "=") { sub("^[^=]*=", "", $0); print; exit }'
-}
-
 # classify_genre_tag is provided by lib/sh/audio.sh (audio_classify_genre_tag).
-# Local alias for backward compatibility within this script.
+# Local alias to keep call sites concise.
 classify_genre_tag() { audio_classify_genre_tag "$@"; }
 
 # Aliases — canonical implementations live in lib/sh/audio.sh.
@@ -229,14 +274,30 @@ album_has_dsd_source_ext() {
   return 1
 }
 
+album_has_force_recode_source_ext() {
+  local files_var="$1"
+  local -n files_ref="$files_var"
+  local f ext
+  for f in "${files_ref[@]}"; do
+    ext="${f##*.}"
+    ext="${ext,,}"
+    case "$ext" in
+    wav | aiff | aif | aifc | dsf | dff) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 profile_triggers_forced_upscale() {
   local profile="$1"
-  local sr_label bit_label bit_norm
+  local sr_label sr_hz bit_label bit_norm
   if [[ "$profile" != */* ]]; then
     return 1
   fi
 
   sr_label="${profile%%/*}"
+  sr_hz="$(profile_sr_hz_normalize "$sr_label" || true)"
+  [[ "$sr_hz" =~ ^[0-9]+$ ]] || sr_hz=0
   bit_label="${profile##*/}"
   sr_label="$(printf '%s' "$sr_label" | tr -d '[:space:]')"
   bit_label="$(printf '%s' "$bit_label" | tr -d '[:space:]')"
@@ -245,7 +306,7 @@ profile_triggers_forced_upscale() {
   # 32f (float FLAC) is a lossless container semantically equivalent to 24-bit;
   # it is commonly produced by DAW exports and does not indicate upsampling.
   case "$bit_norm" in
-  32 | 64 | 64f) return 0 ;;
+  32f | 64f) return 1 ;;
   esac
   if [[ "$bit_norm" =~ ^[0-9]+$ ]] && ((bit_norm > 24)); then
     return 0
@@ -253,12 +314,12 @@ profile_triggers_forced_upscale() {
 
   # Hi-res sample rate with 16-bit depth is almost certainly an upsampled CD.
   if [[ "$bit_norm" == "16" ]]; then
-    if awk -v s="$sr_label" 'BEGIN{ exit (!(s ~ /^[0-9]+([.][0-9]+)?$/ && s >= 88.2)) }'; then
+    if ((sr_hz >= 88200)); then
       return 0
     fi
   fi
 
-  awk -v s="$sr_label" 'BEGIN{ exit (!(s ~ /^[0-9]+([.][0-9]+)?$/ && s > 192.0)) }'
+  ((sr_hz > 192000))
 }
 
 source_policy_force_upscale() {
@@ -317,7 +378,7 @@ acquire_scan_lock_or_skip() {
     fi
   fi
 
-  log "Skip: previous qty_seek run still in progress (lock: $LOCK_DIR)"
+  log "Skip: previous audlint-task run still in progress (lock: $LOCK_DIR)"
   return 1
 }
 
@@ -489,6 +550,7 @@ select_merge_sample_files() {
   local files_var="$1"
   local out_var="$2"
   local -n files_ref="$files_var"
+  # shellcheck disable=SC2178  # nameref for array; SC2178 is a false positive here
   local -n out_ref="$out_var"
   out_ref=("${files_ref[@]}")
   (( ${#files_ref[@]} > 0 )) || return 1
@@ -548,34 +610,81 @@ select_merge_sample_files() {
   return 0
 }
 
-is_replace_recommendation() {
-  case "$1" in
-  Keep) return 1 ;;
-  *) return 0 ;;
-  esac
-}
-
-quality_requires_replacement() {
-  local grade="$1"
-  local rec="$2"
-  if [[ -n "$rec" ]] && is_replace_recommendation "$rec"; then
-    return 0
-  fi
-  case "$grade" in
-  C | F) return 0 ;;
-  *) return 1 ;;
-  esac
-}
-
 recode_is_actionable() {
   local recode="$1"
   [[ -n "$recode" ]] || return 1
   case "$recode" in
-  "Keep as-is" | "Mastering issue"* | "Pending rescan"*) return 1 ;;
+  "Keep as-is" | "Pending rescan"*) return 1 ;;
   *) return 0 ;;
   esac
 }
 
+# Build the human-readable RECODE string and needs_recode flag from:
+#   source_quality  — CURR profile in canonical form e.g. "96000/24", "44100/16", "96000/32f"
+#   recode_raw      — audlint-analyze output in canonical Hz form e.g. "48000/24", "96000/24"
+#   force_recode_any_sr — when 1, always emit actionable recode for edge source
+#                         containers (aiff/wav/dsf/dff), regardless of SR delta
+# Outputs two lines: recode_str \n needs_recode (0|1)
+build_recode_fields() {
+  local source_quality="$1"  # canonical form: "96000/24", "48000/32f", "44100/16"
+  local recode_raw="$2"      # canonical Hz form from audlint-analyze: "48000/24"
+  local force_recode_any_sr="${3:-0}"
+  local source_norm
+
+  local target_display
+  target_display="$(audvalue_format_profile "$recode_raw")"
+
+  # Extract target SR in Hz from recode_raw ("48000/24" -> 48000).
+  local target_hz="${recode_raw%%/*}"
+  [[ "$target_hz" =~ ^[0-9]+$ ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
+
+  # Edge containers should always get a recode action using the computed
+  # best-fit profile, even when the SR matches.
+  if [[ "$force_recode_any_sr" == "1" ]]; then
+    printf '%s\n%s\n' "Recode to ${target_display}" "1"
+    return
+  fi
+
+  source_norm="$(profile_normalize "$source_quality" || true)"
+  [[ -n "$source_norm" ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
+  local source_hz="${source_norm%%/*}"
+  [[ "$source_hz" =~ ^[0-9]+$ ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
+
+  # needs_recode only when audlint-analyze recommends a lower SR than source.
+  if (( target_hz < source_hz )); then
+    printf '%s\n%s\n' "Recode to ${target_display}" "1"
+  else
+    printf '%s\n%s\n' "Keep as-is" "0"
+  fi
+}
+
+resolve_analyze_recode_target() {
+  local album_dir="$1"
+  local recode_raw profile_file target_sr target_bits
+
+  [[ -x "$AUDLINT_ANALYZE_BIN" ]] || return 1
+  recode_raw="$("$AUDLINT_ANALYZE_BIN" "$album_dir" 2>/dev/null || true)"
+  if [[ ! "$recode_raw" =~ ^[0-9]+/[0-9]+$ ]]; then
+    profile_file="$album_dir/.sox_album_profile"
+    if [[ -f "$profile_file" ]]; then
+      target_sr="$(grep -E '^TARGET_SR=' "$profile_file" | head -n1 | cut -d= -f2- || true)"
+      target_bits="$(grep -E '^TARGET_BITS=' "$profile_file" | head -n1 | cut -d= -f2- || true)"
+      if [[ "$target_sr" =~ ^[0-9]+$ && "$target_bits" =~ ^[0-9]+$ ]]; then
+        recode_raw="${target_sr}/${target_bits}"
+      fi
+    fi
+  fi
+  [[ "$recode_raw" =~ ^[0-9]+/[0-9]+$ ]] || return 1
+  printf '%s\n' "$recode_raw"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# LEGACY: ffmpeg merge functions — kept for potential future use (e.g.
+# per-track DR verification or batch spectral export). Not called in the
+# active scan flow; audlint-value/audlint-analyze operate on source files
+# directly. Do not remove without a migration plan.
+# ---------------------------------------------------------------------------
 run_ffmpeg_concat_merge() {
   local concat_list="$1"
   local merged_file="$2"
@@ -605,6 +714,7 @@ run_ffmpeg_concat_merge() {
   return 0
 }
 
+<<<<<<< HEAD:bin/qty_seek.sh
 merged_spectral_recommendation() {
   local merged_file="$1"
   local tmpdir="$2"
@@ -635,71 +745,18 @@ merged_spectral_recommendation() {
   printf '%s\n' "$rec"
 }
 
+=======
+>>>>>>> develop:bin/audlint-task.sh
 scan_album_dir_merged() {
   local dir="$1"
   local genre_profile="${2:-standard}"
   SCAN_LAST_OUT=""
+
   local files=()
   collect_qty_audio_files "$dir" files
   [[ ${#files[@]} -gt 0 ]] || return 2
-  local merge_files=()
-  merge_files=("${files[@]}")
-  select_merge_sample_files files merge_files || true
 
-  local tmpdir=""
-  tmpdir="$(mktemp -d 2>/dev/null || true)"
-  [[ -n "$tmpdir" && -d "$tmpdir" ]] || {
-    MERGE_LAST_ERROR="mktemp -d failed"
-    return 1
-  }
-
-  local concat_list="$tmpdir/concat.txt"
-  local merged_file="$tmpdir/album-merged.wav"
-  local f escaped
-
-  for f in "${merge_files[@]}"; do
-    escaped="$(ffmpeg_concat_escape_path "$f")"
-    printf "file '%s'\n" "$escaped" >>"$concat_list"
-  done
-
-  if ! run_ffmpeg_concat_merge "$concat_list" "$merged_file"; then
-    local _merge_err="$MERGE_LAST_ERROR"
-    # Probe each file individually to identify the bad track.
-    local _bad_track=""
-    for f in "${merge_files[@]}"; do
-      if ! ffprobe -v error -i "$f" -select_streams a -show_entries stream=codec_name -of default=noprint_wrappers=1 </dev/null >/dev/null 2>&1; then
-        _bad_track="$(basename "$f")"
-        break
-      fi
-    done
-    if [[ -n "$_bad_track" ]]; then
-      MERGE_LAST_ERROR="ffmpeg merge failed at track: $_bad_track (${_merge_err:-ffmpeg error})"
-    else
-      [[ -n "$MERGE_LAST_ERROR" ]] || MERGE_LAST_ERROR="${_merge_err:-ffmpeg merge failed (all tracks probe ok — format incompatibility?)}"
-    fi
-    rm -rf "$tmpdir"
-    return 1
-  fi
-  if [[ ! -s "$merged_file" ]]; then
-    [[ -n "$MERGE_LAST_ERROR" ]] || MERGE_LAST_ERROR="ffmpeg produced empty output"
-    rm -rf "$tmpdir"
-    return 1
-  fi
-
-  local out=""
-  if ! out=$("$PYTHON_BIN" "$PY_HELPER" --quality "$merged_file" "--genre-profile=${genre_profile}" </dev/null 2>/dev/null); then
-    MERGE_LAST_ERROR="quality evaluation failed"
-    rm -rf "$tmpdir"
-    return 1
-  fi
-
-  local grade score dyn ups rec hit recode_rec source_quality bitrate_label codec_name has_lossy
-  grade="$(kv_get "MASTERING_GRADE" "$out")"
-  score="$(kv_get "QUALITY_SCORE" "$out")"
-  dyn="$(kv_get "DYNAMIC_RANGE_SCORE" "$out")"
-  ups="$(kv_get "IS_UPSCALED" "$out")"
-  rec="$(kv_get "RECOMMENDATION" "$out")"
-  recode_rec="$(merged_spectral_recommendation "$merged_file" "$tmpdir" || true)"
+  local source_quality bitrate_label codec_name has_lossy
   source_quality="$(album_source_quality_label files || true)"
   bitrate_label="$(album_bitrate_label files || true)"
   codec_name="$(album_codec_label files || true)"
@@ -711,48 +768,80 @@ scan_album_dir_merged() {
   [[ -n "$bitrate_label" ]] || bitrate_label="?"
   [[ -n "$codec_name" ]] || codec_name="unknown"
 
-  # Adjust recode bit depth: don't suggest /24 when source is 16-bit lossless.
-  if [[ "$source_quality" == *"/16" && -n "$recode_rec" && "$recode_rec" == *"/24"* ]]; then
-    recode_rec="${recode_rec//\/24/\/16}"
+  # ── audlint-value: DR14 + spectral recode target ─────────────────────────
+  local audvalue_failed=0
+  if ! audvalue_scan_album "$dir" "$genre_profile"; then
+    audvalue_failed=1
   fi
 
-  # Suppress no-op recode when lossless source already matches the target profile.
-  # Normalize 32f (float FLAC) to 24-bit for comparison purposes: a 44.1/32f source
-  # is functionally identical to 44.1/24 and should not be recoded to 24-bit.
-  if [[ -n "$recode_rec" && "$recode_rec" == *"Store as "* && "$source_quality" != "?" ]]; then
-    local recode_target="${recode_rec##*Store as }"
-    recode_target="${recode_target%%[[:space:]]*}"
-    local source_quality_norm="${source_quality//\/32f/\/24}"
-    if [[ "$recode_target" == "$source_quality_norm" ]]; then
-      if [[ "$rec" == "Trash" || "$grade" == "F" ]]; then
-        recode_rec="Mastering issue — recode won't help"
-      else
-        recode_rec="Keep as-is"
+  # Edge containers must still surface an actionable recode profile even when
+  # audlint-value fails (e.g. dr14meter parse/report issues on WAV-only albums).
+  if ((audvalue_failed == 1)); then
+    local fallback_recode
+    fallback_recode=""
+    if album_has_force_recode_source_ext files; then
+      fallback_recode="$(resolve_analyze_recode_target "$dir" || true)"
+      if [[ "$fallback_recode" =~ ^[0-9]+/[0-9]+$ ]]; then
+        AUDVALUE_RECODE_TO="$fallback_recode"
+        AUDVALUE_DR=""
+        AUDVALUE_GRADE="?"
       fi
+    fi
+    if [[ ! "$AUDVALUE_RECODE_TO" =~ ^[0-9]+/[0-9]+$ ]]; then
+      MERGE_LAST_ERROR="audlint-value scan failed"
+      return 1
     fi
   fi
 
-  hit=0
-  if quality_requires_replacement "$grade" "$rec"; then
-    hit=1
-  fi
-  if ((has_lossy == 1)); then
-    hit=1
-    rec="Replace with Lossless Rip"
-    [[ -n "$recode_rec" ]] || recode_rec="Lossy source detected -> replace with lossless rip"
-  fi
+  local grade="$AUDVALUE_GRADE"
+  local dr="$AUDVALUE_DR"
+  # DR14 score: map grade to a numeric score (1-10) for DB storage.
+  local score=""
+  case "$grade" in
+  S) score=10 ;;
+  A) score=8  ;;
+  B) score=6  ;;
+  C) score=4  ;;
+  F) score=1  ;;
+  *) score="" ;;
+  esac
 
-  local needs_recode=0
-  if recode_is_actionable "$recode_rec"; then
-    needs_recode=1
+  # ── RECODE determination ──────────────────────────────────────────────────
+  local recode_rec needs_recode
+  local recode_fields
+  local force_recode_any_sr=0
+  if album_has_force_recode_source_ext files; then
+    force_recode_any_sr=1
+  fi
+  recode_fields="$(build_recode_fields "$source_quality" "$AUDVALUE_RECODE_TO" "$force_recode_any_sr")"
+  recode_rec="$(printf '%s\n' "$recode_fields" | head -n1)"
+  needs_recode="$(printf '%s\n' "$recode_fields" | tail -n1)"
+  [[ "$needs_recode" =~ ^[01]$ ]] || needs_recode=0
+
+  # Lossy source overrides recode logic.
+  local rec="Keep"
+  local hit=0
+  if ((has_lossy == 1)); then
+    needs_recode=0
+    case "$grade" in
+    C | F)
+      hit=1
+      rec="Replace with Lossless Rip"
+      recode_rec="Replace with lossless"
+      ;;
+    *)
+      rec="Keep"
+      recode_rec="Keep as-is"
+      ;;
+    esac
   fi
 
   printf -v SCAN_LAST_OUT '%s\n' \
     "HIT=$hit" \
     "GRADE=$grade" \
     "SCORE=$score" \
-    "DYN=$dyn" \
-    "UPS=$ups" \
+    "DYN=$dr" \
+    "UPS=0" \
     "REC=$rec" \
     "CURR=$source_quality" \
     "BITRATE=$bitrate_label" \
@@ -761,7 +850,6 @@ scan_album_dir_merged() {
     "NEEDS_RECODE=$needs_recode" \
     "GENRE_PROFILE=$genre_profile"
 
-  rm -rf "$tmpdir"
   return 0
 }
 
@@ -818,7 +906,7 @@ run_purge_missing() {
 
   printf '\nDelete these %d rows from album_quality? [y/N] ' "$total_missing"
   local answer=""
-  IFS= read -r answer </dev/tty || true
+  tty_read_line answer || true
   if [[ "${answer,,}" != "y" ]]; then
     printf 'Aborted.\n'
     return 0
@@ -891,7 +979,7 @@ record_mixed_content_failure() {
     "mixed" \
     "$bitrate_label" \
     "$codec_label" \
-    "Mixed content detected -> replace source (merge disabled)" \
+    "Mixed content detected -> replace source" \
     "1"
 }
 
@@ -1072,8 +1160,9 @@ discover_scan_roadmap() {
   load_album_quality_cache
 
   # Incremental mode: if a discovery cache file exists and --full-discovery was
-  # not requested, only walk directories whose mtime is newer than the cache
-  # timestamp.  This avoids a full stat(2) pass on large libraries every cron run.
+  # not requested, prioritize albums touched since the cache timestamp.
+  # We include both directory mtimes and newer audio files because file metadata
+  # edits often do not update the containing directory mtime.
   local use_incremental=false
   if [[ "$FULL_DISCOVERY" == false && -f "$DISCOVERY_CACHE_FILE" ]]; then
     use_incremental=true
@@ -1081,20 +1170,35 @@ discover_scan_roadmap() {
 
   if [[ "$use_incremental" == true ]]; then
     log "Discovery: incremental (cache=$DISCOVERY_CACHE_FILE)"
-    local dir
-    while IFS= read -r -d '' dir <&3; do
+    local cand dir
+    local -A seen_dirs=()
+    local -a audio_find_pred=()
+    read -r -a audio_find_pred <<< "$(audio_find_iname_args)"
+    while IFS= read -r -d '' cand <&3; do
+      if [[ -d "$cand" ]]; then
+        dir="$cand"
+      else
+        dir="$(dirname "$cand")"
+      fi
+      [[ -n "${seen_dirs["$dir"]+x}" ]] && continue
+      seen_dirs["$dir"]=1
       discover_scan_roadmap_item "$dir"
       local cb_status=$?
       case "$cb_status" in
       0 | 1) ;;
       *) return "$cb_status" ;;
       esac
-    done 3< <(find "$ROOT" -type d \( -name ".__qty_seek_no_prune__" -prune \) \
-                  -o -type d -newer "$DISCOVERY_CACHE_FILE" -print0)
+    done 3< <(find "$ROOT" \
+      -type d \( -name ".__audlint_task_no_prune__" -prune \) \
+      -o \( -type d -newer "$DISCOVERY_CACHE_FILE" -print0 \) \
+      -o \( -type f \( "${audio_find_pred[@]}" \) -newer "$DISCOVERY_CACHE_FILE" -print0 \))
   else
-    [[ "$FULL_DISCOVERY" == true ]] && log "Discovery: full (--full-discovery requested)" \
-      || log "Discovery: full (no cache file yet)"
-    seek_walk_dirs "$ROOT" discover_scan_roadmap_item ".__qty_seek_no_prune__"
+    if [[ "$FULL_DISCOVERY" == true ]]; then
+      log "Discovery: full (--full-discovery requested)"
+    else
+      log "Discovery: full (no cache file yet)"
+    fi
+    seek_walk_dirs "$ROOT" discover_scan_roadmap_item ".__audlint_task_no_prune__"
   fi
 
   # Write/update the discovery cache timestamp so the next run can go incremental.
@@ -1117,20 +1221,24 @@ process_scan_roadmap_item() {
   display_name="$artist - $album"
 
   if [[ ! -d "$source_path" || ! -r "$source_path" ]]; then
-    log "Skip queue item (path unavailable): $display_name -> $source_path"
+    log "Purge missing: $display_name -> $source_path"
+    sqlite3 "$DB_PATH" "DELETE FROM album_quality WHERE source_path='${source_path//\'/\'\'}';" >/dev/null 2>&1 || true
     return 0
   fi
 
   local files=()
   collect_qty_audio_files "$source_path" files
   if [[ ${#files[@]} -eq 0 ]]; then
-    log "Skip queue item (no audio now): $display_name -> $source_path"
+    log "Purge missing (no audio): $display_name -> $source_path"
+    sqlite3 "$DB_PATH" "DELETE FROM album_quality WHERE source_path='${source_path//\'/\'\'}';" >/dev/null 2>&1 || true
     return 0
   fi
 
   ALBUMS_ANALYZED=$((ALBUMS_ANALYZED + 1))
-  local checked_at
+  local checked_at item_start
   checked_at="$(date +%s)"
+  item_start="$checked_at"
+  LAST_ANALYZED_ELAPSED_SEC=0
 
   local q_curr_profile q_bitrate_profile q_codec_profile
   q_curr_profile="$(album_source_quality_label files || true)"
@@ -1142,15 +1250,19 @@ process_scan_roadmap_item() {
 
   if [[ "$q_curr_profile" == "mixed" || "$q_codec_profile" == "mixed" ]]; then
     local mixed_reason
-    mixed_reason="mixed content detected: source_quality=$q_curr_profile codec=$q_codec_profile; merge disabled; replace source"
+    mixed_reason="mixed content detected: source_quality=$q_curr_profile codec=$q_codec_profile; replace source"
     record_mixed_content_failure "$artist" "$year" "$album" "$source_path" "$checked_at" "$q_codec_profile" "$q_bitrate_profile" "$mixed_reason"
     ALBUMS_SCAN_FAILED=$((ALBUMS_SCAN_FAILED + 1))
     ALBUMS_HIT=$((ALBUMS_HIT + 1))
     ROWS_UPSERTED=$((ROWS_UPSERTED + 1))
     mark_scan_kind_done "$scan_kind"
     local mixed_info="${q_codec_profile} ${q_curr_profile}"
-    printf '%s[%s] [%02d] %-55s  %s  [%sMixed/Fail%s]%s\n' \
-      "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" "$mixed_info" "$C_YELLOW" "$C_RESET" "$C_RESET"
+    local mixed_elapsed
+    mixed_elapsed="$(( $(date +%s) - item_start ))"
+    LAST_ANALYZED_ELAPSED_SEC="$mixed_elapsed"
+    printf '%s[%s] [%02d] %-55s  %s  [%sFail%s]%s  %ds\n' \
+      "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" "$mixed_info" "$C_YELLOW" "$C_RESET" "$C_RESET" \
+      "$mixed_elapsed"
     return 0
   fi
 
@@ -1175,6 +1287,22 @@ process_scan_roadmap_item() {
     # mtime produced by the write, preventing the album from being re-queued
     # as "changed" on the next discovery pass.
     if [[ -n "$_raw_genre_tag" ]] && declare -f tag_write >/dev/null 2>&1; then
+      if ! secure_backup_album_tracks_once "$source_path" "audlint-task genre-tag writeback"; then
+        local backup_reason="${SECURE_BACKUP_LAST_ERROR:-secure backup failed before genre writeback}"
+        record_scan_failure "$artist" "$year" "$album" "$source_path" "$checked_at" "$backup_reason"
+        ALBUMS_SCAN_FAILED=$((ALBUMS_SCAN_FAILED + 1))
+        ROWS_UPSERTED=$((ROWS_UPSERTED + 1))
+        mark_scan_kind_done "$scan_kind"
+        local backup_elapsed
+        backup_elapsed="$(( $(date +%s) - item_start ))"
+        LAST_ANALYZED_ELAPSED_SEC="$backup_elapsed"
+        printf '%s[%s] [%02d] %-55s  %s %s  [%sFail%s]%s  %ds\n' \
+          "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
+          "$q_codec_profile" "$q_curr_profile" "$C_YELLOW" "$C_RESET" "$C_RESET" \
+          "$backup_elapsed"
+        printf '%s          reason: %s%s\n' "$C_YELLOW" "$backup_reason" "$C_RESET"
+        return 0
+      fi
       local _f
       for _f in "${files[@]}"; do
         tag_write "$_f" "GENRE" "$_raw_genre_tag" 2>/dev/null || true
@@ -1186,15 +1314,18 @@ process_scan_roadmap_item() {
   local scan_out
   if ! scan_album_dir_merged "$source_path" "$q_genre_profile" 2>/dev/null; then
     local failure_reason="$MERGE_LAST_ERROR"
-    [[ -n "$failure_reason" ]] || failure_reason="merged quality scan failed"
+    [[ -n "$failure_reason" ]] || failure_reason="quality scan failed"
     record_scan_failure "$artist" "$year" "$album" "$source_path" "$checked_at" "$failure_reason"
     ALBUMS_SCAN_FAILED=$((ALBUMS_SCAN_FAILED + 1))
     ROWS_UPSERTED=$((ROWS_UPSERTED + 1))
     mark_scan_kind_done "$scan_kind"
-    printf '%s[%s] [%02d] %-55s  %s %s  [%sFail%s]%s\n' \
+    local failure_elapsed
+    failure_elapsed="$(( $(date +%s) - item_start ))"
+    LAST_ANALYZED_ELAPSED_SEC="$failure_elapsed"
+    printf '%s[%s] [%02d] %-55s  %s %s  [%sFail%s]%s  %ds\n' \
       "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
-      "$q_codec_profile" "$q_curr_profile" \
-      "$C_YELLOW" "$C_RESET" "$C_RESET"
+      "$q_codec_profile" "$q_curr_profile" "$C_YELLOW" "$C_RESET" "$C_RESET" \
+      "$failure_elapsed"
     printf '%s          reason: %s%s\n' "$C_YELLOW" "$failure_reason" "$C_RESET"
     return 0
   fi
@@ -1216,6 +1347,7 @@ process_scan_roadmap_item() {
   [[ "$q_needs_recode" =~ ^[01]$ ]] || q_needs_recode=0
   [[ "$q_genre" =~ ^(audiophile|high_energy|standard)$ ]] || q_genre="$q_genre_profile"
 
+  # DSD/ultra-hires source policy: flag as upscaled if DSD or >192k profile.
   if source_policy_force_upscale files "$q_curr"; then
     q_ups="1"
   fi
@@ -1258,24 +1390,72 @@ process_scan_roadmap_item() {
     _hint="  → ${q_rec}"
   fi
 
+  local _elapsed=$(( $(date +%s) - item_start ))
+  LAST_ANALYZED_ELAPSED_SEC="$_elapsed"
   if [[ "$needs_replace" == "1" ]]; then
     ALBUMS_HIT=$((ALBUMS_HIT + 1))
-    printf '%s[%s] [%02d] %-55s  %s %s%s  [%s%s%s  Replace%s]%s\n' \
+    printf '%s[%s] [%02d] %-55s  %s %s%s  [%s%s%s]  %ds\n' \
       "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
       "$q_codec" "$q_curr" "$_hint" \
-      "$C_YELLOW" "$q_grade" "$C_RESET" "$C_RESET" "$C_RESET"
+      "$C_YELLOW" "$q_grade" "$C_RESET" "$_elapsed"
   else
     ALBUMS_OK=$((ALBUMS_OK + 1))
-    printf '%s[%s] [%02d] %-55s  %s %s  [%s%s%s  OK%s]%s\n' \
+    printf '%s[%s] [%02d] %-55s  %s %s  [%s%s%s]  %ds\n' \
       "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
       "$q_codec" "$q_curr" \
-      "$C_GREEN" "$q_grade" "$C_RESET" "$C_RESET" "$C_RESET"
+      "$C_GREEN" "$q_grade" "$C_RESET" "$_elapsed"
   fi
+}
+
+# deadline_reached — returns 0 (true) when MAX_TIME is set and fewer than
+# DEADLINE_FINISH_BUFFER_SEC remain in the window.
+deadline_remaining_sec() {
+  ((MAX_TIME > 0)) || {
+    printf '0\n'
+    return 0
+  }
+  local now elapsed remaining
+  now="$(date +%s)"
+  elapsed=$(( now - T_START ))
+  remaining=$(( MAX_TIME - elapsed ))
+  printf '%s\n' "$remaining"
+}
+
+deadline_next_album_budget_sec() {
+  local budget="$DEADLINE_NEXT_ALBUM_BUDGET_SEC"
+  if [[ "$LAST_ANALYZED_ELAPSED_SEC" =~ ^[0-9]+$ ]] && ((LAST_ANALYZED_ELAPSED_SEC > budget)); then
+    budget="$LAST_ANALYZED_ELAPSED_SEC"
+  fi
+  printf '%s\n' "$budget"
+}
+
+deadline_reached() {
+  ((MAX_TIME > 0)) || return 1
+  local remaining
+  remaining="$(deadline_remaining_sec)"
+  [[ "$remaining" =~ ^-?[0-9]+$ ]] || remaining=0
+  ((remaining <= DEADLINE_FINISH_BUFFER_SEC))
+}
+
+# deadline_batch_guard_reached — returns 0 (true) when MAX_TIME is set and
+# there is not enough time left to safely start another album.
+deadline_batch_guard_reached() {
+  ((MAX_TIME > 0)) || return 1
+  local remaining next_budget required
+  remaining="$(deadline_remaining_sec)"
+  [[ "$remaining" =~ ^-?[0-9]+$ ]] || remaining=0
+  next_budget="$(deadline_next_album_budget_sec)"
+  [[ "$next_budget" =~ ^[0-9]+$ ]] || next_budget="$DEADLINE_NEXT_ALBUM_BUDGET_SEC"
+  required=$(( DEADLINE_FINISH_BUFFER_SEC + next_budget + DEADLINE_MARGIN_SEC ))
+  DEADLINE_GUARD_LAST_REMAINING="$remaining"
+  DEADLINE_GUARD_LAST_REQUIRED="$required"
+  DEADLINE_GUARD_LAST_NEXT_BUDGET="$next_budget"
+  (( remaining <= required ))
 }
 
 process_scan_roadmap_batch() {
   local batch_limit="${1:-$MAX_ALBUMS}"
-  local pending_count rows skipped_now
+  local pending_count skipped_now
   if [[ ! "$batch_limit" =~ ^[0-9]+$ ]] || ((batch_limit <= 0)); then
     batch_limit="$MAX_ALBUMS"
   fi
@@ -1294,23 +1474,37 @@ process_scan_roadmap_batch() {
     fi
   fi
 
-  rows="$(
-    sqlite3 -separator $'\t' -noheader "$DB_PATH" \
-      "SELECT id, artist, year_int, album, source_path, scan_kind
-       FROM scan_roadmap
-       ORDER BY CASE scan_kind WHEN 'new' THEN 0 ELSE 1 END ASC, enqueued_at ASC, id ASC
-       LIMIT $batch_limit;" 2>/dev/null || true
-  )"
-  [[ -n "$rows" ]] || return 0
+  # Process one item at a time so purged slots are immediately refilled
+  # and the deadline check can stop cleanly between albums.
+  local roadmap_id artist year album source_path scan_kind row
+  local analyzed_this_batch=0
+  while ((analyzed_this_batch < batch_limit)); do
+    if deadline_batch_guard_reached; then
+      log "Deadline pacing guard reached (remaining=${DEADLINE_GUARD_LAST_REMAINING}s required=${DEADLINE_GUARD_LAST_REQUIRED}s finish_buffer=${DEADLINE_FINISH_BUFFER_SEC}s next_budget=${DEADLINE_GUARD_LAST_NEXT_BUDGET}s margin=${DEADLINE_MARGIN_SEC}s). Stopping batch cleanly."
+      break
+    fi
 
-  local roadmap_id artist year album source_path scan_kind
-  while IFS=$'\t' read -r roadmap_id artist year album source_path scan_kind; do
-    [[ "$roadmap_id" =~ ^[0-9]+$ ]] || continue
+    row="$(
+      sqlite3 -separator $'\t' -noheader "$DB_PATH" \
+        "SELECT id, artist, year_int, album, source_path, scan_kind
+         FROM scan_roadmap
+         ORDER BY CASE scan_kind WHEN 'new' THEN 0 ELSE 1 END ASC, enqueued_at ASC, id ASC
+         LIMIT 1;" 2>/dev/null || true
+    )"
+    [[ -n "$row" ]] || break
+
+    IFS=$'\t' read -r roadmap_id artist year album source_path scan_kind <<< "$row"
+    [[ "$roadmap_id" =~ ^[0-9]+$ ]] || break
     [[ "$year" =~ ^[0-9]+$ ]] || year=0
     [[ -n "$scan_kind" ]] || scan_kind="changed"
+
+    local _before_analyzed="$ALBUMS_ANALYZED"
     process_scan_roadmap_item "$artist" "$year" "$album" "$source_path" "$scan_kind" || return 1
     scan_roadmap_delete_item "$roadmap_id" || return 1
-  done <<< "$rows"
+    if ((ALBUMS_ANALYZED > _before_analyzed)); then
+      analyzed_this_batch=$(( analyzed_this_batch + 1 ))
+    fi
+  done
 }
 
 if [[ "${1:-}" == "--help" ]]; then
@@ -1341,6 +1535,23 @@ while [[ $# -gt 0 ]]; do
     fi
     MAX_ALBUMS="$value"
     ;;
+  --max-time)
+    shift
+    value="${1:-}"
+    if [[ -z "$value" || ! "$value" =~ ^[0-9]+$ ]]; then
+      echo "Error: --max-time requires integer >= 0" >&2
+      exit 2
+    fi
+    MAX_TIME="$value"
+    ;;
+  --max-time=*)
+    value="${1#*=}"
+    if [[ -z "$value" || ! "$value" =~ ^[0-9]+$ ]]; then
+      echo "Error: --max-time requires integer >= 0" >&2
+      exit 2
+    fi
+    MAX_TIME="$value"
+    ;;
   --purge-missing)
     PURGE_MISSING=true
     ;;
@@ -1369,6 +1580,10 @@ if [[ -z "$ROOT" ]]; then
   show_help
   exit 2
 fi
+
+normalize_nonneg_int DEADLINE_FINISH_BUFFER_SEC 120
+normalize_nonneg_int DEADLINE_NEXT_ALBUM_BUDGET_SEC 120
+normalize_nonneg_int DEADLINE_MARGIN_SEC 10
 
 DB_PATH="$(resolve_library_db_path || true)"
 if [[ -z "$DB_PATH" ]]; then
@@ -1420,10 +1635,10 @@ album_quality_db_backup "$DB_PATH" "${ALBUM_QUALITY_DB_SCHEMA_CHANGED:-0}" || {
 }
 
 # Derive a stable per-DB discovery cache path so multiple libraries on the
-# same machine don't share a single timestamp file.
+# same machine don't share a single timestamp file (unless overridden by env).
 if [[ -z "$DISCOVERY_CACHE_FILE" ]]; then
   _db_slug="$(printf '%s' "$DB_PATH" | tr -cs 'A-Za-z0-9_-' '_')"
-  DISCOVERY_CACHE_FILE="${TMPDIR:-/tmp}/qty_seek_last_discovery_${_db_slug}"
+  DISCOVERY_CACHE_FILE="${TMPDIR:-/tmp}/audlint_task_last_discovery_${_db_slug}"
   unset _db_slug
 fi
 
@@ -1436,8 +1651,34 @@ if ! acquire_scan_lock_or_skip; then
   exit 0
 fi
 
+# Optional throughput profile for backlog catch-up: reduce audlint-analyze FFT
+# workload by lowering window count and window duration.
+[[ "$FFT_FAST_MAX_WINDOWS" =~ ^[0-9]+$ ]] || FFT_FAST_MAX_WINDOWS=8
+if ((FFT_FAST_MAX_WINDOWS <= 0)); then
+  FFT_FAST_MAX_WINDOWS=8
+fi
+if [[ ! "$FFT_FAST_WINDOW_SEC" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  FFT_FAST_WINDOW_SEC=6
+fi
+case "${FFT_FAST_MODE,,}" in
+1 | true | yes | on)
+  FFT_FAST_MODE=1
+  export AUDLINT_ANALYZE_MAX_WINDOWS="$FFT_FAST_MAX_WINDOWS"
+  export AUDLINT_ANALYZE_WINDOW_SEC="$FFT_FAST_WINDOW_SEC"
+  ;;
+*)
+  FFT_FAST_MODE=0
+  ;;
+esac
+
 T_START="$(date +%s)"
-log "Start. root=$(realpath "$ROOT") db=$DB_PATH max_albums=$MAX_ALBUMS"
+log "Start. root=$(realpath "$ROOT") db=$DB_PATH max_albums=$MAX_ALBUMS max_time=${MAX_TIME}s"
+if ((MAX_TIME > 0)); then
+  log "Deadline pacing: finish_buffer=${DEADLINE_FINISH_BUFFER_SEC}s next_album_budget=${DEADLINE_NEXT_ALBUM_BUDGET_SEC}s margin=${DEADLINE_MARGIN_SEC}s"
+fi
+if [[ "$FFT_FAST_MODE" == "1" ]]; then
+  log "FFT fast mode enabled: AUDLINT_ANALYZE_MAX_WINDOWS=$AUDLINT_ANALYZE_MAX_WINDOWS AUDLINT_ANALYZE_WINDOW_SEC=$AUDLINT_ANALYZE_WINDOW_SEC"
+fi
 
 ALBUMS_SCANNED=0
 ALBUMS_ANALYZED=0
@@ -1478,26 +1719,34 @@ else
   log "Phase 1/3: roadmap batch skipped (queue empty). elapsed=$(elapsed_s)s"
 fi
 
-ROADMAP_DISCOVERY_RUN=1
-T_DISCOVERY_START="$(date +%s)"
-log "Phase 2/3: discovery pass. elapsed=$(elapsed_s)s"
-if ! discover_scan_roadmap; then
-  exit 1
+pending_after_discovery="$pending_after_initial"
+if deadline_reached; then
+  log "Phase 2/3: discovery skipped (deadline reached). elapsed=$(elapsed_s)s"
+else
+  ROADMAP_DISCOVERY_RUN=1
+  T_DISCOVERY_START="$(date +%s)"
+  log "Phase 2/3: discovery pass. elapsed=$(elapsed_s)s"
+  if ! discover_scan_roadmap; then
+    exit 1
+  fi
+
+  pending_after_discovery="$(scan_roadmap_count)"
+  [[ "$pending_after_discovery" =~ ^[0-9]+$ ]] || pending_after_discovery=0
+  log "Phase 2/3: discovery done. queued=$pending_after_discovery new_enqueued=$ROADMAP_ENQUEUED_NEW changed_enqueued=$ROADMAP_ENQUEUED_CHANGED skipped_unchanged=$ALBUMS_SKIPPED_UNCHANGED elapsed=$(elapsed_s)s phase_elapsed=$(( $(date +%s) - T_DISCOVERY_START ))s"
 fi
 
-pending_after_discovery="$(scan_roadmap_count)"
-[[ "$pending_after_discovery" =~ ^[0-9]+$ ]] || pending_after_discovery=0
-log "Phase 2/3: discovery done. queued=$pending_after_discovery new_enqueued=$ROADMAP_ENQUEUED_NEW changed_enqueued=$ROADMAP_ENQUEUED_CHANGED skipped_unchanged=$ALBUMS_SKIPPED_UNCHANGED elapsed=$(elapsed_s)s phase_elapsed=$(( $(date +%s) - T_DISCOVERY_START ))s"
-
 T_BATCH2_START="$(date +%s)"
-if ((remaining_budget > 0 && (pending_before == 0 || pending_after_initial == 0))); then
-  log "Phase 3/3: post-discovery batch. pending=$pending_after_discovery budget=$remaining_budget elapsed=$(elapsed_s)s"
+newly_discovered=$(( ROADMAP_ENQUEUED_NEW + ROADMAP_ENQUEUED_CHANGED ))
+if deadline_reached; then
+  log "Phase 3/3: skipped (deadline reached). elapsed=$(elapsed_s)s"
+elif ((remaining_budget > 0 && (pending_after_discovery > 0) && (pending_before == 0 || newly_discovered > 0))); then
+  log "Phase 3/3: post-discovery batch. pending=$pending_after_discovery newly_discovered=$newly_discovered budget=$remaining_budget elapsed=$(elapsed_s)s"
   if ! process_scan_roadmap_batch "$remaining_budget"; then
     exit 1
   fi
   log "Phase 3/3: post-discovery batch done. analyzed=$ALBUMS_ANALYZED elapsed=$(elapsed_s)s phase_elapsed=$(( $(date +%s) - T_BATCH2_START ))s"
 else
-  log "Phase 3/3: skipped (backlog remains or budget exhausted; newly discovered items stay queued for next run). elapsed=$(elapsed_s)s"
+  log "Phase 3/3: skipped (no new items discovered or budget exhausted). elapsed=$(elapsed_s)s"
 fi
 
 pending_after_run="$(scan_roadmap_count)"

@@ -1,16 +1,7 @@
-#!/opt/homebrew/bin/bash
-#
-# dff2flac.sh — Convert a folder of .dff files into tagged FLACs using a .cue file.
-#
-# Usage:
-#   ./dff2flac.sh
-#   ./dff2flac.sh --dry-run
-#
-# Notes:
-# - Set SOURCE_DIR to the album folder containing the .dff + .cue files.
-# - Output FLACs are written to OUTPUT_DIR (default: ./flac_out).
-# - Requires ffmpeg with DSDIFF/DFF support.
-#
+#!/usr/bin/env bash
+# dff2flac.sh — convert DFF albums to FLAC with cue-aware track metadata.
+# This script runs in the current folder by default and writes output to
+# ./flac_out unless SOURCE_DIR/OUTPUT_DIR are overridden below.
 BOOTSTRAP_SOURCE="${BASH_SOURCE[0]}"
 if command -v realpath >/dev/null 2>&1; then
   BOOTSTRAP_SOURCE="$(realpath "$BOOTSTRAP_SOURCE" 2>/dev/null || printf '%s' "$BOOTSTRAP_SOURCE")"
@@ -41,17 +32,55 @@ ui_init_colors
 
 require_bins ffmpeg ffprobe >/dev/null || exit 2
 
-# === CONFIGURATION ===
-SOURCE_DIR="." # Change to your album folder
+show_help() {
+  cat <<'EOF'
+Quick use:
+  dff2flac.sh
+  dff2flac.sh --dry-run
+
+Usage:
+  dff2flac.sh [--dry-run]
+
+Options:
+  --dry-run   Print plan and per-track actions; no files written.
+  -h, --help  Show this help.
+
+Behavior:
+  - Reads .dff files from SOURCE_DIR (default: current directory).
+  - Uses a sidecar .cue file when present for track titles/performers.
+  - Determines a single album-safe target profile from DSD source rate.
+  - Computes true-peak across tracks and applies one album-level gain.
+
+Config (edit in script before run):
+  SOURCE_DIR="."
+  OUTPUT_DIR="./flac_out"
+
+Dependencies: ffmpeg (with DSDIFF/DFF support), ffprobe
+EOF
+}
+
+# Script-local defaults.
+SOURCE_DIR="."
 OUTPUT_DIR="./flac_out"
 CUE_FILE="$(find "$SOURCE_DIR" -maxdepth 1 -iname "*.cue" | head -n 1)"
 
 # === DRY RUN CHECK ===
 DRY_RUN=0
-if [[ "$1" == "--dry-run" ]]; then
+case "${1:-}" in
+-h | --help)
+  show_help
+  exit 0
+  ;;
+--dry-run)
   DRY_RUN=1
-  echo "🧪 Dry run enabled – no files will be written"
-fi
+  ;;
+"") ;;
+*)
+  printf 'Unknown argument: %s\n' "$1" >&2
+  show_help >&2
+  exit 2
+  ;;
+esac
 
 analyze_track_worker() {
   local track_no="$1"
@@ -336,7 +365,11 @@ for idx in "${!dff_files[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
+<<<<<<< HEAD
     enc_args=(--in "$dff_file" --out "$flac_file" --sr "$target_sr_hz" --bits "$target_bits" --src-is-flac 0)
+=======
+    enc_args=(--in "$dff_file" --out "$flac_file" --sr "$target_sr_hz" --bits "$target_bits" --src-is-flac 0 --src-codec dff)
+>>>>>>> develop
     if ((APPLY_BOOST == 1)); then
       enc_args+=(--gain "$BOOST_GAIN_DB")
     fi

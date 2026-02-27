@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 
 ffprobe_album_meta() {
   local in="$1"
@@ -50,6 +50,11 @@ ffprobe_album_key() {
     if [[ "$album" =~ ^[[:space:]]*[0-9]{4}[[:space:]]*-[[:space:]]*(.+)$ ]]; then
       album="${BASH_REMATCH[1]}"
     fi
+  fi
+  # If metadata has no artist fields and the folder namespace is _VA,
+  # normalize to a readable canonical VA artist label.
+  if [[ -z "$artist" && "$grandparent" == "_VA" ]]; then
+    artist="Various Artists"
   fi
   [[ -n "$artist" ]] || artist="$grandparent"
   [[ -n "$artist" && -n "$album" ]] || return 1

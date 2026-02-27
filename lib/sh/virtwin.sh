@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # virtwin.sh - Virtual window for running commands below a preserved header.
 
 # virtwin_run_command <start_line> <term_lines> <term_cols> <title> [--no-wait] <command> [args...]
@@ -106,7 +106,11 @@ virtwin_run_command() {
 
   if ((wait_for_key == 1)); then
     printf ' Press any key to return.'
-    IFS= read -r -n 1 -s _ </dev/tty || true
+    if declare -f tty_read_key >/dev/null 2>&1; then
+      tty_read_key _ 1 || true
+    else
+      IFS= read -r -n 1 -s _ </dev/tty || true
+    fi
   fi
   return "$rc"
 }

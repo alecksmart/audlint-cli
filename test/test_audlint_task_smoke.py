@@ -10,8 +10,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_QTY_SEEK = REPO_ROOT / "bin" / "qty_seek.sh"
-SRC_SPECTRE_EVAL = REPO_ROOT / "bin" / "spectre_eval.py"
+SRC_AUDLINT_TASK = REPO_ROOT / "bin" / "audlint-task.sh"
 SRC_TAG_WRITER = REPO_ROOT / "bin" / "tag_writer.sh"
 SRC_LIB_SH = REPO_ROOT / "lib" / "sh"
 SRC_LIB_PY = REPO_ROOT / "lib" / "py"
@@ -22,7 +21,7 @@ def _write_exec(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-class QtySeekSmokeTests(unittest.TestCase):
+class AudlintTaskSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         if shutil.which("sqlite3") is None:
@@ -50,7 +49,7 @@ class QtySeekSmokeTests(unittest.TestCase):
             self.bin_dir / "ffprobe",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 args="$*"
                 if [[ "$args" == *"format_tags=album_artist,artist,album,date,genre"* ]]; then
                   echo "TAG:artist=Artist"
@@ -101,7 +100,7 @@ class QtySeekSmokeTests(unittest.TestCase):
             self.bin_dir / "ffmpeg",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 out="${@: -1}"
                 mkdir -p "$(dirname "$out")"
                 : >"$out"
@@ -113,7 +112,7 @@ class QtySeekSmokeTests(unittest.TestCase):
             self.bin_dir / "pystub",
             textwrap.dedent(
                 """\
-                #!/opt/homebrew/bin/bash
+                #!/usr/bin/env bash
                 if [[ "${1:-}" == "-" ]]; then
                   exit 0
                 fi
@@ -132,7 +131,7 @@ EOF
                   exit 0
                 fi
                 cat <<'EOF'
-RECOMMEND=Store as 96/24
+RECOMMEND=Store as 96000/24
 CONFIDENCE=HIGH
 REASON=full bandwidth
 SUMMARY=ok
@@ -150,13 +149,9 @@ EOF
         self.lib_py_dir = self.work_dir / "lib" / "py"
         self.lib_py_dir.mkdir(parents=True, exist_ok=True)
 
-        self.qty_seek = self.script_dir / "qty_seek.sh"
-        self.qty_seek.write_text(SRC_QTY_SEEK.read_text(encoding="utf-8"), encoding="utf-8")
-        self.qty_seek.chmod(self.qty_seek.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-        spectre_eval = self.script_dir / "spectre_eval.py"
-        spectre_eval.write_text(SRC_SPECTRE_EVAL.read_text(encoding="utf-8"), encoding="utf-8")
-        spectre_eval.chmod(spectre_eval.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        self.audlint_task = self.script_dir / "audlint-task.sh"
+        self.audlint_task.write_text(SRC_AUDLINT_TASK.read_text(encoding="utf-8"), encoding="utf-8")
+        self.audlint_task.chmod(self.audlint_task.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         tag_writer = self.script_dir / "tag_writer.sh"
         tag_writer.write_text(SRC_TAG_WRITER.read_text(encoding="utf-8"), encoding="utf-8")
@@ -178,9 +173,9 @@ EOF
         env["LIBRARY_DB"] = str(self.db_path)
         env["PYTHON_BIN"] = str(self.bin_dir / "pystub")
         env["DISCOVERY_CACHE_FILE"] = str(self.tmpdir / "discovery.cache")
-        env["QTY_SEEK_LOCK_DIR"] = str(self.tmpdir / "qty_seek.lock")
+        env["AUDLINT_TASK_LOCK_DIR"] = str(self.tmpdir / "audlint-task.lock")
         return subprocess.run(
-            [str(self.qty_seek), *args],
+            [str(self.audlint_task), *args],
             cwd=str(self.tmpdir),
             env=env,
             text=True,

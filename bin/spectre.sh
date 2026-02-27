@@ -1,6 +1,5 @@
-#!/opt/homebrew/bin/bash
-# spectre.sh — Spectrogram + Header + Recommendation + Batch Summary
-# Fixed: Cleanup prompt now correctly waits for keyboard input.
+#!/usr/bin/env bash
+# spectre.sh - Generate spectrogram PNG files from audio (file/dir/all modes).
 
 set -Eeuo pipefail
 
@@ -25,177 +24,74 @@ source "$BOOTSTRAP_DIR/../lib/sh/env.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 # shellcheck source=/dev/null
-source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
-# shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
-# shellcheck source=/dev/null
-source "$BOOTSTRAP_DIR/../lib/sh/table.sh"
-# shellcheck source=/dev/null
-source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
-# shellcheck source=/dev/null
-source "$BOOTSTRAP_DIR/../lib/sh/ffprobe.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
-ENV_PYTHON_BIN_OVERRIDE="${PYTHON_BIN:-}"
-ENV_TABLE_PYTHON_BIN_OVERRIDE="${TABLE_PYTHON_BIN:-}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
+deps_ensure_common_path
 
 SPECTRO_WIDTH="${SPECTRO_WIDTH:-1920}"
 SPECTRO_HEIGHT="${SPECTRO_HEIGHT:-1080}"
-FONT_SIZE="${FONT_SIZE:-20}"
-BGCOLOR="${BGCOLOR:-#111111}"
-FGCOLOR="${FGCOLOR:-white}"
-PY_HELPER="${SCRIPT_DIR}/spectre_eval.py"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-if [[ -n "$ENV_PYTHON_BIN_OVERRIDE" ]]; then
-  PYTHON_BIN="$ENV_PYTHON_BIN_OVERRIDE"
-fi
-if [[ -n "$ENV_TABLE_PYTHON_BIN_OVERRIDE" ]]; then
-  TABLE_PYTHON_BIN="$ENV_TABLE_PYTHON_BIN_OVERRIDE"
-fi
-NO_COLOR="${NO_COLOR:-}"
-# ====================
+SPECTRO_LEGEND="${SPECTRO_LEGEND:-1}"
 
-log() { log_ts "$@"; }
-kv_get() {
-  local key="$1"
-  local payload="$2"
-  printf '%s\n' "$payload" | awk -v k="$key" '$0 ~ ("^" k "=") { sub("^[^=]*=", "", $0); print; exit }'
+RENDER_ALL_TRACK_PNGS=false
+CHECK_DEPS_ONLY=false
+TARGET=""
+
+log() {
+  printf '[%s] %s\n' "$(date '+%F %T')" "$*"
 }
 
 show_help() {
-  cat <<EOF
+  cat <<EOF_HELP
 Quick use:
   $(basename "$0") "/path/to/song.flac"
   $(basename "$0") "/path/to/album_folder"
   $(basename "$0") --all "/path/to/album_folder"
 
-Usage: $(basename "$0") "/path/to/target"
-       $(basename "$0") [--all] "/path/to/target"
+Usage: $(basename "$0") [options] "/path/to/target"
+       $(basename "$0") --check-deps
        $(basename "$0") --help
 
-Analyzes audio quality and recommends the best format for Plexamp.
-Supported by default (ffmpeg permitting): flac, wav, m4a, mp3, ogg, opus, dsf, dff, wv, ape.
+Generate spectrogram PNG files from audio.
 
-Switches:
-  --all    In directory mode, also render per-track spectrogram PNGs.
-  --help   Show this help message.
-EOF
+Modes:
+  file path      Generate one PNG next to the input file.
+  dir path       Generate album_spectre.png in the directory.
+  --all + dir    Generate album_spectre.png plus per-track PNG files.
+
+Output names:
+  file mode:   <input_basename>.png
+  dir mode:    album_spectre.png
+  --all mode:  album_spectre.png + per-track <track_basename>.png
+
+Options:
+  --all          In directory mode, also render per-track PNGs.
+  --check-deps   Check required runtime dependencies and exit.
+  --help         Show this help message.
+
+Environment:
+  SPECTRO_WIDTH   Output width in px (default: 1920)
+  SPECTRO_HEIGHT  Output height in px (default: 1080)
+  SPECTRO_LEGEND  ffmpeg showspectrumpic legend flag, 0 or 1 (default: 1)
+EOF_HELP
 }
 
-SUMMARY_ROWS=()
-QUALITY_ROWS=()
-GENERATED_PNGS=()
-BATCH_FILES=()
-BATCH_SRC_LABELS=()
-BATCH_SPEC_REC=()
-BATCH_CONF=()
-BATCH_REASON=()
-BATCH_Q_SCORE=()
-BATCH_Q_GRADE=()
-BATCH_Q_DYN=()
-BATCH_Q_UPS=()
-BATCH_Q_REC_BASE=()
-BATCH_Q_REC_FINAL=()
-BATCH_Q_REC_NOTE=()
-BATCH_IS_LOSSY=()
-BATCH_TRUE_PEAK=()
-BATCH_LIKELY_CLIP=()
-BATCH_FMAX_KHZ=()
-BATCH_DUR_SEC=()
-ALBUM_Q_AVAILABLE=false
-ALBUM_Q_TRACKS=0
-ALBUM_Q_SCORE="N/A"
-ALBUM_Q_GRADE="N/A"
-ALBUM_Q_DYN="N/A"
-ALBUM_Q_UPS="N/A"
-ALBUM_Q_REC="N/A"
-ALBUM_Q_LRA="N/A"
-ALBUM_Q_PEAK="N/A"
-ALBUM_Q_CLIP="N/A"
-ALBUM_GENRE_PROFILE="standard"
-ALBUM_PNG_RENDERED=false
-RENDER_ALL_TRACK_PNGS=false
-PREMERGED_PARTS_MODE=false
-TARGET=""
-VERBOSE_MODE=false
-USE_COLOR=false
-if [[ -t 1 && -z "$NO_COLOR" ]]; then
-  USE_COLOR=true
-fi
+check_deps() {
+  local ok=1
+  local dep
+  for dep in ffmpeg ffprobe; do
+    if ! has_bin "$dep"; then
+      printf 'Missing dependency: %s\n' "$dep" >&2
+      ok=0
+    fi
+  done
 
-if [[ "$USE_COLOR" == true ]]; then
-  ui_init_colors
-  C_RESET="$RESET"
-  C_DIM="$DIM"
-  C_CYAN="$CYAN"
-  C_GREEN="$GREEN"
-  # shellcheck disable=SC2153
-  C_YELLOW="$YELLOW"
-  C_RED="$RED"
-  C_BOLD="$(tput bold 2>/dev/null || printf '')"
-  C_MAGENTA="$(tput setaf 5 2>/dev/null || printf '')"
-  C_ORANGE="$(tput setaf 208 2>/dev/null || printf '\033[38;5;208m')"
-else
-  C_RESET=""
-  C_DIM=""
-  C_BOLD=""
-  C_CYAN=""
-  C_GREEN=""
-  C_YELLOW=""
-  C_MAGENTA=""
-  C_ORANGE=""
-  C_RED=""
-fi
-
-if [[ $# -eq 0 ]]; then
-  show_help
-  exit 0
-fi
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-  --help)
-    show_help
-    exit 0
-    ;;
-  --all)
-    RENDER_ALL_TRACK_PNGS=true
-    shift
-    ;;
-  -*)
-    echo "Unknown option: $1"
-    show_help
-    exit 1
-    ;;
-  *)
-    TARGET="$1"
-    shift
-    ;;
-  esac
-done
-
-[[ -n "$TARGET" ]] || {
-  echo "Error: No target specified."
-  exit 1
-}
-[[ -e "$TARGET" ]] || {
-  echo "Error: Path not found: $TARGET" >&2
-  exit 1
-}
-
-for dep in ffmpeg ffprobe magick; do
-  has_bin "$dep" || {
-    echo "Error: $dep not found" >&2
-    exit 1
-  }
-done
-
-select_python_with_numpy
-TABLE_PYTHON_BIN="${TABLE_PYTHON_BIN:-$PYTHON_BIN}"
-table_require_rich || {
-  echo "Error: python rich is required for table rendering. Install rich in $TABLE_PYTHON_BIN or set RICH_TABLE_CMD." >&2
-  exit 1
+  if [[ "$ok" -eq 1 ]]; then
+    printf 'OK: spectre dependencies are available.\n'
+    return 0
+  fi
+  return 1
 }
 
 collect_spectre_audio_files() {
@@ -204,35 +100,24 @@ collect_spectre_audio_files() {
   local recursive="${3:-false}"
   local -n out_ref="$out_var"
   local discovered_files=()
-  local f ext
+  local f
+
   out_ref=()
   if [[ "$recursive" == true ]]; then
+    # shellcheck disable=SC2046
     while IFS= read -r -d '' f; do
       out_ref+=("$f")
-    done < <(find "$dir" -type f \( \
-      -iname "*.dsf" -o \
-      -iname "*.dff" -o \
-      -iname "*.wv" -o \
-      -iname "*.flac" -o \
-      -iname "*.wav" -o \
-      -iname "*.m4a" -o \
-      -iname "*.mp3" -o \
-      -iname "*.ogg" -o \
-      -iname "*.opus" -o \
-      -iname "*.ape" \
-      \) -print0 | sort -z)
+    done < <(find "$dir" -type f \( $(audio_find_iname_args) \) -print0 | sort -z)
     return 0
   fi
+
   audio_collect_files "$dir" discovered_files
   for f in "${discovered_files[@]}"; do
-    ext="${f##*.}"
-    ext="${ext,,}"
-    case "$ext" in
-    dsf | dff | wv | flac | wav | m4a | mp3 | ogg | opus | ape) out_ref+=("$f") ;;
-    esac
+    out_ref+=("$f")
   done
 }
 
+<<<<<<< HEAD
 first_spectre_audio_file() {
   local dir="$1"
   local files=()
@@ -974,174 +859,76 @@ render_album_spectrogram() {
   log "Saved album report to: $(basename "$album_png")"
 }
 
+=======
+>>>>>>> develop
 ffmpeg_concat_escape_path() {
-  printf "%s" "$1" | sed "s/'/'\\\\''/g"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
 
-sum_batch_durations() {
-  local total="0"
-  local d
-  for d in "${BATCH_DUR_SEC[@]}"; do
-    if is_numeric "$d"; then
-      total="$(awk -v a="$total" -v b="$d" 'BEGIN { printf "%.6f", a + b }')"
-    fi
-  done
-  printf '%s\n' "$total"
+generate_spectrogram_png() {
+  local in="$1"
+  local out_png="$2"
+
+  ffmpeg -y -hide_banner -loglevel error -nostdin \
+    -i "$in" \
+    -lavfi "showspectrumpic=s=${SPECTRO_WIDTH}x${SPECTRO_HEIGHT}:legend=${SPECTRO_LEGEND}" \
+    "$out_png" </dev/null
 }
 
-probe_audio_duration_seconds() {
-  local file_path="$1"
-  local dur
-  dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$file_path" </dev/null 2>/dev/null || true)"
-  dur="${dur%%,*}"
-  if is_numeric "$dur"; then
-    printf '%s\n' "$dur"
-  else
-    printf '0\n'
-  fi
-}
+generate_file_mode() {
+  local input_file="$1"
+  local output_png
+  local stem
 
-detect_premerged_album_parts_mode() {
-  local files_var="$1"
-  local -n files_ref="$files_var"
-  local count=${#files_ref[@]}
-  ((count >= 2 && count <= 8)) || return 1
+  stem="${input_file%.*}"
+  output_png="${stem}.png"
 
-  local long_count=0
-  local image_codec_count=0
-  local embedded_cue_count=0
-  local cue_sidecar_found=false
-  local f dur ext tags_payload
-
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    cue_sidecar_found=true
-    break
-  done < <(find "$TARGET" -maxdepth 3 -type f -iname "*.cue" -print 2>/dev/null || true)
-
-  for f in "${files_ref[@]}"; do
-    dur="$(probe_audio_duration_seconds "$f")"
-    if is_numeric "$dur" && num_ge "$dur" 900; then
-      ((long_count += 1))
-    fi
-
-    ext="${f##*.}"
-    ext="${ext,,}"
-    case "$ext" in
-    ape | wv) ((image_codec_count += 1)) ;;
-    esac
-
-    tags_payload="$(ffprobe -v error -show_entries format_tags -of default=noprint_wrappers=1 "$f" </dev/null 2>/dev/null || true)"
-    if printf '%s\n' "$tags_payload" | grep -Eiq 'TAG:(cuesheet|cue_sheet|CUESHEET)='; then
-      ((embedded_cue_count += 1))
-    fi
-  done
-
-  ((long_count == count)) || return 1
-  ((image_codec_count == count)) || return 1
-  if [[ "$cue_sidecar_found" != true && "$embedded_cue_count" -eq 0 ]]; then
-    return 1
-  fi
-  return 0
-}
-
-run_ffmpeg_concat_merge() {
-  local concat_list="$1"
-  local merged_file="$2"
-  local total_duration_s="$3"
-  local tmpdir="$4"
-
-  if [[ -t 1 ]] && is_numeric "$total_duration_s" && num_ge "$total_duration_s" 1; then
-    render_merge_progress_line() {
-      local pct="$1"
-      local bar_width=24
-      local filled=$((pct * bar_width / 100))
-      local empty=$((bar_width - filled))
-      local filled_bar empty_bar
-      filled_bar="$(printf '%*s' "$filled" '' | tr ' ' '#')"
-      empty_bar="$(printf '%*s' "$empty" '' | tr ' ' '-')"
-      printf '\rAlbum-wide quality merge: [%s%s] %3d%%' "$filled_bar" "$empty_bar" "$pct"
-    }
-
-    local progress_fifo="$tmpdir/ffmpeg-progress.fifo"
-    local err_file="$tmpdir/ffmpeg-progress.err"
-    if mkfifo "$progress_fifo"; then
-      ffmpeg -y -hide_banner -loglevel error -nostats -nostdin -f concat -safe 0 -i "$concat_list" -vn -c:a pcm_s24le -progress "$progress_fifo" "$merged_file" 2>"$err_file" &
-      local ffmpeg_pid=$!
-      local line out_ms pct bucket
-      local last_bucket=-1
-      local progress_line_shown=false
-      render_merge_progress_line 0
-      progress_line_shown=true
-      while IFS= read -r line; do
-        case "$line" in
-        out_time_ms=*)
-          out_ms="${line#out_time_ms=}"
-          if is_numeric "$out_ms"; then
-            pct="$(awk -v out_ms="$out_ms" -v total_s="$total_duration_s" 'BEGIN {
-              p=(out_ms/1000000.0)/total_s*100.0;
-              if (p < 0) p=0;
-              if (p > 100) p=100;
-              printf "%d", p
-            }')"
-            bucket=$((pct / 5))
-            if ((bucket > last_bucket)); then
-              last_bucket=$bucket
-              render_merge_progress_line "$pct"
-            fi
-          fi
-          ;;
-        progress=end)
-          if ((last_bucket < 20)); then
-            last_bucket=20
-            render_merge_progress_line 100
-          fi
-          ;;
-        esac
-      done <"$progress_fifo"
-      wait "$ffmpeg_pid"
-      local rc=$?
-      if [[ "$progress_line_shown" == true ]]; then
-        printf '\n'
-      fi
-      if ((rc != 0)) && [[ -s "$err_file" ]]; then
-        cat "$err_file" >&2
-      fi
-      rm -f "$progress_fifo" "$err_file"
-      return "$rc"
-    fi
+  log "Generating spectrogram: $(basename "$input_file")"
+  if generate_spectrogram_png "$input_file" "$output_png"; then
+    log "Saved: $(basename "$output_png")"
+    return 0
   fi
 
-  ffmpeg -y -hide_banner -loglevel error -nostdin -f concat -safe 0 -i "$concat_list" -vn -c:a pcm_s24le "$merged_file" </dev/null
+  log "Failed: $(basename "$input_file")"
+  return 1
 }
 
-analyze_album_quality_merged() {
-  local files_var="$1"
+generate_album_png() {
+  local target_dir="$1"
+  local files_var="$2"
   local -n files_ref="$files_var"
 
-  ALBUM_Q_AVAILABLE=false
-  ALBUM_PNG_RENDERED=false
-  ALBUM_Q_TRACKS=${#files_ref[@]}
-  ((ALBUM_Q_TRACKS > 1)) || return 0
-
+  local album_png="$target_dir/album_spectre.png"
   local tmpdir
+  local concat_list
+  local merged_file
+  local escaped
+  local f
+
+  if ((${#files_ref[@]} == 1)); then
+    log "Album mode: single file source, rendering directly."
+    generate_spectrogram_png "${files_ref[0]}" "$album_png"
+    log "Saved: $(basename "$album_png")"
+    return 0
+  fi
+
   tmpdir="$(mktemp -d)"
-  local concat_list="$tmpdir/concat.txt"
-  local merged_file="$tmpdir/album-merged.wav"
-  local total_duration_s
-  total_duration_s="$(sum_batch_durations)"
-  local f escaped
-  log "Album-wide quality: preparing merged temporary file (${ALBUM_Q_TRACKS} tracks)..."
+  concat_list="$tmpdir/concat.txt"
+  merged_file="$tmpdir/album-merged.wav"
+
   for f in "${files_ref[@]}"; do
     escaped="$(ffmpeg_concat_escape_path "$f")"
     printf "file '%s'\n" "$escaped" >>"$concat_list"
   done
 
-  if ! run_ffmpeg_concat_merge "$concat_list" "$merged_file" "$total_duration_s" "$tmpdir"; then
-    log "Album-wide quality merge failed; continuing with per-track results."
+  log "Album mode: merging ${#files_ref[@]} file(s)..."
+  if ! ffmpeg -y -hide_banner -loglevel error -nostdin \
+    -f concat -safe 0 -i "$concat_list" -vn -c:a pcm_s24le "$merged_file" </dev/null; then
     rm -rf "$tmpdir"
-    return 0
+    log "Album merge failed."
+    return 1
   fi
+<<<<<<< HEAD
   log "Album-wide quality: merged stream ready."
   render_album_spectrogram "$merged_file" "$TARGET" "$ALBUM_Q_TRACKS" || true
 
@@ -1217,113 +1004,91 @@ analyze_album_quality_merged() {
   ALBUM_Q_CLIP="N/A"
 
   log "Album grade (per-track 25th-pct): grade=${ALBUM_Q_GRADE} score=${ALBUM_Q_SCORE} upscaled=${ALBUM_Q_UPS} rec=${ALBUM_Q_REC}"
+=======
+
+  if ! generate_spectrogram_png "$merged_file" "$album_png"; then
+    rm -rf "$tmpdir"
+    log "Album spectrogram generation failed."
+    return 1
+  fi
+
+>>>>>>> develop
   rm -rf "$tmpdir"
+  log "Saved: $(basename "$album_png")"
+  return 0
 }
 
-cleanup_and_show_summary() {
-  local has_pngs=false
-  if ((${#GENERATED_PNGS[@]} > 0)); then
-    has_pngs=true
+parse_args() {
+  if [[ $# -eq 0 ]]; then
+    show_help
+    exit 0
   fi
 
-  if [[ "$VERBOSE_MODE" != true ]]; then
-    apply_all_mode_overrides
-    build_batch_tables
-    printf "%s\n" "${C_BOLD}${C_DIM}SPECTRAL FORMAT RECOMMENDATIONS${C_RESET}"
-    printf "%s\n" "${C_DIM}Purpose: spectral bandwidth/integrity recommendation from excerpt FFT analysis.${C_RESET}"
-    if ((${#SUMMARY_ROWS[@]} > 0)); then
-      printf '%s\n' "${SUMMARY_ROWS[@]}" | table_render_tsv \
-        "FILE NAME,SRC kHz/bit,SPECTRAL RECOMMENDATION,CONF,SPECTRAL REASON" \
-        "38,10,44,6,58"
-    else
-      printf '' | table_render_tsv \
-        "FILE NAME,SRC kHz/bit,SPECTRAL RECOMMENDATION,CONF,SPECTRAL REASON" \
-        "38,10,44,6,58"
-    fi
-
-    printf "%s\n" "${C_BOLD}${C_DIM}MASTERING QUALITY CHECKS${C_RESET}"
-    printf "%s\n" "${C_DIM}Purpose: loudness/dynamics/peak scoring and action recommendation.${C_RESET}"
-    printf "%s\n" "${C_DIM}Qty: grade buckets (S/A/B/C/F) from dynamic-range scoring.${C_RESET}"
-    local quality_rows=("${QUALITY_ROWS[@]}")
-    if [[ "$ALBUM_Q_AVAILABLE" == true ]]; then
-      quality_rows+=("__SECTION__"$'\t'"")
-      quality_rows+=("$(rich_style_album_label "ALBUM (MERGED ${ALBUM_Q_TRACKS} TRACKS)")"$'\t'"$(rich_style_q_score "${ALBUM_Q_SCORE}")"$'\t'"$(rich_style_grade "${ALBUM_Q_GRADE}")"$'\t'"$(rich_escape "${ALBUM_Q_DYN}")"$'\t'"$(rich_style_ups "${ALBUM_Q_UPS}")"$'\t'"$(rich_style_action "${ALBUM_Q_REC}")")
-    fi
-    if ((${#quality_rows[@]} > 0)); then
-      printf '%s\n' "${quality_rows[@]}" | table_render_tsv \
-        "FILE NAME,Q 1-10,GRADE,DR,UPS,ACTION" \
-        "38,8,6,5,5,24"
-    else
-      printf '' | table_render_tsv \
-        "FILE NAME,Q 1-10,GRADE,DR,UPS,ACTION" \
-        "38,8,6,5,5,24"
-    fi
-    printf "%s\n" "${C_DIM}Legend: DR=dynamic-range score from LRA, UPS=upscaled flag.${C_RESET}"
-  fi
-
-  if [[ "$has_pngs" == true && -t 0 && -t 1 ]]; then
-    echo -n "Press any key to DELETE generated spectrogram PNG(s), or 'N' to keep and exit: "
-    read -n 1 -r user_input </dev/tty
-    echo ""
-  elif [[ "$has_pngs" == true ]]; then
-    user_input="N"
-  else
-    return
-  fi
-
-  if [[ ! "$user_input" =~ ^[Nn]$ ]]; then
-    log "Cleaning up spectrogram files..."
-    for p in "${GENERATED_PNGS[@]}"; do
-      if [[ -f "$p" ]]; then rm -f "$p"; fi
-    done
-    log "Done. Folder is clean."
-  else
-    log "Exiting. Spectrograms preserved."
-  fi
-}
-
-if [[ -d "$TARGET" ]]; then
-  log "Audit Mode: Running folder analysis..."
-  all_files=()
-  collect_spectre_audio_files "$TARGET" all_files true
-  if ((${#all_files[@]} == 0)); then
-    echo "No supported audio files found under: $TARGET" >&2
-    exit 1
-  fi
-  album_header_log=""
-  album_header_log="$(build_album_header "${all_files[0]}" "$TARGET")"
-  album_header_log="$(log_style_album_header "$album_header_log")"
-  log "Album: $album_header_log"
-  # Resolve genre profile from embedded tag so grading uses genre-adaptive thresholds.
-  _genre_tag="$(kv_get "GENRE" "$(ffprobe_album_key "${all_files[0]}" 2>/dev/null || true)")"
-  if [[ -n "$_genre_tag" ]]; then
-    ALBUM_GENRE_PROFILE="$(audio_classify_genre_tag "$_genre_tag")"
-    log "Genre profile: ${ALBUM_GENRE_PROFILE} (tag: ${_genre_tag})"
-  fi
-  unset _genre_tag
-  if detect_premerged_album_parts_mode all_files; then
-    PREMERGED_PARTS_MODE=true
-    RENDER_ALL_TRACK_PNGS=true
-    log "Detected pre-merged album image parts (.ape/.wv + cuesheet metadata): skipping synthetic album merge and rendering per-file spectrograms."
-  fi
-  for file in "${all_files[@]}"; do
-    analyze_file "$file"
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+    --help)
+      show_help
+      exit 0
+      ;;
+    --all)
+      RENDER_ALL_TRACK_PNGS=true
+      ;;
+    --check-deps)
+      CHECK_DEPS_ONLY=true
+      ;;
+    -*)
+      printf 'Unknown option: %s\n' "$1" >&2
+      show_help >&2
+      exit 1
+      ;;
+    *)
+      TARGET="$1"
+      ;;
+    esac
+    shift
   done
-  if [[ "$PREMERGED_PARTS_MODE" != true ]]; then
-    analyze_album_quality_merged all_files
-    if [[ "$ALBUM_PNG_RENDERED" != true ]]; then
-      render_album_spectrogram "${all_files[0]}" "$TARGET" "${#all_files[@]}" || true
+
+  if [[ "$CHECK_DEPS_ONLY" == true ]]; then
+    check_deps
+    exit $?
+  fi
+
+  [[ -n "$TARGET" ]] || {
+    printf 'Error: No target specified.\n' >&2
+    exit 1
+  }
+
+  [[ -e "$TARGET" ]] || {
+    printf 'Error: Path not found: %s\n' "$TARGET" >&2
+    exit 1
+  }
+}
+
+main() {
+  parse_args "$@"
+  check_deps || exit 1
+
+  if [[ -d "$TARGET" ]]; then
+    local all_files=()
+    collect_spectre_audio_files "$TARGET" all_files true
+
+    if ((${#all_files[@]} == 0)); then
+      printf 'No supported audio files found under: %s\n' "$TARGET" >&2
+      return 1
     fi
+
+    if [[ "$RENDER_ALL_TRACK_PNGS" == true ]]; then
+      local file
+      for file in "${all_files[@]}"; do
+        generate_file_mode "$file" || true
+      done
+    fi
+
+    generate_album_png "$TARGET" all_files
+    return $?
   fi
-  cleanup_and_show_summary
-else
-  VERBOSE_MODE=true
-  # Resolve genre profile from embedded tag for single-file mode.
-  _genre_tag="$(kv_get "GENRE" "$(ffprobe_album_key "$TARGET" 2>/dev/null || true)")"
-  if [[ -n "$_genre_tag" ]]; then
-    ALBUM_GENRE_PROFILE="$(audio_classify_genre_tag "$_genre_tag")"
-  fi
-  unset _genre_tag
-  analyze_file "$TARGET"
-  cleanup_and_show_summary
-fi
+
+  generate_file_mode "$TARGET"
+}
+
+main "$@"

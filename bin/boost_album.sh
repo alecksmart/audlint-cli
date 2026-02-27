@@ -1,6 +1,5 @@
-#!/opt/homebrew/bin/bash
-# PROMPT: macOS/Bash 3.2. Hybrid normalizer with Technical Pre-Audit & Final Cleanup.
-# Logic: Bake high-res; Tag lossy; Handle Opus/Ogg cover errors; 100% Audit; Optional Cleanup.
+#!/usr/bin/env bash
+# boost_album.sh - Analyze true peak and apply one album-level gain safely.
 
 BOOTSTRAP_SOURCE="${BASH_SOURCE[0]}"
 if command -v realpath >/dev/null 2>&1; then
@@ -30,6 +29,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/table.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/secure_backup.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$REPO_ROOT/.env" "$SCRIPT_DIR/.env" || true
@@ -48,9 +49,14 @@ Quick use:
 Usage: $(basename "$0") [-y]
 
 Options:
-  -y   Auto-confirm prompts.
-  -l   Use loudnorm analysis (true-peak + R128 gains).
-  -h   Show this help message.
+  -y, --yes   Auto-confirm prompts.
+  -l          Use loudnorm analysis (true-peak + R128 gains).
+  -h, --help  Show this help message.
+
+Behavior:
+  - Runs a pre-audit over codec/container/peak data.
+  - Calculates one album-level gain target.
+  - Re-encodes files with that gain while preserving tags/artwork.
 EOF
 }
 
@@ -84,20 +90,27 @@ HAS_METAFLAC=false
 if has_bin metaflac; then
   HAS_METAFLAC=true
 fi
-if [ "${1:-}" = "--help" ]; then
-  show_help
-  exit 0
-fi
 
-while getopts ":ylh" opt; do
-  case "$opt" in
-    y) AUTO_YES=true ;;
-    l) USE_LOUDNORM=true ;;
-    h) show_help; exit 0 ;;
-    \?) show_help; exit 2 ;;
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+  -y | --yes)
+    AUTO_YES=true
+    ;;
+  -l)
+    USE_LOUDNORM=true
+    ;;
+  -h | --help)
+    show_help
+    exit 0
+    ;;
+  *)
+    printf 'Unknown argument: %s\n' "${1:-}" >&2
+    show_help
+    exit 2
+    ;;
   esac
+  shift || true
 done
-shift $((OPTIND - 1))
 collect_boost_audio_files FILES
 BACKUP_DIR="before-recode"
 SAFETY_MARGIN="-0.3"
@@ -251,6 +264,11 @@ else
   read CONFIRM
 fi
 [[ "$CONFIRM" != "y" ]] && exit 0
+
+if ! secure_backup_album_tracks_once "." "boost_album write"; then
+  echo "${RED}Error:${RESET} ${SECURE_BACKUP_LAST_ERROR:-secure backup failed}"
+  exit 1
+fi
 
 mkdir -p "$BACKUP_DIR"
 

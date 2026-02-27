@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 #
 # bash5_consistency.sh
 # Development guard for Bash 5 migration consistency.
@@ -14,7 +14,7 @@
 #   tests/sh/bash5_consistency.sh lib/sh bin
 #
 # Env overrides:
-#   EXPECTED_BASH=/opt/homebrew/bin/bash
+#   EXPECTED_BASH=/absolute/path/to/bash
 #
 # shellcheck disable=SC2016
 # SC2016 is expected here because this script intentionally passes literal
@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-EXPECTED_BASH="${EXPECTED_BASH:-/opt/homebrew/bin/bash}"
+EXPECTED_BASH="${EXPECTED_BASH:-}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SELF_PATH="${ROOT_DIR}/tests/sh/bash5_consistency.sh"
 
@@ -57,6 +57,20 @@ check_cmd() {
   else
     fail "$name"
   fi
+}
+
+resolve_expected_bash() {
+  if [[ -n "$EXPECTED_BASH" ]]; then
+    return 0
+  fi
+  local candidate=""
+  for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)" /bin/bash; do
+    [[ -n "$candidate" ]] || continue
+    if [[ -x "$candidate" ]]; then
+      EXPECTED_BASH="$candidate"
+      return 0
+    fi
+  done
 }
 
 assert_bash_runtime() {
@@ -114,7 +128,7 @@ assert_shebang_and_parse() {
       pass "Shebang policy (self): $f"
     else
       first_line="$(head -n1 "$f" 2>/dev/null || true)"
-      if [[ "$first_line" == "#!${EXPECTED_BASH}" ]]; then
+      if [[ "$first_line" == "#!/usr/bin/env bash" || "$first_line" == "#!${EXPECTED_BASH}" ]]; then
         pass "Shebang policy: $f"
       else
         fail "Shebang mismatch: $f (found: ${first_line:-<none>})"
@@ -139,6 +153,7 @@ assert_shebang_and_parse() {
 }
 
 main() {
+  resolve_expected_bash
   printf 'Bash 5 consistency check\n'
   printf 'Root: %s\n' "$ROOT_DIR"
   printf 'Expected Bash: %s\n' "$EXPECTED_BASH"

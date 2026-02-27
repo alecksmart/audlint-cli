@@ -51,29 +51,32 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
         self.ssh_key.write_text("dummy", encoding="utf-8")
 
         self.env_path = self.work_dir / ".env"
+        self._write_env(include_ssh_key=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_env(self, include_ssh_key: bool) -> None:
+        ssh_line = f'SSH_KEY="{self.ssh_key}"\n' if include_ssh_key else ""
         self.env_path.write_text(
             textwrap.dedent(
                 f"""\
                 SRC="{self.src_dir}"
                 DST_USER_HOST="user@example"
                 DST_PATH="/srv/music"
-                SSH_KEY="{self.ssh_key}"
-                """
+                {ssh_line}"""
             ),
             encoding="utf-8",
         )
 
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
     def _install_stubs(self) -> None:
         _write_exec(
             self.bin_dir / "ssh",
-            "#!/opt/homebrew/bin/bash\nprintf '%s\\n' \"$*\" >> \"$SSH_LOG\"\n[[ \"$*\" == *\"test -d\"* ]] && exit 1\nexit 0\n",
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$SSH_LOG\"\n[[ \"$*\" == *\"test -d\"* ]] && exit 1\nexit 0\n",
         )
         _write_exec(
             self.bin_dir / "rsync",
-            "#!/opt/homebrew/bin/bash\n"
+            "#!/usr/bin/env bash\n"
             "if [[ \"${1:-}\" == \"--help\" ]]; then\n"
             "  case \"${RSYNC_HELP_MODE:-protect}\" in\n"
             "    secluded) printf '%s\\n' 'rsync help --secluded-args';;\n"
@@ -111,12 +114,12 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
 
     def test_help_and_invalid_flag_show_usage(self) -> None:
         help_proc = self._run(["--help"])
-        self.assertNotEqual(help_proc.returncode, 0)
+        self.assertEqual(help_proc.returncode, 0)
         self.assertIn("Usage:", help_proc.stdout)
 
         bad_proc = self._run(["--bad-flag"])
         self.assertNotEqual(bad_proc.returncode, 0)
-        self.assertIn("Usage:", bad_proc.stdout)
+        self.assertIn("Usage:", bad_proc.stderr)
 
     def test_dry_run_debug_runs_with_stubbed_ssh_rsync(self) -> None:
         proc = self._run(["--dry-run", "--debug"])
@@ -133,6 +136,15 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
 
         self.assertFalse((self.src_dir / ".DS_Store").exists())
         self.assertFalse((self.src_dir / "._junk").exists())
+
+    def test_dry_run_without_ssh_key_uses_default_identity(self) -> None:
+        self._write_env(include_ssh_key=False)
+        proc = self._run(["--dry-run"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("SSH key: <default identity>", proc.stdout)
+
+        ssh_log = (self.tmpdir / "ssh.log").read_text(encoding="utf-8")
+        self.assertNotIn("-i ", ssh_log)
 
 
 if __name__ == "__main__":

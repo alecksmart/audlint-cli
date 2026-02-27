@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # lyrics_album.sh - Fetch/cache/embed synced lyrics for files in the current folder.
 
 AUTO_YES=false
@@ -39,21 +39,29 @@ show_help() {
 Quick use:
   $(basename "$0")
   $(basename "$0") -y
+  $(basename "$0") --yes
   $(basename "$0") --backup-maintenance-only
 
-Usage: $(basename "$0") [-y] [--backup-maintenance-only]
+Usage: $(basename "$0") [-y|--yes] [-B|--backup-maintenance-only]
 
 Options:
-  -y   Auto-confirm prompts.
+  -y, --yes
+       Auto-confirm prompts.
   -B, --backup-maintenance-only
        Normalize/repair backup bundles for LIBRARY_DB and exit.
-  -h   Show this help message.
+  -h, --help
+       Show this help message.
+
+Behavior:
+  - Scans audio files in the current directory.
+  - Fetches synced lyrics and embeds them in supported formats.
+  - Caches fetch outcomes in lyrics_cache table inside LIBRARY_DB.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
-  -y)
+  -y | --yes)
     AUTO_YES=true
     ;;
   -B | --backup-maintenance-only)
@@ -64,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     exit 0
     ;;
   *)
+    printf 'Unknown argument: %s\n' "${1:-}" >&2
     show_help
     exit 2
     ;;
@@ -157,6 +166,7 @@ lyrics_cache_lookup() {
   t_sql=$(sql_escape "$title_lc")
   al_sql=$(sql_escape "$album_lc")
 
+  # Duration tolerance keeps cache hits stable across container/probe variance.
   sqlite3 -separator "|" "$db" \
     "SELECT status, attempted_at FROM lyrics_cache WHERE artist_lc='${a_sql}' AND title_lc='${t_sql}' AND album_lc='${al_sql}' AND abs(duration_int - ${duration_int}) <= 2 ORDER BY updated_at DESC LIMIT 1;"
 }

@@ -1,4 +1,8 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
+
+AUDIO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$AUDIO_LIB_DIR/profile.sh"
 
 audio_collect_files() {
   local dir="${1:-.}"
@@ -18,12 +22,15 @@ audio_collect_files() {
       *.alac
       *.m4a
       *.wav
+      *.aiff *.aif *.aifc
+      *.caf
       *.dsf
       *.dff
       *.wv
       *.ape
       *.mp4
       *.mp3
+      *.aac
       *.ogg
       *.opus
     )
@@ -33,12 +40,15 @@ audio_collect_files() {
       "$dir"/*.alac
       "$dir"/*.m4a
       "$dir"/*.wav
+      "$dir"/*.aiff "$dir"/*.aif "$dir"/*.aifc
+      "$dir"/*.caf
       "$dir"/*.dsf
       "$dir"/*.dff
       "$dir"/*.wv
       "$dir"/*.ape
       "$dir"/*.mp4
       "$dir"/*.mp3
+      "$dir"/*.aac
       "$dir"/*.ogg
       "$dir"/*.opus
     )
@@ -46,6 +56,34 @@ audio_collect_files() {
   ((had_nullglob == 1)) || shopt -u nullglob
   ((had_nocaseglob == 1)) || shopt -u nocaseglob
   : "${#out_ref[@]}"
+}
+
+# audio_find_iname_args — print the canonical -iname predicate fragment for find.
+#
+# Splice into any find command:
+#   find DIR -maxdepth 1 -type f \( $(audio_find_iname_args) \) -print
+#
+# The list is the authoritative set of audio extensions recognised by audlint.
+# Keep this in sync with audio_collect_files above.
+audio_find_iname_args() {
+  printf '%s ' \
+    '-iname' '*.flac' \
+    '-o' '-iname' '*.alac' \
+    '-o' '-iname' '*.m4a' \
+    '-o' '-iname' '*.wav' \
+    '-o' '-iname' '*.aiff' \
+    '-o' '-iname' '*.aif' \
+    '-o' '-iname' '*.aifc' \
+    '-o' '-iname' '*.caf' \
+    '-o' '-iname' '*.dsf' \
+    '-o' '-iname' '*.dff' \
+    '-o' '-iname' '*.wv' \
+    '-o' '-iname' '*.ape' \
+    '-o' '-iname' '*.mp4' \
+    '-o' '-iname' '*.mp3' \
+    '-o' '-iname' '*.aac' \
+    '-o' '-iname' '*.ogg' \
+    '-o' '-iname' '*.opus'
 }
 
 audio_has_files() {
@@ -336,11 +374,12 @@ audio_is_lossy_codec() {
   esac
 }
 
-# Returns the source quality label for a single audio file (e.g. "44.1/24", "96/24", "44.1/32f").
+# Returns the source quality label for a single audio file in canonical format
+# SR_HZ/BITS (e.g. "44100/24", "96000/24", "44100/32f").
 # Uses three separate ffprobe fields: sample_rate, bits_per_raw_sample, sample_fmt.
 audio_source_quality_label() {
   local in="$1"
-  local sr bps sfmt bit_label src_label
+  local sr bps sfmt bit_label normalized
   sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
   bps="$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
   sfmt="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_fmt -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
@@ -360,17 +399,20 @@ audio_source_quality_label() {
     *) bit_label="" ;;
     esac
   fi
-  if [[ -n "$sr" && "$sr" =~ ^[0-9]+$ ]]; then
-    src_label="$(awk -v s="$sr" 'BEGIN{printf "%.1f", s/1000.0}')"
-    src_label="${src_label%.0}"
-  else
-    src_label="?"
+  if [[ "$sr" =~ ^[0-9]+$ ]] && ((sr > 0)) && [[ -n "$bit_label" ]]; then
+    normalized="$(profile_normalize "${sr}/${bit_label}" || true)"
+    if [[ -n "$normalized" ]]; then
+      printf '%s\n' "$normalized"
+      return 0
+    fi
+    printf '%s/%s\n' "$sr" "$bit_label"
+    return 0
   fi
-  if [[ -n "$bit_label" ]]; then
-    printf '%s/%s\n' "$src_label" "$bit_label"
-  else
-    printf '%s/??\n' "$src_label"
+  if [[ "$sr" =~ ^[0-9]+$ ]] && ((sr > 0)); then
+    printf '%s/??\n' "$sr"
+    return 0
   fi
+  printf '?/??\n'
 }
 
 # Returns the source quality label for an album (array of files).
@@ -417,4 +459,93 @@ audio_save_true_peak_cache() {
     printf '%s\t%s\t%s\t%s\n' "$path" "$mtime" "$size" "$true_peak" >>"$tmp"
   done
   mv -f "$tmp" "$file"
+}
+
+# ---------------------------------------------------------------------------
+# audvalue_scan_album — DR14 + spectral recode analysis via audlint-value.
+#
+# Calls audlint-value on ALBUM_DIR and populates the following globals:
+#   AUDVALUE_RECODE_TO   — raw SR/bits e.g. "48000/24"
+#   AUDVALUE_DR          — DR14 integer
+#   AUDVALUE_GRADE       — mastering grade S/A/B/C/F
+#   AUDVALUE_GENRE       — genre profile used (audiophile|high_energy|standard)
+#   AUDVALUE_SR_HZ       — sampling rate from dr14meter report (or "")
+#   AUDVALUE_BITRATE_KBS — average bitrate from dr14meter report (or "")
+#   AUDVALUE_BITS        — bits per sample from dr14meter report (or "")
+#
+# Usage:
+#   audvalue_scan_album "/path/to/album" [genre_profile]
+#   Returns 0 on success, 1 on failure.
+#
+# The RECODE column value and needs_recode flag should be computed by the
+# caller from AUDVALUE_RECODE_TO vs the source profile (CURR column).
+# ---------------------------------------------------------------------------
+audvalue_scan_album() {
+  local album_dir="$1"
+  local genre_profile="${2:-standard}"
+
+  AUDVALUE_RECODE_TO=""
+  AUDVALUE_DR=""
+  AUDVALUE_GRADE=""
+  AUDVALUE_GENRE="$genre_profile"
+  AUDVALUE_SR_HZ=""
+  AUDVALUE_BITRATE_KBS=""
+  AUDVALUE_BITS=""
+
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local audlint_value_bin="${AUDLINT_VALUE_BIN:-$script_dir/../../bin/audlint-value.sh}"
+  if [[ ! -x "$audlint_value_bin" ]]; then
+    # Fallback: search relative to this lib file's location.
+    audlint_value_bin="$(cd "$script_dir" && cd ../../bin 2>/dev/null && pwd)/audlint-value.sh"
+  fi
+
+  [[ -x "$audlint_value_bin" ]] || return 1
+
+  # AUDLINT_VALUE_PYTHON_BIN allows tests to override python3 for JSON parsing
+  # independently of PYTHON_BIN.
+  local python_bin="${AUDLINT_VALUE_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
+  local json_out
+  json_out="$(GENRE_PROFILE="$genre_profile" "$audlint_value_bin" "$album_dir" 2>/dev/null)" || return 1
+
+  # Parse JSON fields with python3 (already a required dep).
+  local parsed
+  parsed="$("$python_bin" - "$json_out" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+def s(v): return str(v) if v is not None else ""
+print(data.get("recodeTo",""))
+print(s(data.get("drTotal","")))
+print(data.get("grade",""))
+print(data.get("genreProfile","standard"))
+print(s(data.get("samplingRateHz","")))
+print(s(data.get("averageBitrateKbs","")))
+print(s(data.get("bitsPerSample","")))
+PY
+  )" || return 1
+
+  {
+    IFS= read -r AUDVALUE_RECODE_TO
+    IFS= read -r AUDVALUE_DR
+    IFS= read -r AUDVALUE_GRADE
+    IFS= read -r AUDVALUE_GENRE
+    IFS= read -r AUDVALUE_SR_HZ
+    IFS= read -r AUDVALUE_BITRATE_KBS
+    IFS= read -r AUDVALUE_BITS
+  } <<< "$parsed"
+
+  [[ -n "$AUDVALUE_RECODE_TO" && -n "$AUDVALUE_DR" && -n "$AUDVALUE_GRADE" ]] || return 1
+  return 0
+}
+
+# Normalize a profile string into canonical SR_HZ/BITS format.
+audvalue_format_profile() {
+  local raw="$1"
+  local normalized
+  normalized="$(profile_normalize "$raw" || true)"
+  if [[ -n "$normalized" ]]; then
+    printf '%s\n' "$normalized"
+  else
+    printf '%s\n' "$raw"
+  fi
 }

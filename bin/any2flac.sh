@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # any2flac.sh - Convert audio files in a directory to FLAC at a target profile.
 # Policy:
 # - No lossy -> FLAC conversion (mp3/aac/etc. fail).
@@ -29,6 +29,13 @@ source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
+<<<<<<< HEAD
+=======
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/secure_backup.sh"
+>>>>>>> develop
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 require_bins ffprobe >/dev/null || exit 2
@@ -53,16 +60,20 @@ APPLY_BOOST=0
 BOOST_SAFETY_MARGIN_DB="-1.0"
 BOOST_MIN_APPLY_DB="0.3"
 
-usage() {
+show_help() {
   cat <<'EOF_HELP'
 Usage:
   any2flac.sh <profile> [directory]
   any2flac.sh --profile <profile> [--dir <directory>] [--dry-run] [--yes] [--plan-only] [--with-boost]
+  any2flac.sh --help-profiles
 
 Profile format:
-  <sample_rate_khz>/<bit_depth>
+  <sample_rate>/<bit_depth>
 Examples:
+  44100/16
   44.1/16
+  44.1-16
+  44k/16
   48/24
   96/24
   192/24
@@ -75,39 +86,41 @@ Behavior:
   - Fails if target profile is above source profile (no upscale).
   - Fails if any source is lossy (no mp3/aac/... -> flac).
   - Fails when no audio files are found.
+  - Normalized internal format is SR_HZ/BITS (e.g. 44100/16).
 EOF_HELP
-}
-
-normalize_profile_label() {
-  local sr_khz="$1"
-  local bits="$2"
-  printf '%s/%s' "$(awk -v s="$sr_khz" 'BEGIN{printf "%.1f", s;}' | sed 's/\.0$//')" "$bits"
 }
 
 parse_target_profile() {
   local raw="$1"
-  local sr_part bits_part
-  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
-  [[ -n "$raw" ]] || return 1
-  [[ "$raw" =~ ^([0-9]+([.][0-9]+)?)/([0-9]{1,2})$ ]] || return 1
-  sr_part="${BASH_REMATCH[1]}"
-  bits_part="${BASH_REMATCH[3]}"
+  local normalized bits_part
+  normalized="$(profile_normalize "$raw" || true)"
+  [[ -n "$normalized" ]] || return 1
+  TARGET_SR_HZ="${normalized%%/*}"
+  bits_part="${normalized#*/}"
 
   case "$bits_part" in
   16 | 24 | 32) ;;
   *) return 1 ;;
   esac
 
-  TARGET_SR_HZ="$(awk -v s="$sr_part" 'BEGIN{printf "%.0f", s*1000.0;}')"
   [[ "$TARGET_SR_HZ" =~ ^[0-9]+$ ]] || return 1
   ((TARGET_SR_HZ > 0)) || return 1
   TARGET_BITS="$bits_part"
-  TARGET_SR_LABEL="$(normalize_profile_label "$sr_part" "$bits_part")"
+  TARGET_SR_LABEL="${TARGET_SR_HZ}/${bits_part}"
 
   case "$TARGET_BITS" in
   16) TARGET_SAMPLE_FMT="s16" ;;
   24 | 32) TARGET_SAMPLE_FMT="s32" ;;
   esac
+}
+
+show_help_profiles() {
+  profile_print_help
+  printf '\n'
+  profile_print_supported_targets
+  printf '\nany2flac profile limits:\n'
+  printf '  - Target bits accepted: 16, 24, 32\n'
+  printf '  - Fuzzy inputs accepted; normalized internally before validation.\n'
 }
 
 probe_codec_name() {
@@ -175,8 +188,10 @@ normalize_source_bit_depth() {
 profile_label_from_source() {
   local sr_hz="$1"
   local bits="$2"
+  local normalized
   if [[ "$sr_hz" =~ ^[0-9]+$ ]] && ((sr_hz > 0)) && [[ "$bits" =~ ^[0-9]+$ ]] && ((bits > 0)); then
-    printf '%s/%s' "$(awk -v s="$sr_hz" 'BEGIN{printf "%.1f", s/1000.0;}' | sed 's/\.0$//')" "$bits"
+    normalized="$(profile_normalize "${sr_hz}/${bits}" || true)"
+    printf '%s' "${normalized:-${sr_hz}/${bits}}"
   else
     printf '?/?'
   fi
@@ -225,7 +240,7 @@ print_plan_rows() {
     src_size="$(file_size_bytes "$src")"
     src_name="$(basename "$src")"
     printf '  %s\t%s\t%s\t%s\t%s\t%s\n' "$src_name" "$src_size" "$src_codec" "$src_profile" "$src_bitrate" "$TARGET_SR_LABEL"
-    # Keep summary checkpoint lines for backward compatibility with existing logs.
+    # Keep summary checkpoint lines for concise progress logs.
     printf '  - [%s | %s] %s -> %s | target=%s\n' "$src_codec" "$src_profile" "$src" "$target" "$TARGET_SR_LABEL"
   done
 }
@@ -382,7 +397,11 @@ run_boost_analysis_if_enabled() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
   -h | --help)
-    usage
+    show_help
+    exit 0
+    ;;
+  --help-profiles)
+    show_help_profiles
     exit 0
     ;;
   --profile)
@@ -419,7 +438,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   -*)
     echo "Error: unknown option: $1" >&2
-    usage
+    show_help >&2
     exit 2
     ;;
   *)
@@ -429,7 +448,7 @@ while [[ $# -gt 0 ]]; do
       WORK_DIR="$1"
     else
       echo "Error: unexpected argument: $1" >&2
-      usage
+      show_help >&2
       exit 2
     fi
     ;;
@@ -439,12 +458,12 @@ done
 
 if [[ -z "$TARGET_PROFILE" ]]; then
   echo "Error: profile is required." >&2
-  usage
+  show_help >&2
   exit 2
 fi
 
 if ! parse_target_profile "$TARGET_PROFILE"; then
-  echo "Error: invalid profile '$TARGET_PROFILE' (expected format like 44.1/16, 96/24)." >&2
+  echo "Error: invalid profile '$TARGET_PROFILE' (run --help-profiles for accepted forms)." >&2
   exit 2
 fi
 
@@ -547,16 +566,19 @@ if ((ASSUME_YES == 0)); then
   fi
   printf 'Proceed with conversion? [y/N] > '
   confirm_choice=""
-  if ! IFS= read -r confirm_choice </dev/tty; then
-    printf '\n'
+  if ! tty_read_line confirm_choice; then
     echo "Cancelled." >&2
     exit 1
   fi
-  printf '\n'
   if [[ "$confirm_choice" != "y" ]]; then
     echo "Cancelled."
     exit 1
   fi
+fi
+
+if ! secure_backup_album_tracks_once "$WORK_DIR" "any2flac recode"; then
+  printf 'Error: %s\n' "${SECURE_BACKUP_LAST_ERROR:-secure backup failed}" >&2
+  exit 1
 fi
 
 converted=0
@@ -579,6 +601,10 @@ for src in "${audio_files[@]}"; do
   [[ "$src_codec" == "flac" ]] || encode_src_is_flac=0
 
   encode_args=(--in "$src" --out "$tmp_out" --sr "$TARGET_SR_HZ" --bits "$TARGET_BITS" --src-is-flac "$encode_src_is_flac")
+<<<<<<< HEAD
+=======
+  [[ -n "$src_codec" ]] && encode_args+=(--src-codec "$src_codec")
+>>>>>>> develop
   [[ -n "$encode_gain_db" ]] && encode_args+=(--gain "$encode_gain_db")
 
   if ! encoder_to_flac "${encode_args[@]}"; then

@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # lyrics_seek.sh - Scan for album folders and run lyrics_album.sh.
 
 trap 'echo -e "\n\n[!] Seeker terminated by user."; exit 1' INT
@@ -36,34 +36,37 @@ show_help() {
 Quick use:
   $(basename "$0")
   $(basename "$0") -y
+  $(basename "$0") --yes
 
-Usage: $(basename "$0") [-y]
+Usage: $(basename "$0") [-y|--yes]
 
 Options:
-  -y   Auto-confirm prompts for each album.
-  -h   Show this help message.
+  -y, --yes   Auto-confirm prompts for each album.
+  -h, --help  Show this help message.
+
+Behavior:
+  - Scans subdirectories from the current path.
+  - Runs lyrics_album.sh for folders that contain audio files.
 EOF
 }
 
-if [ "${1:-}" = "--help" ]; then
-  show_help
-  exit 0
-fi
-
-while getopts ":yh" opt; do
-  case "$opt" in
-  y) AUTO_YES=true ;;
-  h)
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+  -y | --yes)
+    AUTO_YES=true
+    ;;
+  -h | --help)
     show_help
     exit 0
     ;;
-  \?)
+  *)
+    printf 'Unknown argument: %s\n' "${1:-}" >&2
     show_help
     exit 2
     ;;
   esac
+  shift || true
 done
-shift $((OPTIND - 1))
 
 LYRICS_ALBUM_BIN="${LYRICS_ALBUM_BIN:-$SCRIPT_DIR/lyrics_album.sh}"
 if [[ ! -x "$LYRICS_ALBUM_BIN" ]]; then
@@ -102,6 +105,7 @@ run_album_if_present() {
 
 walk_dir() {
   local dir="$1"
+  # Root "." is handled once explicitly before recursive walk.
   if [ "$dir" = "." ]; then
     return 1
   fi

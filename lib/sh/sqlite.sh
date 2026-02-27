@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 
 sql_escape() {
   printf "%s" "$1" | sed "s/'/''/g"
@@ -17,6 +17,51 @@ norm_lc_or_null_sql() {
     return 0
   fi
   printf "'%s'" "$(sql_escape "$(norm_lc "$raw")")"
+}
+
+_sqlite_trim() {
+  printf '%s' "${1:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+_sqlite_ensure_profile_normalizer() {
+  if declare -F profile_normalize >/dev/null 2>&1; then
+    return 0
+  fi
+  local lib_dir profile_lib
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  profile_lib="$lib_dir/profile.sh"
+  [[ -f "$profile_lib" ]] || return 1
+  # shellcheck source=/dev/null
+  source "$profile_lib"
+  declare -F profile_normalize >/dev/null 2>&1
+}
+
+_sqlite_profile_canonical_into() {
+  local raw out_var normalized
+  raw="$(_sqlite_trim "${1:-}")"
+  out_var="${2:-}"
+  [[ -n "$out_var" ]] || return 1
+  [[ -n "$raw" ]] || return 1
+  _sqlite_ensure_profile_normalizer || return 1
+  normalized="$(profile_normalize "$raw" 2>/dev/null || true)"
+  [[ -n "$normalized" ]] || return 1
+  printf -v "$out_var" '%s' "$normalized"
+  return 0
+}
+
+norm_profile_or_null_sql() {
+  local raw canonical
+  raw="$(_sqlite_trim "${1:-}")"
+  [[ -n "$raw" ]] || {
+    printf 'NULL'
+    return 0
+  }
+  canonical=""
+  if _sqlite_profile_canonical_into "$raw" canonical; then
+    printf "'%s'" "$(sql_escape "$canonical")"
+  else
+    printf "'%s'" "$(sql_escape "$(norm_lc "$raw")")"
+  fi
 }
 
 sql_num_or_null() {
@@ -221,6 +266,8 @@ WHERE
 SQL
   fi
 
+  album_quality_normalize_profile_columns_once "$db" || true
+
   # Prefer WAL for concurrent read-heavy browsing with batch writes.
   sqlite3 "$db" "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;" >/dev/null 2>&1 || true
 
@@ -267,6 +314,98 @@ SQL
       sqlite3 "$db" "INSERT INTO app_meta(key,value) VALUES('album_quality_fts_index_version','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value;" >/dev/null 2>&1 || true
     fi
   fi
+}
+
+album_quality_normalize_profile_columns() {
+  local db="$1"
+  local rows
+  local row_sep=$'\x1f'
+  _sqlite_ensure_profile_normalizer || true
+  rows="$(sqlite3 -separator "$row_sep" -noheader "$db" \
+    "SELECT id, COALESCE(current_quality,''), COALESCE(profile_norm,'')
+       FROM album_quality
+      WHERE NULLIF(TRIM(COALESCE(current_quality,'')),'') IS NOT NULL
+         OR NULLIF(TRIM(COALESCE(profile_norm,'')),'') IS NOT NULL;" 2>/dev/null || true)"
+  [[ -n "$rows" ]] || return 0
+
+  local -a sql_updates=()
+  local id curr_raw prof_raw curr_trim prof_trim canonical desired_norm
+  local changed=0
+
+  while IFS="$row_sep" read -r id curr_raw prof_raw; do
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    curr_trim="$(_sqlite_trim "$curr_raw")"
+    prof_trim="$(_sqlite_trim "$prof_raw")"
+
+    canonical=""
+    if ! _sqlite_profile_canonical_into "$curr_trim" canonical; then
+      _sqlite_profile_canonical_into "$prof_trim" canonical || true
+    fi
+
+    if [[ -n "$canonical" ]]; then
+      desired_norm="$(norm_lc "$canonical")"
+      if [[ "$curr_trim" != "$canonical" || "$prof_trim" != "$desired_norm" ]]; then
+        sql_updates+=(
+          "UPDATE album_quality
+           SET current_quality='$(sql_escape "$canonical")',
+               profile_norm='$(sql_escape "$desired_norm")'
+           WHERE id=$id;"
+        )
+        changed=1
+      fi
+      continue
+    fi
+
+    # Non-profile text should remain untouched in current_quality; only keep
+    # profile_norm synchronized for stable filtering.
+    desired_norm=""
+    if [[ -n "$curr_trim" ]]; then
+      desired_norm="$(norm_lc "$curr_trim")"
+    elif [[ -n "$prof_trim" ]]; then
+      desired_norm="$(norm_lc "$prof_trim")"
+    fi
+    if [[ -n "$desired_norm" && "$prof_trim" != "$desired_norm" ]]; then
+      sql_updates+=(
+        "UPDATE album_quality
+         SET profile_norm='$(sql_escape "$desired_norm")'
+         WHERE id=$id;"
+      )
+      changed=1
+    fi
+  done <<<"$rows"
+
+  ((changed == 1)) || return 0
+  local apply_err=""
+  if ! apply_err="$(
+    {
+      printf 'BEGIN;\n'
+      printf '%s\n' "${sql_updates[@]}"
+      printf 'COMMIT;\n'
+    } | sqlite3 "$db" 2>&1 >/dev/null
+  )"; then
+    printf 'album_quality_normalize_profile_columns: sqlite apply failed: %s\n' "$apply_err" >&2
+    return 1
+  fi
+}
+
+album_quality_normalize_profile_columns_once() {
+  local db="$1"
+  local meta_key="album_quality_profile_norm_version"
+  local meta_ver="1"
+
+  sqlite3 "$db" "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);" >/dev/null 2>&1 || return 1
+
+  local current_ver=""
+  current_ver="$(sqlite3 -noheader "$db" "SELECT value FROM app_meta WHERE key='${meta_key}' LIMIT 1;" 2>/dev/null || true)"
+  if [[ "$current_ver" == "$meta_ver" ]]; then
+    return 0
+  fi
+
+  album_quality_normalize_profile_columns "$db" || return 1
+
+  sqlite3 "$db" \
+    "INSERT INTO app_meta(key,value) VALUES('${meta_key}','${meta_ver}')
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value;" >/dev/null 2>&1 || return 1
 }
 
 album_quality_sync_lc_columns() {
@@ -405,6 +544,12 @@ album_quality_upsert() {
   if [[ -n "$rec" ]]; then
     rec_sql="'$(sql_escape "$rec")'"
   fi
+  local current_quality_canonical=""
+  if [[ -n "$current_quality" ]]; then
+    if _sqlite_profile_canonical_into "$current_quality" current_quality_canonical; then
+      current_quality="$current_quality_canonical"
+    fi
+  fi
   local current_quality_sql="NULL"
   if [[ -n "$current_quality" ]]; then
     current_quality_sql="'$(sql_escape "$current_quality")'"
@@ -423,7 +568,7 @@ album_quality_upsert() {
   fi
   local codec_norm_sql profile_norm_sql
   codec_norm_sql="$(norm_lc_or_null_sql "$codec")"
-  profile_norm_sql="$(norm_lc_or_null_sql "$current_quality")"
+  profile_norm_sql="$(norm_profile_or_null_sql "$current_quality")"
   local genre_profile_sql="NULL"
   if [[ -n "$genre_profile" ]]; then
     genre_profile_sql="'$(sql_escape "$genre_profile")'"

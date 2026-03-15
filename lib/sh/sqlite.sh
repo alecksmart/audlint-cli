@@ -64,6 +64,26 @@ norm_profile_or_null_sql() {
   fi
 }
 
+norm_lc_or_empty_sql() {
+  local raw="${1:-}"
+  printf "'%s'" "$(sql_escape "$(norm_lc "$raw")")"
+}
+
+norm_profile_or_empty_sql() {
+  local raw canonical
+  raw="$(_sqlite_trim "${1:-}")"
+  if [[ -z "$raw" ]]; then
+    printf "''"
+    return 0
+  fi
+  canonical=""
+  if _sqlite_profile_canonical_into "$raw" canonical; then
+    printf "'%s'" "$(sql_escape "$canonical")"
+  else
+    printf "'%s'" "$(sql_escape "$(norm_lc "$raw")")"
+  fi
+}
+
 sql_num_or_null() {
   local v="$1"
   if [[ "$v" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
@@ -79,6 +99,131 @@ _album_quality_has_column() {
   local rows
   rows="$(sqlite3 -noheader "$db" "PRAGMA table_info(album_quality);" 2>/dev/null || true)"
   printf '%s\n' "$rows" | awk -F'|' -v c="$col" '$2 == c { found = 1 } END { exit(found ? 0 : 1) }'
+}
+
+album_quality_index_contract_version() {
+  printf '2'
+}
+
+album_quality_sync_index_columns() {
+  local db="$1"
+  sqlite3 "$db" <<'SQL' >/dev/null 2>&1
+UPDATE album_quality
+SET
+  artist_norm=COALESCE(NULLIF(TRIM(COALESCE(artist_lc,'')),''), LOWER(TRIM(COALESCE(artist,''))), ''),
+  album_norm=COALESCE(NULLIF(TRIM(COALESCE(album_lc,'')),''), LOWER(TRIM(COALESCE(album,''))), ''),
+  grade_rank=CASE UPPER(COALESCE(quality_grade,''))
+    WHEN 'F' THEN 1
+    WHEN 'C' THEN 2
+    WHEN 'B' THEN 3
+    WHEN 'A' THEN 4
+    WHEN 'S' THEN 5
+    ELSE 6
+  END,
+  checked_sort=COALESCE(last_checked_at,0),
+  profile_norm=LOWER(TRIM(COALESCE(profile_norm,''))),
+  codec_norm=LOWER(TRIM(COALESCE(codec,'')))
+WHERE
+  COALESCE(artist_norm,'') != COALESCE(NULLIF(TRIM(COALESCE(artist_lc,'')),''), LOWER(TRIM(COALESCE(artist,''))), '')
+  OR COALESCE(album_norm,'') != COALESCE(NULLIF(TRIM(COALESCE(album_lc,'')),''), LOWER(TRIM(COALESCE(album,''))), '')
+  OR COALESCE(grade_rank,-1) != CASE UPPER(COALESCE(quality_grade,''))
+    WHEN 'F' THEN 1
+    WHEN 'C' THEN 2
+    WHEN 'B' THEN 3
+    WHEN 'A' THEN 4
+    WHEN 'S' THEN 5
+    ELSE 6
+  END
+  OR COALESCE(checked_sort,-1) != COALESCE(last_checked_at,0)
+  OR COALESCE(profile_norm,'') != LOWER(TRIM(COALESCE(profile_norm,'')))
+  OR COALESCE(codec_norm,'') != LOWER(TRIM(COALESCE(codec,'')));
+SQL
+}
+
+album_quality_sync_index_columns_once() {
+  local db="$1"
+  local meta_key="album_quality_index_contract_version"
+  local meta_ver
+  meta_ver="$(album_quality_index_contract_version)"
+
+  sqlite3 "$db" "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);" >/dev/null 2>&1 || return 1
+
+  local current_ver=""
+  current_ver="$(sqlite3 -noheader "$db" "SELECT value FROM app_meta WHERE key='${meta_key}' LIMIT 1;" 2>/dev/null || true)"
+  if [[ "$current_ver" == "$meta_ver" ]]; then
+    return 0
+  fi
+
+  album_quality_sync_index_columns "$db" || return 1
+
+  sqlite3 "$db" \
+    "INSERT INTO app_meta(key,value) VALUES('${meta_key}','${meta_ver}')
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value;" >/dev/null 2>&1 || return 1
+}
+
+album_quality_has_index_contract() {
+  local db="$1"
+  local expected="${2:-}"
+  local current_ver=""
+
+  if [[ -z "$expected" ]]; then
+    expected="$(album_quality_index_contract_version)"
+  fi
+
+  current_ver="$(sqlite3 -noheader "$db" "SELECT value FROM app_meta WHERE key='album_quality_index_contract_version' LIMIT 1;" 2>/dev/null || true)"
+  [[ "$current_ver" == "$expected" ]]
+}
+
+album_quality_browser_stats_row() {
+  local db="$1"
+  local where_sql="${2:-}"
+  sqlite3 -separator $'\t' -noheader "$db" \
+    "WITH filtered AS (
+       SELECT quality_grade
+       FROM album_quality
+       $where_sql
+     )
+     SELECT
+       COUNT(*),
+       SUM(CASE WHEN UPPER(COALESCE(quality_grade,''))='S' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN UPPER(COALESCE(quality_grade,''))='A' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN UPPER(COALESCE(quality_grade,''))='B' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN UPPER(COALESCE(quality_grade,''))='C' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN UPPER(COALESCE(quality_grade,''))='F' THEN 1 ELSE 0 END),
+       CASE
+         WHEN EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='scan_roadmap')
+         THEN (SELECT COUNT(*) FROM scan_roadmap)
+         ELSE 0
+       END
+     FROM filtered;" 2>/dev/null || true
+}
+
+album_quality_inventory_rows() {
+  local db="$1"
+  local where_sql="${2:-}"
+  local key_expr="${3:-}"
+  local order_sql="${4:-inventory_key ASC}"
+
+  sqlite3 -separator $'\t' -noheader "$db" \
+    "WITH filtered AS (
+       SELECT COALESCE(NULLIF(${key_expr},''),'~unknown') AS inventory_key
+       FROM album_quality
+       $where_sql
+     ),
+     grouped AS (
+       SELECT inventory_key, COUNT(*) AS inventory_count
+       FROM filtered
+       GROUP BY inventory_key
+     ),
+     ordered AS (
+       SELECT '__all__' AS inventory_key, (SELECT COUNT(*) FROM filtered) AS inventory_count, 0 AS sort_group
+       UNION ALL
+       SELECT inventory_key, inventory_count, 1 AS sort_group
+       FROM grouped
+     )
+     SELECT inventory_key, inventory_count
+     FROM ordered
+     ORDER BY sort_group ASC, ${order_sql};" 2>/dev/null || true
 }
 
 album_quality_db_init() {
@@ -208,6 +353,7 @@ DROP INDEX IF EXISTS idx_album_quality_sort_grade;
 DROP INDEX IF EXISTS idx_album_quality_sort_codec;
 DROP INDEX IF EXISTS idx_album_quality_filter_codec;
 DROP INDEX IF EXISTS idx_album_quality_filter_profile;
+DROP INDEX IF EXISTS idx_album_quality_hot_grade_r0;
 SQL
 
   sqlite3 "$db" <<'SQL' >/dev/null 2>&1
@@ -225,7 +371,7 @@ CREATE INDEX IF NOT EXISTS idx_album_quality_hot_scan_failed_checked_r0
   WHERE rarity=0 AND scan_failed=1;
 -- Hot path: grade-priority view in non-rarity set.
 CREATE INDEX IF NOT EXISTS idx_album_quality_hot_grade_r0
-  ON album_quality(grade_rank, COALESCE(quality_score,9999), artist_norm, album_norm, year_int, id)
+  ON album_quality(grade_rank, COALESCE(dynamic_range_score,9999), artist_norm, album_norm, year_int, id)
   WHERE rarity=0;
 -- Hot path: codec/profile filter selectors in non-rarity set.
 CREATE INDEX IF NOT EXISTS idx_album_quality_hot_codec_filter_r0
@@ -267,6 +413,7 @@ SQL
   fi
 
   album_quality_normalize_profile_columns_once "$db" || true
+  album_quality_sync_index_columns_once "$db" || true
 
   # Prefer WAL for concurrent read-heavy browsing with batch writes.
   sqlite3 "$db" "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;" >/dev/null 2>&1 || true
@@ -567,8 +714,8 @@ album_quality_upsert() {
     recode_rec_sql="'$(sql_escape "$recode_recommendation")'"
   fi
   local codec_norm_sql profile_norm_sql
-  codec_norm_sql="$(norm_lc_or_null_sql "$codec")"
-  profile_norm_sql="$(norm_profile_or_null_sql "$current_quality")"
+  codec_norm_sql="$(norm_lc_or_empty_sql "$codec")"
+  profile_norm_sql="$(norm_profile_or_empty_sql "$current_quality")"
   local genre_profile_sql="NULL"
   if [[ -n "$genre_profile" ]]; then
     genre_profile_sql="'$(sql_escape "$genre_profile")'"
@@ -613,7 +760,7 @@ album_quality_upsert() {
       album_norm=excluded.album_norm,
        quality_grade=COALESCE(excluded.quality_grade, album_quality.quality_grade),
        grade_rank=COALESCE(excluded.grade_rank, album_quality.grade_rank),
-       quality_score=COALESCE(excluded.quality_score, album_quality.quality_score),
+       quality_score=excluded.quality_score,
       dynamic_range_score=COALESCE(excluded.dynamic_range_score, album_quality.dynamic_range_score),
       is_upscaled=COALESCE(excluded.is_upscaled, album_quality.is_upscaled),
       recommendation=COALESCE(excluded.recommendation, album_quality.recommendation),
@@ -681,14 +828,9 @@ album_quality_set_rarity() {
 
 _db_backup_stat_epoch_mtime() {
   local path="$1"
-  local out=""
-  if out="$(stat -f '%m' "$path" 2>/dev/null)"; then
-    printf '%s\n' "$out"
-    return 0
-  fi
-  if out="$(stat -c '%Y' "$path" 2>/dev/null)"; then
-    printf '%s\n' "$out"
-    return 0
+  if declare -F stat_epoch_mtime >/dev/null 2>&1; then
+    stat_epoch_mtime "$path"
+    return $?
   fi
   return 1
 }

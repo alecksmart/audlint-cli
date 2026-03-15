@@ -40,32 +40,17 @@ if ! env_load_files "$ENV_FILE"; then
 fi
 
 # Required config values from .env
-SRC="${SRC:-}"
-DST_USER_HOST="${DST_USER_HOST:-}"
-DST_PATH="${DST_PATH:-}"
-SSH_KEY="${SSH_KEY:-}"
+SRC="${AUDL_PATH:-}"
+SYNC_DEST="${AUDL_SYNC_DEST:-}"
 
 [[ -n "$SRC" ]] || {
-  echo "ERROR: SRC is not set in .env" >&2
+  echo "ERROR: AUDL_PATH is not set in .env" >&2
   exit 1
 }
-[[ -n "$DST_USER_HOST" ]] || {
-  echo "ERROR: DST_USER_HOST is not set in .env" >&2
+[[ -n "$SYNC_DEST" ]] || {
+  echo "ERROR: AUDL_SYNC_DEST is not set in .env" >&2
   exit 1
 }
-[[ -n "$DST_PATH" ]] || {
-  echo "ERROR: DST_PATH is not set in .env" >&2
-  exit 1
-}
-if [[ -n "$SSH_KEY" && ! -r "$SSH_KEY" ]]; then
-  echo "ERROR: SSH_KEY is set but not readable: $SSH_KEY" >&2
-  exit 1
-fi
-
-SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
-if [[ -n "$SSH_KEY" ]]; then
-  SSH_OPTS=(-i "$SSH_KEY" "${SSH_OPTS[@]}")
-fi
 
 show_help() {
   cat <<EOF
@@ -75,7 +60,7 @@ Usage: $(basename "$0") [--dry-run] [--debug]
 
 Notes:
 - Config comes from .env in this folder.
-- Destination is reached via SSH as: \$DST_USER_HOST:\$DST_PATH
+- Destination is synced locally via rsync to: \$AUDL_SYNC_DEST
 EOF
 }
 
@@ -108,7 +93,7 @@ if [[ $DEBUG -eq 1 ]]; then
   set -x
 fi
 
-require_bins ssh rsync >/dev/null || exit 2
+require_bins rsync >/dev/null || exit 2
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -119,25 +104,12 @@ error_exit() {
   exit 1
 }
 
-rsync_supports_flag() {
-  local flag="$1"
-  local help_out
-  help_out="$(rsync --help 2>/dev/null || true)"
-  [[ -n "$help_out" ]] || return 1
-  printf '%s\n' "$help_out" | grep -Fq -- "$flag"
-}
-
-# Ensure source exists (destination is remote now; don't test with [[ -d ]])
+# Ensure source exists.
 [[ -d "$SRC" ]] || error_exit "Source directory '$SRC' does not exist. Aborting."
 
 log "Starting music sync"
 log "Source : $SRC"
-log "Dest   : ${DST_USER_HOST}:${DST_PATH}"
-if [[ -n "$SSH_KEY" ]]; then
-  log "SSH key: $SSH_KEY"
-else
-  log "SSH key: <default identity>"
-fi
+log "Dest   : $SYNC_DEST"
 log "Dry-run: ${DRY_RUN:+yes}${DRY_RUN:-no}"
 log "Debug  : $DEBUG"
 
@@ -150,21 +122,21 @@ clean_metadata() {
 }
 clean_metadata "$SRC"
 
-# Verify SSH connectivity & ensure remote dir exists (or create if missing)
-if [[ -n "$DRY_RUN" ]]; then
-  # In dry-run, just test SSH connectivity and presence
-  if ! ssh "${SSH_OPTS[@]}" "$DST_USER_HOST" "test -d '$DST_PATH'"; then
-    log "Remote path does not exist (dry-run): $DST_PATH"
-  fi
+# Ensure destination exists and is writable.
+if [[ -d "$SYNC_DEST" ]]; then
+  [[ -w "$SYNC_DEST" ]] || error_exit "Destination directory '$SYNC_DEST' is not writable. Aborting."
+elif [[ -n "$DRY_RUN" ]]; then
+  log "Destination path does not exist (dry-run): $SYNC_DEST"
 else
-  # Create the remote directory if it doesn't exist
-  ssh "${SSH_OPTS[@]}" "$DST_USER_HOST" "mkdir -p '$DST_PATH'"
+  mkdir -p "$SYNC_DEST"
+  [[ -w "$SYNC_DEST" ]] || error_exit "Destination directory '$SYNC_DEST' is not writable after creation. Aborting."
 fi
 
-# rsync options tuned for SSH transport
+# rsync options tuned for a mounted destination directory
 RSYNC_OPTS=(
   -a             # archive mode (preserves most metadata)
   --no-perms     # do not preserve permissions
+  --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r  # normalized readable dirs/files on destination
   -O             # omit directory times
   --no-group     # do not preserve group
   -v             # verbose
@@ -177,20 +149,9 @@ RSYNC_OPTS=(
   --exclude='.DS_Store'
 )
 
-if rsync_supports_flag "--secluded-args"; then
-  RSYNC_OPTS+=(--secluded-args)
-elif rsync_supports_flag "--protect-args"; then
-  RSYNC_OPTS+=(--protect-args)
-else
-  log "Notice: rsync lacks --secluded-args/--protect-args; continuing without protected-args mode."
-fi
-
-# Use SSH transport with key
-RSYNC_RSH=(--rsh="ssh ${SSH_OPTS[*]}")
-
-log "Invoking rsync over SSH…"
-# IMPORTANT: trailing slashes to copy contents of SRC into DST_PATH
-rsync "${RSYNC_OPTS[@]}" "${RSYNC_RSH[@]}" $DRY_RUN \
-  "${SRC}/" "${DST_USER_HOST}:${DST_PATH}/"
+log "Invoking rsync to mounted destination…"
+# IMPORTANT: trailing slashes to copy contents of SRC into SYNC_DEST
+rsync "${RSYNC_OPTS[@]}" $DRY_RUN \
+  "${SRC}/" "${SYNC_DEST}/"
 
 log "Music sync complete"

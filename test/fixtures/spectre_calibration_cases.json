@@ -1,0 +1,200 @@
+[
+  {
+    "name": "native_hires_192_reference",
+    "inputs": {
+      "cutoff_khz": 96.0,
+      "max_khz": 96.0,
+      "transition_found": true,
+      "stats_detected": true,
+      "peak_db": -3.0,
+      "dynamic_range_db": 15.0,
+      "dynamic_span": 34.0,
+      "high_band_ratio": 0.5,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "192000/24",
+      "quality_class": "S",
+      "confidence": "HIGH",
+      "band_class": "hires-192-class",
+      "texture_promoted": false
+    }
+  },
+  {
+    "name": "fake_hires_brickwall_signature",
+    "inputs": {
+      "cutoff_khz": 21.8,
+      "max_khz": 96.0,
+      "transition_found": true,
+      "stats_detected": false,
+      "peak_db": null,
+      "dynamic_range_db": null,
+      "dynamic_span": 18.0,
+      "high_band_ratio": 0.18,
+      "brickwall_hint": true,
+      "brickwall_khz": 21.8
+    },
+    "expect": {
+      "likely_profile": "lossy-upsampled",
+      "quality_class": "F",
+      "confidence": "MEDIUM",
+      "band_class": "cd-or-48k",
+      "texture_promoted": false
+    }
+  },
+  {
+    "name": "authentic_redbook_ceiling",
+    "inputs": {
+      "cutoff_khz": 19.4,
+      "max_khz": 22.0,
+      "transition_found": true,
+      "stats_detected": false,
+      "peak_db": null,
+      "dynamic_range_db": null,
+      "dynamic_span": 18.0,
+      "high_band_ratio": 0.82,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "44100/16",
+      "quality_class": "C",
+      "confidence": "MEDIUM",
+      "band_class": "cd-or-48k",
+      "texture_promoted": false
+    }
+  },
+  {
+    "name": "axis_aligned_redbook_is_not_lossy",
+    "inputs": {
+      "cutoff_khz": 20.3,
+      "max_khz": 22.05,
+      "transition_found": true,
+      "stats_detected": false,
+      "peak_db": null,
+      "dynamic_range_db": null,
+      "dynamic_span": 24.0,
+      "high_band_ratio": 0.0,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "44100/16",
+      "quality_class": "C",
+      "confidence": "MEDIUM",
+      "band_class": "cd-or-48k",
+      "texture_promoted": false
+    }
+  },
+  {
+    "name": "axis_aligned_48k_maps_to_studio_48k",
+    "inputs": {
+      "cutoff_khz": 22.1,
+      "max_khz": 24.0,
+      "transition_found": true,
+      "stats_detected": false,
+      "peak_db": null,
+      "dynamic_range_db": null,
+      "dynamic_span": 24.0,
+      "high_band_ratio": 0.0,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "48000/24",
+      "quality_class": "C",
+      "confidence": "MEDIUM",
+      "band_class": "cd-or-48k",
+      "texture_promoted": false
+    }
+  },
+  {
+    "name": "axis_aligned_96k_maps_to_hires_96k",
+    "inputs": {
+      "cutoff_khz": 44.18,
+      "max_khz": 48.0,
+      "transition_found": true,
+      "stats_detected": false,
+      "peak_db": null,
+      "dynamic_range_db": null,
+      "dynamic_span": 22.37,
+      "high_band_ratio": 1.4,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "96000/24",
+      "quality_class": "B",
+      "confidence": "MEDIUM",
+      "band_class": "hires-96-class",
+      "texture_promoted": false
+    }
+  },
+  {
+    "name": "low_bandwidth_lossy_master",
+    "inputs": {
+      "cutoff_khz": 16.5,
+      "max_khz": 96.0,
+      "transition_found": true,
+      "stats_detected": true,
+      "peak_db": -0.3,
+      "dynamic_range_db": 6.0,
+      "dynamic_span": 15.0,
+      "high_band_ratio": 0.12,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "lossy-compressed",
+      "quality_class": "F",
+      "confidence": "LOW",
+      "band_class": "low-bandwidth",
+      "texture_promoted": false
+    }
+  },
+  {
+    "name": "strong_48k_frame_texture_promotes_to_96k",
+    "inputs": {
+      "cutoff_khz": 22.4,
+      "max_khz": 48.0,
+      "transition_found": true,
+      "stats_detected": false,
+      "peak_db": null,
+      "dynamic_range_db": null,
+      "dynamic_span": 34.0,
+      "high_band_ratio": 0.9,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "96000/24",
+      "quality_class": "B",
+      "confidence": "MEDIUM",
+      "band_class": "hires-96-class",
+      "texture_promoted": true
+    }
+  },
+  {
+    "name": "weak_48k_frame_texture_stays_cd_band",
+    "inputs": {
+      "cutoff_khz": 22.4,
+      "max_khz": 48.0,
+      "transition_found": true,
+      "stats_detected": false,
+      "peak_db": null,
+      "dynamic_range_db": null,
+      "dynamic_span": 18.0,
+      "high_band_ratio": 0.2,
+      "brickwall_hint": false,
+      "brickwall_khz": null
+    },
+    "expect": {
+      "likely_profile": "44100/16",
+      "quality_class": "C",
+      "confidence": "MEDIUM",
+      "band_class": "cd-or-48k",
+      "texture_promoted": false
+    }
+  }
+]

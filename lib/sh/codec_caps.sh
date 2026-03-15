@@ -59,6 +59,7 @@ codec_caps_normalize_codec() {
   *.dff) raw="dff" ;;
   *.wv) raw="wv" ;;
   *.ape) raw="ape" ;;
+  *.dts | *.dca) raw="dts" ;;
   *.mp3) raw="mp3" ;;
   *.aac | *.adts) raw="aac" ;;
   *.ogg | *.oga) raw="ogg" ;;
@@ -170,4 +171,3 @@ codec_caps_recommend_flac_encode_backend() {
   fi
   printf 'none'
 }
-

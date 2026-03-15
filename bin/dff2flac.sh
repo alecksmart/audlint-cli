@@ -180,8 +180,8 @@ if ((${#dff_files[@]} == 0)); then
   exit 1
 fi
 
-SAFETY_MARGIN_DB="-0.3"
-MIN_APPLY_GAIN_DB="0.3"
+SAFETY_MARGIN_DB="$(audio_auto_boost_target_true_peak_db)"
+MIN_APPLY_GAIN_DB="$(audio_auto_boost_min_apply_db)"
 MAX_TRUE_PEAK_DB="-1000.0"
 BOOST_GAIN_DB="0.000"
 APPLY_BOOST=0
@@ -311,16 +311,16 @@ if ((${#consistency_errors[@]} > 0)); then
 fi
 
 BOOST_GAIN_DB="$(awk -v m="$SAFETY_MARGIN_DB" -v p="$MAX_TRUE_PEAK_DB" 'BEGIN{printf "%.3f", m-p}')"
-if audio_float_ge "$BOOST_GAIN_DB" "$MIN_APPLY_GAIN_DB"; then
+if audio_float_abs_ge "$BOOST_GAIN_DB" "$MIN_APPLY_GAIN_DB"; then
   APPLY_BOOST=1
 fi
 
-echo "     Max true peak   : ${MAX_TRUE_PEAK_DB} dBTP"
-echo "     Cache usage     : hits=${cache_hits} misses=${cache_misses}"
+echo "     Max true peak   : $(ui_value_text "${MAX_TRUE_PEAK_DB} dBTP")"
+echo "     Cache usage     : hits=$(ui_value_text "$cache_hits") misses=$(ui_value_text "$cache_misses")"
 if ((APPLY_BOOST == 1)); then
-  echo "     Auto boost gain : +${BOOST_GAIN_DB} dB (enabled)"
+  echo "     Auto boost gain : $(ui_gain_text "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)") dB ($(ui_value_text "enabled"))"
 else
-  echo "     Auto boost gain : +${BOOST_GAIN_DB} dB (skipped: < ${MIN_APPLY_GAIN_DB} dB)"
+  echo "     Auto boost gain : $(ui_gain_text "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)") dB ($(ui_warn_text "skipped"): abs < $(ui_value_text "${MIN_APPLY_GAIN_DB} dB"))"
 fi
 
 for idx in "${!dff_files[@]}"; do
@@ -344,32 +344,28 @@ for idx in "${!dff_files[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    printf '\n%s▶ [%s] ENCODING%s %s -> %s\n' "$GREEN" "$track_no" "$RESET" "$dff_file" "$flac_file"
+    printf '\n%s▶ [%s] ENCODING%s %s %s %s\n' "$GREEN" "$track_no" "$RESET" "$(ui_input_path_text "$dff_file")" "$(ui_arrow_text)" "$(ui_output_path_text "$flac_file")"
   else
     echo -e "\n🎵 [$track_no] Converting: \"$dff_file\" → \"$flac_file\""
   fi
-  echo "     Title    : $title"
-  echo "     Artist   : $performer"
-  echo "     Album    : $ALBUM"
-  echo "     Date     : $DATE"
-  echo "     Track    : $track_no"
-  echo "     Source SR: ${source_sr_hz} Hz"
-  echo "     Target   : ${target_sr_hz} Hz / ${target_bits}-bit ($family_label, $policy_label)"
+  echo "     Title    : $(ui_value_text "$title")"
+  echo "     Artist   : $(ui_value_text "$performer")"
+  echo "     Album    : $(ui_value_text "$ALBUM")"
+  echo "     Date     : $(ui_value_text "$DATE")"
+  echo "     Track    : $(ui_value_text "$track_no")"
+  echo "     Source SR: $(ui_value_text "${source_sr_hz} Hz")"
+  echo "     Target   : $(ui_value_text "${target_sr_hz} Hz / ${target_bits}-bit") ($(ui_value_text "$family_label"), $(ui_value_text "$policy_label"))"
   if ((APPLY_BOOST == 1)); then
-    echo "     Boost    : +${BOOST_GAIN_DB} dB (album auto)"
+    echo "     Boost    : $(ui_gain_text "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)") dB ($(ui_value_text "album auto"))"
   else
-    echo "     Boost    : skipped"
+    echo "     Boost    : $(ui_warn_text "skipped")"
   fi
   if [[ "$family_label" == "fallback" ]]; then
     echo "⚠️  Could not infer source family from sample rate \"$source_sr_hz\"; using 176400/24 ceiling with no-upscale guard."
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
-<<<<<<< HEAD
-    enc_args=(--in "$dff_file" --out "$flac_file" --sr "$target_sr_hz" --bits "$target_bits" --src-is-flac 0)
-=======
     enc_args=(--in "$dff_file" --out "$flac_file" --sr "$target_sr_hz" --bits "$target_bits" --src-is-flac 0 --src-codec dff)
->>>>>>> develop
     if ((APPLY_BOOST == 1)); then
       enc_args+=(--gain "$BOOST_GAIN_DB")
     fi
@@ -381,7 +377,7 @@ for idx in "${!dff_files[@]}"; do
     enc_args+=(--tags "TRACKNUMBER=$track_no")
 
     if encoder_to_flac "${enc_args[@]}"; then
-      echo "✅ Saved: \"$flac_file\""
+      echo "✅ Saved: $(ui_output_path_text "$flac_file")"
     else
       echo "❌ Failed to convert \"$dff_file\"" >&2
     fi

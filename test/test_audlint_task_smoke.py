@@ -58,6 +58,34 @@ class AudlintTaskSmokeTests(unittest.TestCase):
                   echo "TAG:genre=Rock"
                   exit 0
                 fi
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=flac
+codec_tag_string=0xF1AC
+codec_long_name=FLAC
+profile=Lossless
+sample_rate=96000
+bits_per_raw_sample=24
+bits_per_sample=0
+sample_fmt=s32
+bit_rate=1411200
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=1411200
+TAG:album_artist=
+TAG:artist=Artist
+TAG:title=Track
+TAG:album=Album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
                 if [[ "$args" == *"stream=index"* ]]; then
                   echo "0"
                   exit 0
@@ -170,9 +198,9 @@ EOF
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["NO_COLOR"] = "1"
-        env["LIBRARY_DB"] = str(self.db_path)
-        env["PYTHON_BIN"] = str(self.bin_dir / "pystub")
-        env["DISCOVERY_CACHE_FILE"] = str(self.tmpdir / "discovery.cache")
+        env["AUDL_DB_PATH"] = str(self.db_path)
+        env["AUDL_PYTHON_BIN"] = str(self.bin_dir / "pystub")
+        env["AUDLINT_TASK_DISCOVERY_CACHE_FILE"] = str(self.tmpdir / "discovery.cache")
         env["AUDLINT_TASK_LOCK_DIR"] = str(self.tmpdir / "audlint-task.lock")
         return subprocess.run(
             [str(self.audlint_task), *args],

@@ -3,6 +3,7 @@ import os
 import pty
 import re
 import select
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -99,10 +100,10 @@ exit 0
                 "TASK_RUN_LOG": str(self.task_run_log),
                 "AUDLINT_TASK_BIN": str(self.task_bin),
                 "AUDLINT_LIBRARY_ROOT": str(self.root_dir),
-                "AUDLINT_TASK_MAX_ALBUMS": "2",
-                "AUDLINT_TASK_MAX_TIME_SEC": "0",
-                "AUDLINT_TASK_LOG": str(self.task_log),
-                "AUDLINT_CRON_INTERVAL_MIN": "20",
+                "AUDL_TASK_MAX_ALBUMS": "2",
+                "AUDL_TASK_MAX_TIME_SEC": "0",
+                "AUDL_TASK_LOG_PATH": str(self.task_log),
+                "AUDL_CRON_INTERVAL_MIN": "20",
                 "AUDLINT_BOOST_SEEK_BIN": str(self.boost_seek_bin),
                 "BOOST_SEEK_CWD_LOG": str(self.boost_cwd_log),
                 "BOOST_SEEK_ARGS_LOG": str(self.boost_args_log),
@@ -166,10 +167,11 @@ exit 0
         rc, out = self._run_in_pty(b"q")
         clean = self._strip_ansi(out)
         self.assertEqual(rc, 0, msg=clean)
-        self.assertIn("[m Run Maintainance]", clean, msg=clean)
+        self.assertIn("[m Run Maintenance]", clean, msg=clean)
         self.assertIn("[i Install Cron]", clean, msg=clean)
         self.assertIn("[b Boost Gain]", clean, msg=clean)
         self.assertIn("[l View Log]", clean, msg=clean)
+        self.assertNotIn("[t Clear Player Files]", clean, msg=clean)
         self.assertNotIn("[u Uninstall Cron]", clean, msg=clean)
 
     def test_menu_shows_uninstall_only_when_cron_installed(self) -> None:
@@ -190,8 +192,43 @@ exit 0
         self.assertIn("[u Uninstall Cron]", clean, msg=clean)
         self.assertIn("[b Boost Gain]", clean, msg=clean)
         self.assertIn("[l View Log]", clean, msg=clean)
-        self.assertNotIn("[m Run Maintainance]", clean, msg=clean)
+        self.assertNotIn("[t Clear Player Files]", clean, msg=clean)
+        self.assertNotIn("[m Run Maintenance]", clean, msg=clean)
         self.assertNotIn("[i Install Cron]", clean, msg=clean)
+
+    def test_menu_shows_clear_player_files_when_player_attached(self) -> None:
+        player_dir = self.tmpdir / "player"
+        player_dir.mkdir(parents=True, exist_ok=True)
+        rc, out = self._run_in_pty(b"q", extra_env={"AUDL_MEDIA_PLAYER_PATH": str(player_dir)})
+        clean = self._strip_ansi(out)
+        self.assertEqual(rc, 0, msg=clean)
+        self.assertIn("[t Clear Player Files]", clean, msg=clean)
+
+    def test_clear_player_files_action_requires_confirmation_and_clears_contents(self) -> None:
+        player_dir = self.tmpdir / "player"
+        (player_dir / "A" / "B").mkdir(parents=True, exist_ok=True)
+        (player_dir / "A" / "B" / "song.flac").write_text("x", encoding="utf-8")
+        (player_dir / "A" / "cover.jpg").write_text("x", encoding="utf-8")
+
+        rc, out = self._run_in_pty(
+            b"tyx",
+            extra_env={"AUDL_MEDIA_PLAYER_PATH": str(player_dir)},
+        )
+        clean = self._strip_ansi(out)
+        self.assertEqual(rc, 0, msg=clean)
+        self.assertRegex(
+            clean,
+            re.compile(r"\r?\nClear all player files\? \[y Clear, n Cancel\] > \r?\n"),
+            msg=clean,
+        )
+        self.assertIn("Player cleared.", clean, msg=clean)
+        self.assertRegex(
+            clean,
+            re.compile(r"Player cleared\.[^\r\n]*\r?\n\[any key Continue\] > ", re.MULTILINE),
+            msg=clean,
+        )
+        self.assertTrue(player_dir.exists())
+        self.assertEqual(list(player_dir.iterdir()), [])
 
     def test_install_cron_and_run_manual_once(self) -> None:
         rc_run, out_run = self._run_in_pty(b"mx")
@@ -222,7 +259,7 @@ exit 0
         clean = self._strip_ansi(out)
         self.assertEqual(rc, 0, msg=clean)
         self.assertIn("Task log (live):", clean, msg=clean)
-        self.assertIn("press any key to exit", clean, msg=clean)
+        self.assertIn("[any key Stop]", clean, msg=clean)
         self.assertIn("line-1", clean, msg=clean)
         self.assertIn("Live log stopped.", clean, msg=clean)
 
@@ -269,6 +306,151 @@ exit 0
         self.assertEqual(rc, 0, msg=clean)
         option_lines = [line for line in clean.splitlines() if "[1]" in line or "[2]" in line]
         self.assertTrue(any("[1]" in line and "[2]" in line for line in option_lines), msg=clean)
+
+
+class AudlintMaintainRealCrontabE2ETests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if os.environ.get("AUDLINT_USE_REAL_CRONTAB") != "1":
+            raise unittest.SkipTest("set AUDLINT_USE_REAL_CRONTAB=1 to enable real crontab e2e tests")
+        if not BASH_BIN.exists():
+            raise unittest.SkipTest(f"bash not found: {BASH_BIN}")
+        if not MAINTAIN_BIN.exists():
+            raise unittest.SkipTest(f"maintain script not found: {MAINTAIN_BIN}")
+        if shutil.which("crontab") is None:
+            raise unittest.SkipTest("crontab binary is required")
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self._tmp.name)
+        self.bin_dir = self.tmpdir / "bin"
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        self.root_dir = self.tmpdir / "library"
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+        self.task_run_log = self.tmpdir / "task-run.log"
+        self.task_log = self.tmpdir / "maintain.log"
+        self.task_bin = self.bin_dir / "audlint-task.sh"
+        self._original_crontab = self._read_crontab_raw()
+
+        _write_exec(
+            self.task_bin,
+            """#!/usr/bin/env bash
+set -euo pipefail
+echo "task-ran" >> "${TASK_RUN_LOG:?}"
+exit 0
+""",
+        )
+        self._write_crontab_raw("")
+
+    def tearDown(self) -> None:
+        self._write_crontab_raw(self._original_crontab)
+        self._tmp.cleanup()
+
+    def _read_crontab_raw(self) -> str:
+        proc = subprocess.run(
+            ["crontab", "-l"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return proc.stdout
+        return ""
+
+    def _write_crontab_raw(self, content: str) -> None:
+        subprocess.run(
+            ["crontab", "-"],
+            input=content,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _run_in_pty(self, send_bytes: bytes, timeout_s: float = 8.0) -> tuple[int, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}",
+                "TERM": "xterm",
+                "TASK_RUN_LOG": str(self.task_run_log),
+                "AUDLINT_TASK_BIN": str(self.task_bin),
+                "AUDLINT_LIBRARY_ROOT": str(self.root_dir),
+                "AUDL_TASK_MAX_ALBUMS": "2",
+                "AUDL_TASK_MAX_TIME_SEC": "0",
+                "AUDL_TASK_LOG_PATH": str(self.task_log),
+                "AUDL_CRON_INTERVAL_MIN": "20",
+            }
+        )
+
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            [str(MAINTAIN_BIN)],
+            cwd=str(REPO_ROOT),
+            env=env,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+
+        output = bytearray()
+        sent = False
+        deadline = time.monotonic() + timeout_s
+        try:
+            while time.monotonic() < deadline:
+                if not sent and b"choice >" in output:
+                    os.write(master_fd, send_bytes)
+                    sent = True
+
+                r, _, _ = select.select([master_fd], [], [], 0.1)
+                if r:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError as exc:
+                        if exc.errno == errno.EIO:
+                            chunk = b""
+                        else:
+                            raise
+                    if not chunk:
+                        if proc.poll() is not None:
+                            break
+                    else:
+                        output.extend(chunk)
+
+                if proc.poll() is not None and not r:
+                    break
+
+            if proc.poll() is None:
+                proc.kill()
+            rc = proc.wait(timeout=1.0)
+        finally:
+            os.close(master_fd)
+
+        return rc, output.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+
+    def test_install_and_uninstall_cron_with_real_crontab(self) -> None:
+        rc_install, out_install = self._run_in_pty(b"ix")
+        clean_install = self._strip_ansi(out_install)
+        self.assertEqual(rc_install, 0, msg=clean_install)
+        self.assertIn("Cron installed.", clean_install, msg=clean_install)
+
+        cron_body = self._read_crontab_raw()
+        self.assertIn("# >>> audlint-cli maintain >>>", cron_body)
+        self.assertIn("--max-albums 2", cron_body)
+        self.assertIn("--max-time 1080", cron_body)
+        self.assertIn(str(self.root_dir), cron_body)
+        self.assertIn(str(self.task_log), cron_body)
+
+        rc_uninstall, out_uninstall = self._run_in_pty(b"ux")
+        clean_uninstall = self._strip_ansi(out_uninstall)
+        self.assertEqual(rc_uninstall, 0, msg=clean_uninstall)
+        self.assertIn("Cron uninstalled.", clean_uninstall, msg=clean_uninstall)
+        self.assertNotIn("# >>> audlint-cli maintain >>>", self._read_crontab_raw())
 
 
 if __name__ == "__main__":

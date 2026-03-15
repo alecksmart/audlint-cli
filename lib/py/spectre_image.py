@@ -3,19 +3,27 @@
 
 import argparse
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 import statistics
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import cv2
     import numpy as np
-    import pytesseract
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
 else:
     IMPORT_ERROR = None
+
+try:
+    import pytesseract
+except Exception:  # pragma: no cover
+    pytesseract = None
 
 
 # Nyquist-like cutoff tiers in kHz, mapped to canonical audlint profile strings.
@@ -27,6 +35,41 @@ PROFILE_TIERS: List[Tuple[float, str, str]] = [
     (88.20, "176400/24", "Hi-Res 176.4k"),
     (96.00, "192000/24", "Hi-Res 192k"),
 ]
+
+
+def ocr_image_to_string(image: Any, config: str = "") -> str:
+    if pytesseract is not None:
+        return pytesseract.image_to_string(image, config=config)
+
+    tesseract_bin = shutil.which("tesseract")
+    if not tesseract_bin:
+        raise RuntimeError("tesseract binary not found on PATH")
+
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            tmp_path = handle.name
+        if not cv2.imwrite(tmp_path, image):
+            raise RuntimeError("failed to write OCR temp image")
+        cmd = [tesseract_bin, tmp_path, "stdout"]
+        if config:
+            cmd.extend(config.split())
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return ""
+        return proc.stdout
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 def parse_roi(value: str) -> Tuple[int, int, int, int]:
@@ -108,19 +151,58 @@ def _nearest_axis_tier(value_khz: float) -> float:
     return min(tiers, key=lambda tier: abs(tier - value_khz))
 
 
+def _infer_axis_from_dense_ladder(candidates: List[float]) -> Optional[float]:
+    values = sorted({round(value, 3) for value in candidates if 8.0 <= value <= 120.0}, reverse=True)
+    if len(values) < 5:
+        return None
+
+    best_run: List[float] = []
+    current_run: List[float] = [values[0]]
+    for value in values[1:]:
+        diff = current_run[-1] - value
+        if 0.8 <= diff <= 6.0:
+            current_run.append(value)
+            continue
+        if len(current_run) > len(best_run):
+            best_run = current_run[:]
+        current_run = [value]
+    if len(current_run) > len(best_run):
+        best_run = current_run[:]
+
+    if len(best_run) < 5:
+        return None
+
+    diffs = [best_run[idx] - best_run[idx + 1] for idx in range(len(best_run) - 1)]
+    step = statistics.median(diffs)
+    stable = [diff for diff in diffs if abs(diff - step) <= max(0.6, step * 0.35)]
+    if len(stable) < max(3, len(diffs) // 2):
+        return None
+    return _nearest_axis_tier(max(best_run))
+
+
 def _infer_axis_from_candidates(candidates: List[float]) -> Optional[float]:
     if not candidates:
         return None
+
+    ladder_axis = _infer_axis_from_dense_ladder(candidates)
+    if ladder_axis is not None:
+        return ladder_axis
 
     # Keep only values that are plausibly close to known sampling/axis labels.
     known = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.05, 24.0, 30.0, 40.0, 44.1, 48.0, 50.0, 60.0, 88.2, 96.0, 176.4, 192.0, 352.8, 384.0]
     filtered: List[float] = []
     for value in candidates:
+        nearest_ref: Optional[float] = None
+        nearest_dist: Optional[float] = None
         for ref in known:
             tolerance = max(0.8, ref * 0.08)
             if abs(value - ref) <= tolerance:
-                filtered.append(ref)
-                break
+                dist = abs(value - ref)
+                if nearest_dist is None or dist < nearest_dist:
+                    nearest_ref = ref
+                    nearest_dist = dist
+        if nearest_ref is not None:
+            filtered.append(nearest_ref)
     if not filtered:
         return None
 
@@ -214,8 +296,8 @@ def detect_spectrogram_regions(image: Any) -> List[Tuple[int, int, int, int]]:
 def infer_axis_scale_khz(image: Any, region: Tuple[int, int, int, int]) -> Optional[float]:
     height, width = image.shape[:2]
     x, y, w, h = region
-    x0 = min(width - 1, x + w + 2)
-    x1 = min(width, x0 + 96)
+    x1 = min(width, max(0, x))
+    x0 = max(0, x1 - 120)
     y0 = max(0, y)
     y1 = min(height, y + h)
     if x1 <= x0 or y1 <= y0:
@@ -225,7 +307,7 @@ def infer_axis_scale_khz(image: Any, region: Tuple[int, int, int, int]) -> Optio
     gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
     thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    text = pytesseract.image_to_string(
+    text = ocr_image_to_string(
         thresh, config="--psm 6 -c tessedit_char_whitelist=0123456789.kKhHzZ"
     )
     candidates = _extract_axis_candidates_khz(text)
@@ -233,14 +315,41 @@ def infer_axis_scale_khz(image: Any, region: Tuple[int, int, int, int]) -> Optio
 
 
 def infer_axis_scale_khz_global(image: Any) -> Optional[float]:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, None, fx=1.8, fy=1.8, interpolation=cv2.INTER_CUBIC)
-    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    text = pytesseract.image_to_string(
-        thresh, config="--psm 11 -c tessedit_char_whitelist=0123456789.kKhHzZ"
+    _, width = image.shape[:2]
+    left_widths = [min(width, 140), min(width, 220), min(width, max(140, int(width * 0.18)))]
+    crops = [(image[:, :crop_width], 3.0, "--psm 6") for crop_width in left_widths if crop_width > 0]
+    crops.append((image, 1.8, "--psm 11"))
+    for crop, scale, psm in crops:
+        if crop.size == 0:
+            continue
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        text = ocr_image_to_string(
+            thresh, config=f"{psm} -c tessedit_char_whitelist=0123456789.kKhHzZ"
+        )
+        candidates = _extract_axis_candidates_khz(text)
+        inferred = _infer_axis_from_candidates(candidates)
+        if inferred is not None:
+            return inferred
+    return None
+
+
+def _region_is_full_frame(region: Tuple[int, int, int, int], image_shape: Tuple[int, int, int]) -> bool:
+    x, y, w, h = region
+    height, width = image_shape[:2]
+    x_margin = max(2, int(width * 0.03))
+    y_margin = max(2, int(height * 0.05))
+    return (
+        x <= x_margin
+        and y <= y_margin
+        and (x + w) >= (width - x_margin)
+        and (y + h) >= (height - y_margin)
     )
-    candidates = _extract_axis_candidates_khz(text)
-    return _infer_axis_from_candidates(candidates)
+
+
+def _ocr_has_mastering_stats(text: str) -> bool:
+    return bool(re.search(r"(peak(?:\s+amplitude)?|dynamic\s*range|\bdr\b)", text, re.IGNORECASE))
 
 
 def analyze_spectral_signature(
@@ -314,6 +423,7 @@ def analyze_spectral_signature(
     brickwall_hint = bool(
         transition_found
         and detected_khz <= 24.5
+        and (max_khz > 24.5 or detected_khz <= (max_khz * 0.88))
         and wall_strength >= max(2.0, dynamic_span * 0.12)
         and (
             (max_khz <= 24.5 and high_band_ratio <= 0.78)
@@ -340,11 +450,19 @@ def infer_profile_from_cutoff(
     max_khz: float,
     transition_found: bool,
     stats_detected: bool,
+    dynamic_span: Optional[float] = None,
+    high_band_ratio: Optional[float] = None,
+    brickwall_hint: bool = False,
 ) -> Dict[str, Any]:
     bounded = max(0.0, min(cutoff_khz, max_khz))
     tier = min(PROFILE_TIERS, key=lambda item: abs(item[0] - bounded))
     tier_khz, profile, profile_name = tier
     distance = abs(tier_khz - bounded)
+    axis_aligned_profile = bool(
+        transition_found
+        and max_khz > 0.0
+        and bounded >= (max_khz * 0.88)
+    )
 
     # Confidence is mostly transition quality + closeness to known tier.
     if not transition_found:
@@ -359,14 +477,62 @@ def infer_profile_from_cutoff(
     if not stats_detected and score > 0:
         score -= 1
 
+    texture_promoted = bool(
+        not brickwall_hint
+        and transition_found
+        and 44.0 <= max_khz <= 52.0
+        and 21.0 <= bounded <= 26.0
+        and dynamic_span is not None
+        and dynamic_span >= 28.0
+        and high_band_ratio is not None
+        and high_band_ratio >= 0.55
+    )
+    if texture_promoted:
+        tier_khz = 48.0
+        profile = "96000/24"
+        profile_name = "Hi-Res 96k"
+        distance = abs(tier_khz - bounded)
+        score = max(score, 1)
+
+    if axis_aligned_profile:
+        if max_khz >= 90.0:
+            tier_khz = 96.0
+            profile = "192000/24"
+            profile_name = "Hi-Res 192k"
+        elif max_khz >= 44.0:
+            tier_khz = 48.0
+            profile = "96000/24"
+            profile_name = "Hi-Res 96k"
+        elif max_khz > 22.5:
+            tier_khz = 24.0
+            profile = "48000/24"
+            profile_name = "Studio 48k"
+        else:
+            tier_khz = 22.05
+            profile = "44100/16"
+            profile_name = "CD-Quality"
+        distance = abs(tier_khz - bounded)
+        score = max(score, 1)
+
+    cd_authentic_confident = bool(
+        not brickwall_hint
+        and transition_found
+        and max_khz <= 24.5
+        and axis_aligned_profile
+    )
+    if cd_authentic_confident:
+        score = max(score, 1)
+
     confidence = {0: "LOW", 1: "MEDIUM", 2: "HIGH"}[score]
+    band_class = "hires-96-class" if texture_promoted else _band_class(bounded, max_khz)
     return {
         "likely_profile": profile,
         "profile_name": profile_name,
         "confidence": confidence,
         "tier_cutoff_khz": tier_khz,
         "distance_to_tier_khz": round(distance, 2),
-        "band_class": _band_class(bounded, max_khz),
+        "band_class": band_class,
+        "texture_promoted": texture_promoted,
     }
 
 
@@ -673,6 +839,16 @@ def predict_quality_class(
                     "reason": "High-frequency energy reaches deep into ultrasonic band.",
                 }
             )
+        elif max_khz >= 44.0 and cutoff_khz >= (max_khz * 0.88):
+            score += 8
+            components.append(
+                {
+                    "factor": "axis_aligned_hires",
+                    "value": round(cutoff_khz, 2),
+                    "delta": 8,
+                    "reason": "Cutoff remains close to the detected hi-res Nyquist ceiling.",
+                }
+            )
         if dynamic_span is not None and dynamic_span >= 30.0:
             score += 8
             components.append(
@@ -710,6 +886,12 @@ def predict_quality_class(
                 "reason": "CD-band ceiling presented on hi-res axis without hard fake-hires signature.",
             }
         )
+
+    if peak_db is None and dynamic_range_db is None:
+        if band_class == "cd-or-48k":
+            score = min(score, 69)
+        elif band_class.startswith("hires"):
+            score = min(score, 85)
 
     raw_score = score
     score = max(0, min(100, raw_score))
@@ -819,6 +1001,9 @@ def build_verdict(
         max_khz=max_khz,
         transition_found=transition_found,
         stats_detected=stats_detected,
+        dynamic_span=dynamic_span,
+        high_band_ratio=high_band_ratio,
+        brickwall_hint=brickwall_hint,
     )
     band_class = profile_guess["band_class"]
     cd_authentic_hint = bool(
@@ -836,6 +1021,8 @@ def build_verdict(
         brickwall_khz=brickwall_khz,
         cd_authentic_hint=cd_authentic_hint,
     )
+    if profile_guess.get("texture_promoted"):
+        insights.append("Hi-res frame retains plausible ultrasonic texture beyond a simple CD-width ceiling.")
 
     if brickwall_hint:
         if max_khz > 24.5:
@@ -935,6 +1122,7 @@ def build_verdict(
         "quality_breakdown": quality["quality_breakdown"],
         "insights": insights,
         "band_class": band_class,
+        "texture_promoted": bool(profile_guess.get("texture_promoted")),
     }
 
 
@@ -950,7 +1138,7 @@ def analyze_image(
         raise ValueError(f"could not read image: {image_path}")
 
     regions = detect_spectrogram_regions(image)
-    pane_mode = len(regions) >= 2
+    pane_mode = len(regions) >= 2 and not _region_is_full_frame(regions[0], image.shape)
     region = regions[0] if pane_mode else (0, 0, image.shape[1], image.shape[0])
     rx, ry, rw, rh = region
 
@@ -972,7 +1160,7 @@ def analyze_image(
     x1 = max(x0 + 1, min(x1, width))
 
     stats_crop = image[y0:y1, x0:x1]
-    ocr_text = pytesseract.image_to_string(stats_crop, config="--psm 6")
+    ocr_text = ocr_image_to_string(stats_crop, config="--psm 6")
     ocr_text = ocr_text.strip()
 
     # If pane detected, analyze the full pane height (already single channel).
@@ -1017,7 +1205,11 @@ def analyze_image(
 
     peak_db = parse_labeled_number(ocr_text, ["Peak Amplitude", "Peak"])
     dynamic_range_db = parse_dynamic_range_number(ocr_text)
-    stats_detected = bool(ocr_text)
+    stats_detected = bool(
+        peak_db is not None
+        or dynamic_range_db is not None
+        or _ocr_has_mastering_stats(ocr_text)
+    )
 
     verdict = build_verdict(
         cutoff_khz=detected_khz,

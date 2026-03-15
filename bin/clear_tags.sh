@@ -25,6 +25,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/lyrics.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 ui_init_colors
@@ -43,7 +45,7 @@ Options:
 Behavior:
   - Removes embedded lyrics tags from supported files.
   - Removes local sidecar lyric files (*.lrc, *.txt).
-  - Removes matching rows from lyrics_cache in LIBRARY_DB when metadata is available.
+  - Removes matching rows from lyrics_cache in AUDL_DB_PATH when metadata is available.
 EOF
 }
 
@@ -80,12 +82,12 @@ fi
 env_load_files ".env" "$SCRIPT_DIR/../.env" || true
 
 LIBRARY_DB_DEFAULT=""
-if [ -n "${SRC:-}" ]; then
-  LIBRARY_DB_DEFAULT="$SRC/library.sqlite"
+if [ -n "${AUDL_PATH:-}" ]; then
+  LIBRARY_DB_DEFAULT="$AUDL_PATH/library.sqlite"
 else
   LIBRARY_DB_DEFAULT="$PWD/.lyrics_cache.sqlite"
 fi
-LIBRARY_DB="${LIBRARY_DB:-$LIBRARY_DB_DEFAULT}"
+LIBRARY_DB="${AUDL_DB_PATH:-$LIBRARY_DB_DEFAULT}"
 
 HAS_METAFLAC=false
 if has_bin metaflac; then
@@ -107,10 +109,6 @@ HAS_FFPROBE=false
 if has_bin ffprobe; then
   HAS_FFPROBE=true
 fi
-
-sql_escape() {
-  printf "%s" "$1" | sed "s/'/''/g"
-}
 
 norm_tag() {
   printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
@@ -135,7 +133,10 @@ SIDECAR_CLEARED=0
 
 for f in "${FILES[@]}"; do
   if [ "$HAS_FFPROBE" = true ]; then
-    CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$f")
+    audio_ffprobe_meta_prime "$f"
+  fi
+  if [ "$HAS_FFPROBE" = true ]; then
+    CODEC="$(audio_codec_name "$f" || true)"
   else
     CODEC=""
   fi
@@ -179,13 +180,13 @@ for f in "${FILES[@]}"; do
     ALBUM=""
     DURATION=""
     if [ "$HAS_FFPROBE" = true ]; then
-      ARTIST=$(ffprobe -v error -show_entries format_tags=album_artist -of default=noprint_wrappers=1:nokey=1 "$f")
+      ARTIST="$(audio_probe_tag_value "$f" "album_artist")"
       if [ -z "$ARTIST" ]; then
-        ARTIST=$(ffprobe -v error -show_entries format_tags=artist -of default=noprint_wrappers=1:nokey=1 "$f")
+        ARTIST="$(audio_probe_tag_value "$f" "artist")"
       fi
-      TITLE=$(ffprobe -v error -show_entries format_tags=title -of default=noprint_wrappers=1:nokey=1 "$f")
-      ALBUM=$(ffprobe -v error -show_entries format_tags=album -of default=noprint_wrappers=1:nokey=1 "$f")
-      DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f")
+      TITLE="$(audio_probe_tag_value "$f" "title")"
+      ALBUM="$(audio_probe_tag_value "$f" "album")"
+      DURATION="$(audio_probe_duration_seconds "$f")"
     fi
     if [ -z "$ARTIST" ]; then
       ARTIST=""
@@ -197,8 +198,7 @@ for f in "${FILES[@]}"; do
       ALBUM_LC=$(norm_tag "$ALBUM")
       DURATION_INT=$(awk -v d="$DURATION" 'BEGIN{if (d==""||d!~/^[0-9.]+$/){print 0}else{printf "%.0f", d}}')
 
-      sqlite3 "$LIBRARY_DB" \
-        "DELETE FROM lyrics_cache WHERE artist_lc='$(sql_escape "$ARTIST_LC")' AND title_lc='$(sql_escape "$TITLE_LC")' AND album_lc='$(sql_escape "$ALBUM_LC")' AND abs(duration_int - ${DURATION_INT}) <= 2;"
+      lyrics_cache_delete_window "$LIBRARY_DB" "$ARTIST_LC" "$TITLE_LC" "$ALBUM_LC" "$DURATION_INT"
       # Remove both relative and absolute path cache rows to cover mixed callers.
       sqlite3 "$LIBRARY_DB" \
         "DELETE FROM lyrics_cache WHERE path='$(sql_escape "$f")';"

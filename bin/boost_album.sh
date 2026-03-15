@@ -60,6 +60,77 @@ Behavior:
 EOF
 }
 
+apply_r128_tags_to_copy() {
+  local tagged_file="$1"
+  local codec="$2"
+  local track_r128_q="${3:-}"
+  local album_r128_q="${4:-}"
+  local tagged_r128_file="${tagged_file}.r128"
+
+  [[ "$USE_LOUDNORM" == true ]] || return 0
+
+  case "$codec" in
+  opus)
+    ffmpeg -hide_banner -i "$tagged_file" -c copy -map 0 \
+      -metadata R128_TRACK_GAIN="${track_r128_q}" \
+      -metadata R128_ALBUM_GAIN="${album_r128_q}" \
+      -metadata REPLAYGAIN_TRACK_GAIN= \
+      -metadata REPLAYGAIN_TRACK_PEAK= \
+      -metadata REPLAYGAIN_ALBUM_GAIN= \
+      -metadata REPLAYGAIN_ALBUM_PEAK= \
+      "$tagged_r128_file" -y </dev/null 2>/dev/null || {
+      rm -f "$tagged_r128_file"
+      return 1
+    }
+    ;;
+  vorbis)
+    ffmpeg -hide_banner -i "$tagged_file" -c copy -map 0 \
+      -metadata R128_TRACK_GAIN="${track_r128_q}" \
+      -metadata R128_ALBUM_GAIN="${album_r128_q}" \
+      "$tagged_r128_file" -y </dev/null 2>/dev/null || {
+      rm -f "$tagged_r128_file"
+      return 1
+    }
+    ;;
+  *)
+    return 0
+    ;;
+  esac
+
+  if [ -f "$tagged_r128_file" ]; then
+    mv -f "$tagged_r128_file" "$tagged_file"
+  fi
+}
+
+write_tagged_copy() {
+  local src_file="$1"
+  local out_file="$2"
+  local codec="$3"
+  local track_peak_linear="$4"
+  local album_peak_linear="$5"
+  local album_gain_db="$6"
+  local track_r128_q="${7:-}"
+  local album_r128_q="${8:-}"
+  shift 8
+
+  rm -f "$out_file" "${out_file}.r128"
+  ffmpeg -hide_banner -i "$src_file" "$@" \
+    -metadata REPLAYGAIN_TRACK_GAIN="${album_gain_db} dB" \
+    -metadata REPLAYGAIN_TRACK_PEAK="${track_peak_linear}" \
+    -metadata REPLAYGAIN_ALBUM_GAIN="${album_gain_db} dB" \
+    -metadata REPLAYGAIN_ALBUM_PEAK="${album_peak_linear}" \
+    -metadata CUESHEET= \
+    "$out_file" -y </dev/null 2>/dev/null || {
+    rm -f "$out_file" "${out_file}.r128"
+    return 1
+  }
+
+  if ! apply_r128_tags_to_copy "$out_file" "$codec" "$track_r128_q" "$album_r128_q"; then
+    rm -f "$out_file" "${out_file}.r128"
+    return 1
+  fi
+}
+
 collect_boost_audio_files() {
   local out_var="${1:-FILES}"
   local -n out_ref="$out_var"
@@ -113,7 +184,7 @@ while [[ $# -gt 0 ]]; do
 done
 collect_boost_audio_files FILES
 BACKUP_DIR="before-recode"
-SAFETY_MARGIN="-0.3"
+SAFETY_MARGIN="$(audio_auto_boost_target_true_peak_db)"
 MAP_FILE=".file_map.tmp"
 FAIL_FILE=".failures.tmp"
 FAIL_SUMMARY=".boost_failures.txt"
@@ -236,23 +307,23 @@ fi
 
 echo "------------------------------------------------"
 if [ "$USE_LOUDNORM" = true ]; then
-  echo "Highest TruePk:  ${MAX_TRUE_PEAK} dBTP"
-  echo "Album LUFS:      ${ALBUM_I} LUFS"
+  echo "Highest TruePk:  $(ui_value_text "${MAX_TRUE_PEAK} dBTP")"
+  echo "Album LUFS:      $(ui_value_text "${ALBUM_I} LUFS")"
 else
-  echo "Highest Peak:    ${MAX_PEAK} dB"
+  echo "Highest Peak:    $(ui_value_text "${MAX_PEAK} dB")"
 fi
-echo "Net Gain:        +${POSSIBLE_GAIN} dB"
+echo "Net Gain:        $(ui_gain_text "$(audio_db_gain_label "$POSSIBLE_GAIN" 1)") dB"
 [[ "$MIXED_CODECS" = true ]] && echo "${YELLOW}Warning:         Mixed codecs detected in album!${RESET}"
 echo "------------------------------------------------"
 
 APPLY_GAIN=true
-if (( $(echo "$POSSIBLE_GAIN < 0.3" | bc -l) )); then
+if ! audio_float_abs_ge "$POSSIBLE_GAIN" "0.3"; then
   APPLY_GAIN=false
   if [ "$CUE_PRESENT" = false ]; then
-    echo "${YELLOW}Gain is negligible. Exiting.${RESET}"
+    echo "${YELLOW}Auto gain is negligible. Exiting.${RESET}"
     exit 0
   else
-    echo "${YELLOW}Gain is negligible, but cuesheets were found. Cleaning cuesheets only.${RESET}"
+    echo "${YELLOW}Auto gain is negligible, but cuesheets were found. Cleaning cuesheets only.${RESET}"
   fi
 fi
 
@@ -295,7 +366,6 @@ for f in "${FILES[@]}"; do
   fi
 
   if [ "$IS_TRUE_LOSSLESS" = true ] && [ "$APPLY_GAIN" = true ]; then
-      echo "${BLUE}[BAKING]${RESET} $f"
       OUT_EXT="$EXT"
       [[ "$CODEC" == "alac" ]] && OUT_EXT="m4a"
 
@@ -304,6 +374,7 @@ for f in "${FILES[@]}"; do
 
       BASENAME="${f%.*}"
       NEW_NAME="$BASENAME.$OUT_EXT"
+      printf '%s[BAKING]%s %s %s %s\n' "$BLUE" "$RESET" "$(ui_input_path_text "$f")" "$(ui_arrow_text)" "$(ui_output_path_text "$NEW_NAME")"
       echo "$f|$NEW_NAME" >> "$MAP_FILE"
 
       mv "$f" "$BACKUP_DIR/"
@@ -329,7 +400,7 @@ for f in "${FILES[@]}"; do
       if [ "$APPLY_GAIN" = false ] && [ "$HAS_CUE" = false ]; then
         continue
       fi
-      echo "${BLUE}[TAGGING]${RESET} $f"
+      printf '%s[TAGGING]%s %s\n' "$BLUE" "$RESET" "$(ui_input_path_text "$f")"
       echo "$f|$f" >> "$MAP_FILE"
 
       if [ "$USE_LOUDNORM" = true ]; then
@@ -354,81 +425,40 @@ for f in "${FILES[@]}"; do
         ALBUM_R128_Q=$(echo "scale=0; if ($ALBUM_R128_GAIN>=0) $ALBUM_R128_GAIN*256+0.5 else $ALBUM_R128_GAIN*256-0.5" | bc -l)
       fi
 
-      ffmpeg -hide_banner -i "$f" -c copy -map 0 \
-        -metadata REPLAYGAIN_TRACK_GAIN="${POSSIBLE_GAIN} dB" \
-        -metadata REPLAYGAIN_TRACK_PEAK="${TRACK_PEAK_LINEAR}" \
-        -metadata REPLAYGAIN_ALBUM_GAIN="${POSSIBLE_GAIN} dB" \
-        -metadata REPLAYGAIN_ALBUM_PEAK="${ALBUM_PEAK_LINEAR}" \
-        -metadata CUESHEET= \
-        "temp_$f" -y </dev/null 2>/dev/null
-
-      if [ $? -eq 0 ] && [ "$USE_LOUDNORM" = true ]; then
-        if [ "$CODEC" = "opus" ]; then
-          ffmpeg -hide_banner -i "temp_$f" -c copy -map 0 \
-            -metadata R128_TRACK_GAIN="${TRACK_R128_Q}" \
-            -metadata R128_ALBUM_GAIN="${ALBUM_R128_Q}" \
-            -metadata REPLAYGAIN_TRACK_GAIN= \
-            -metadata REPLAYGAIN_TRACK_PEAK= \
-            -metadata REPLAYGAIN_ALBUM_GAIN= \
-            -metadata REPLAYGAIN_ALBUM_PEAK= \
-            "temp_${f}.r128" -y </dev/null 2>/dev/null
-        elif [ "$CODEC" = "vorbis" ]; then
-          ffmpeg -hide_banner -i "temp_$f" -c copy -map 0 \
-            -metadata R128_TRACK_GAIN="${TRACK_R128_Q}" \
-            -metadata R128_ALBUM_GAIN="${ALBUM_R128_Q}" \
-            "temp_${f}.r128" -y </dev/null 2>/dev/null
-        fi
-        if [ -f "temp_${f}.r128" ]; then
-          mv "temp_${f}.r128" "temp_$f"
-        fi
-      fi
-
-      if [ $? -eq 0 ]; then
-          mv "$f" "$BACKUP_DIR/"
-          mv "temp_$f" "$f"
-      else
+      if ! write_tagged_copy \
+        "$f" \
+        "temp_$f" \
+        "$CODEC" \
+        "$TRACK_PEAK_LINEAR" \
+        "$ALBUM_PEAK_LINEAR" \
+        "$POSSIBLE_GAIN" \
+        "${TRACK_R128_Q:-}" \
+        "${ALBUM_R128_Q:-}" \
+        -c copy -map 0; then
           echo "  ${YELLOW}[!] Container issue; stripping cover art...${RESET}"
-          ffmpeg -hide_banner -i "$f" -c:a copy -map 0:a \
-            -metadata REPLAYGAIN_TRACK_GAIN="${POSSIBLE_GAIN} dB" \
-            -metadata REPLAYGAIN_TRACK_PEAK="${TRACK_PEAK_LINEAR}" \
-            -metadata REPLAYGAIN_ALBUM_GAIN="${POSSIBLE_GAIN} dB" \
-            -metadata REPLAYGAIN_ALBUM_PEAK="${ALBUM_PEAK_LINEAR}" \
-            -metadata CUESHEET= \
-            "temp_$f" -y </dev/null
-          if [ $? -eq 0 ] && [ "$USE_LOUDNORM" = true ]; then
-            if [ "$CODEC" = "opus" ]; then
-              ffmpeg -hide_banner -i "temp_$f" -c copy -map 0 \
-                -metadata R128_TRACK_GAIN="${TRACK_R128_Q}" \
-                -metadata R128_ALBUM_GAIN="${ALBUM_R128_Q}" \
-                -metadata REPLAYGAIN_TRACK_GAIN= \
-                -metadata REPLAYGAIN_TRACK_PEAK= \
-                -metadata REPLAYGAIN_ALBUM_GAIN= \
-                -metadata REPLAYGAIN_ALBUM_PEAK= \
-                "temp_${f}.r128" -y </dev/null 2>/dev/null
-            elif [ "$CODEC" = "vorbis" ]; then
-              ffmpeg -hide_banner -i "temp_$f" -c copy -map 0 \
-                -metadata R128_TRACK_GAIN="${TRACK_R128_Q}" \
-                -metadata R128_ALBUM_GAIN="${ALBUM_R128_Q}" \
-                "temp_${f}.r128" -y </dev/null 2>/dev/null
-            fi
-            if [ -f "temp_${f}.r128" ]; then
-              mv "temp_${f}.r128" "temp_$f"
-            fi
-          fi
-          if [ $? -eq 0 ]; then
-             mv "$f" "$BACKUP_DIR/"
-             mv "temp_$f" "$f"
-          else
-             echo "  ${RED}[FATAL] Failed:${RESET} $f"
-             rm -f "temp_$f"
-             echo "$f" >> "$FAIL_FILE"
-             continue
+          if ! write_tagged_copy \
+            "$f" \
+            "temp_$f" \
+            "$CODEC" \
+            "$TRACK_PEAK_LINEAR" \
+            "$ALBUM_PEAK_LINEAR" \
+            "$POSSIBLE_GAIN" \
+            "${TRACK_R128_Q:-}" \
+            "${ALBUM_R128_Q:-}" \
+            -c:a copy -map 0:a; then
+            echo "  ${RED}[FATAL] Failed:${RESET} $f"
+            rm -f "temp_$f"
+            echo "$f" >> "$FAIL_FILE"
+            continue
           fi
       fi
+
+      mv "$f" "$BACKUP_DIR/"
+      mv "temp_$f" "$f"
 
       if [ "$HAS_CUE" = true ]; then
         if [ "$CODEC" = "flac" ] && [ "$HAS_METAFLAC" = true ]; then
-          echo "${BLUE}[CUESHEET]${RESET} $f (removed)"
+          printf '%s[CUESHEET]%s %s (%s)\n' "$BLUE" "$RESET" "$(ui_input_path_text "$f")" "$(ui_warn_text "removed")"
           metaflac --remove --block-type=CUESHEET "$f" >/dev/null 2>&1
           if [[ $? -ne 0 ]]; then
             echo "${RED}FAILED:${RESET} $f"
@@ -436,7 +466,7 @@ for f in "${FILES[@]}"; do
             continue
           fi
         elif [ "$CODEC" != "flac" ]; then
-          echo "${BLUE}[CUESHEET]${RESET} $f (removed)"
+          printf '%s[CUESHEET]%s %s (%s)\n' "$BLUE" "$RESET" "$(ui_input_path_text "$f")" "$(ui_warn_text "removed")"
           ffmpeg -hide_banner -i "$f" -c copy -map 0 -map_metadata 0 -metadata CUESHEET= \
             "temp_$f" -y </dev/null 2>/dev/null
           if [ $? -eq 0 ]; then

@@ -1,18 +1,21 @@
+import json
 import os
 import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ANALYZE = REPO_ROOT / "bin" / "audlint-analyze.sh"
+ANALYZE_PY = REPO_ROOT / "lib" / "py" / "audlint_analyze.py"
 
 
 def _write_exec(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
+    path.write_text(textwrap.dedent(content).lstrip(), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
@@ -62,6 +65,51 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
                 """\
                 #!/usr/bin/env bash
                 args="$*"
+                if [ -n "${FFPROBE_LOG:-}" ]; then
+                  printf "%s\\n" "$args" >> "${FFPROBE_LOG}"
+                fi
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=flac
+codec_tag_string=[0][0][0][0]
+codec_long_name=FLAC
+profile=Lossless
+sample_rate=44100
+bits_per_raw_sample=16
+bits_per_sample=0
+sample_fmt=s16
+bit_rate=1411200
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=1411200
+TAG:album_artist=
+TAG:artist=Stub Artist
+TAG:title=Stub Title
+TAG:album=Stub Album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt"* ]]; then
+                  cat <<'EOF'
+codec_name=flac
+sample_rate=44100
+bits_per_raw_sample=16
+bits_per_sample=0
+sample_fmt=s16
+EOF
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
                 if [[ "$args" == *"stream=sample_rate"* ]]; then
                   echo "44100"
                   exit 0
@@ -99,7 +147,7 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
     def _run(self) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
-        env["PYTHON_BIN"] = "python3"
+        env["AUDL_PYTHON_BIN"] = "python3"
         env["NO_COLOR"] = "1"
         return subprocess.run(
             [str(ANALYZE), str(self.album_dir)],
@@ -135,6 +183,262 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
         third = self._run()
         self.assertEqual(third.returncode, 0, msg=third.stderr + "\n" + third.stdout)
         self.assertEqual(third.stdout.strip(), "44100/16")
+
+    def test_decode_timeout_falls_back_from_hanging_sox_to_ffmpeg(self) -> None:
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                sleep 1
+                exit 0
+                """
+            ),
+        )
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["AUDL_PYTHON_BIN"] = "python3"
+        env["NO_COLOR"] = "1"
+        env["AUDLINT_ANALYZE_DECODE_TIMEOUT_SEC"] = "0.2"
+        env["AUDLINT_ANALYZE_MAX_WINDOWS"] = "1"
+
+        started = time.monotonic()
+        proc = subprocess.run(
+            [str(ANALYZE), str(self.album_dir)],
+            cwd=str(self.album_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "44100/16")
+        self.assertLess(elapsed, 5.0, f"decode fallback should not hang, elapsed={elapsed}s")
+
+    def test_ape_images_prefer_ffmpeg_before_sox(self) -> None:
+        (self.album_dir / "01-track.wav").unlink()
+        ape_path = self.album_dir / "01-track.ape"
+        ape_path.write_text("seed-ape", encoding="utf-8")
+        sox_log = self.tmpdir / "sox.log"
+
+        _write_exec(
+            self.bin_dir / "soxi",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                field="${1:-}"
+                target="${2:-}"
+                case "$field" in
+                  -r) echo "44100" ;;
+                  -D)
+                    if [[ "$target" == *.ape ]]; then
+                      echo "0"
+                    else
+                      echo "120"
+                    fi
+                    ;;
+                  -b) echo "16" ;;
+                  *) exit 1 ;;
+                esac
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                printf '%s\\n' \"$*\" >> {sox_log}
+                exit 1
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                args="$*"
+                if [[ "$args" == *"codec_name"* && "$args" == *"sample_rate"* && "$args" == *"sample_fmt"* ]]; then
+                  cat <<'EOF'
+codec_name=ape
+sample_rate=44100
+bits_per_raw_sample=16
+bits_per_sample=0
+sample_fmt=s16
+EOF
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "ape"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=sample_rate"* ]]; then
+                  echo "44100"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* || "$args" == *"stream=bits_per_sample"* ]]; then
+                  echo "16"
+                  exit 0
+                fi
+                if [[ "$args" == *"format=duration"* ]]; then
+                  echo "120"
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["AUDL_PYTHON_BIN"] = "python3"
+        env["NO_COLOR"] = "1"
+        env["AUDLINT_ANALYZE_MAX_WINDOWS"] = "1"
+
+        proc = subprocess.run(
+            [str(ANALYZE), str(self.album_dir)],
+            cwd=str(self.album_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "44100/16")
+        if sox_log.exists():
+            self.assertEqual(sox_log.read_text(encoding="utf-8").strip(), "", "APE decode should bypass sox")
+
+    def test_ape_uses_ffprobe_bit_depth_when_soxi_misreports_16(self) -> None:
+        (self.album_dir / "01-track.wav").unlink()
+        ape_path = self.album_dir / "01-track.ape"
+        ape_path.write_text("seed-ape", encoding="utf-8")
+
+        _write_exec(
+            self.bin_dir / "soxi",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                field="${1:-}"
+                target="${2:-}"
+                case "$field" in
+                  -r) echo "96000" ;;
+                  -D)
+                    if [[ "$target" == *.ape ]]; then
+                      echo "0"
+                    else
+                      echo "120"
+                    fi
+                    ;;
+                  -b) echo "16" ;;
+                  *) exit 1 ;;
+                esac
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                args="$*"
+                if [[ "$args" == *"codec_name"* && "$args" == *"sample_rate"* && "$args" == *"sample_fmt"* ]]; then
+                  cat <<'EOF'
+codec_name=ape
+sample_rate=96000
+bits_per_raw_sample=24
+bits_per_sample=0
+sample_fmt=s32p
+EOF
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "ape"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=sample_rate"* ]]; then
+                  echo "96000"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* || "$args" == *"stream=bits_per_sample"* ]]; then
+                  echo "24"
+                  exit 0
+                fi
+                if [[ "$args" == *"format=duration"* ]]; then
+                  echo "120"
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["AUDL_PYTHON_BIN"] = "python3"
+        env["NO_COLOR"] = "1"
+        env["AUDLINT_ANALYZE_MAX_WINDOWS"] = "1"
+
+        proc = subprocess.run(
+            [str(ANALYZE), str(self.album_dir)],
+            cwd=str(self.album_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "96000/24")
+
+    def test_python_analyze_reuses_single_metadata_probe_per_track(self) -> None:
+        log_path = self.tmpdir / "ffprobe.log"
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["FFPROBE_LOG"] = str(log_path)
+
+        proc = subprocess.run(
+            [
+                "python3",
+                str(ANALYZE_PY),
+                "analyze",
+                "500",
+                "-55",
+                "8",
+                "1",
+                str(self.album_dir / "01-track.wav"),
+            ],
+            cwd=str(self.album_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["album_sr"], 44100)
+        self.assertEqual(payload["album_bits"], 16)
+        self.assertTrue(log_path.exists())
+        self.assertEqual(len(log_path.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_album_symlinked_audio_files_are_analyzed(self) -> None:
+        (self.album_dir / "01-track.wav").unlink()
+        source_dir = self.tmpdir / "source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        real_track = source_dir / "01-track.wav"
+        real_track.write_text("seed-symlink", encoding="utf-8")
+        os.symlink(real_track, self.album_dir / "01-track.wav")
+
+        proc = self._run()
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "44100/16")
+        self.assertTrue((self.album_dir / ".sox_album_profile").exists())
 
 
 if __name__ == "__main__":

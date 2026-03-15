@@ -9,8 +9,8 @@
 | `bin/boost_album.sh` | Bake headroom gain into a FLAC or lossy album in-place; handles Opus/Ogg cover edge cases |
 | `bin/boost_seek.sh` | Walk library and invoke `boost_album.sh` on qualifying albums |
 | `bin/clear_tags.sh` | Clear lyrics tags and cached lyrics DB entries for files in the current folder |
-| `bin/cue2flac.sh` | Split a high-res audio file into per-track FLACs using a .cue sheet (FLAC/WAV/WV/APE/DSF/DFF) |
+| `bin/cue2flac.sh` | Split a high-res audio file into per-track FLACs using a .cue sheet (FLAC/WAV/WV/APE/DSF/DFF); `--check-upscale` uses album-wide `audlint-analyze` target selection across all referenced sources |
 | `bin/dff2flac.sh` | Convert a folder of DFF files into tagged FLACs using a sidecar .cue file |
-| `bin/qty_compare.sh` | Compare two albums side-by-side: per-track DR14 grades, spectral BW99, and overall mastering grade |
+| `bin/qty_compare.sh` | Compare two albums side-by-side: per-track DR14 grades and overall mastering grade |
 | `bin/spectre.sh` | Generate spectrogram PNG files from audio sources (file mode, album mode, and `--all` per-track mode) |
 | `bin/tag_writer.sh` | Write metadata tags to audio files across all supported formats (FLAC, MP3, M4A, OGG, Opus, WV, WAV, DSF, WMA) |

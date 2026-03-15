@@ -4,21 +4,21 @@
 # Combines:
 #   audlint-analyze  — spectral FFT recode target (SR/bits, cascade-free)
 #   dr14meter        — DR14 dynamic range measurement
-#   dr_grade.py      — DR14 integer → mastering grade (genre-adaptive)
+#   dr_grade.py      — DR14 integer → mastering grade (preset-adaptive)
 #
 # Output (stdout): JSON
 #   {
 #     "recodeTo":          "48000/24",   raw SR/bits from audlint-analyze
 #     "drTotal":           9,            DR14 album total
 #     "grade":             "B",          mastering grade (S/A/B/C/F)
-#     "genreProfile":      "standard",   genre profile used for grading
+#     "genreProfile":      "standard",   scoring preset used for grading
 #     "samplingRateHz":    96000,        from dr14meter report
 #     "averageBitrateKbs": 2116,         from dr14meter report (null if absent)
 #     "bitsPerSample":     24,           from dr14meter report (null if absent)
 #     "tracks":            { "01 Track.flac": 10, ... }
 #   }
 #
-# Genre profiles (DR14 thresholds → grade):
+# Scoring presets (DR14 thresholds → grade):
 #
 #   audiophile  (Classical, Jazz, Blues, Acoustic, Folk, Ambient, New-Age)
 #     DR≥14→S  DR≥12→A  DR≥9→B  DR≥6→C  DR<6→F
@@ -26,7 +26,7 @@
 #
 #   high_energy (Rock, Metal, Punk, EDM, Hip-Hop, Electronic, Trap)
 #     DR≥11→S  DR≥9→A  DR≥7→B  DR≥4→C  DR<4→F
-#     Intentional loudness is genre convention; only defective masters fail.
+#     Intentional loudness is stylistic convention; only defective masters fail.
 #
 #   standard    (Pop, R&B, Country, World, Unknown)
 #     DR≥12→S  DR≥9→A  DR≥7→B  DR≥5→C  DR<5→F
@@ -57,12 +57,14 @@ source "$BOOTSTRAP_DIR/../lib/sh/bootstrap.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/env.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${AUDL_PYTHON_BIN:-python3}"
 AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$SCRIPT_DIR/audlint-analyze.sh}"
 DR14METER_BIN="${DR14METER_BIN:-dr14meter}"
 DR_GRADE_PY="${DR_GRADE_PY:-$SCRIPT_DIR/../lib/py/dr_grade.py}"
@@ -77,13 +79,13 @@ Output fields:
   recodeTo          — target profile from spectral analysis e.g. "48000/24"
   drTotal           — DR14 album total (integer)
   grade             — mastering grade: S / A / B / C / F
-  genreProfile      — genre profile used: audiophile | high_energy | standard
+  genreProfile      — scoring preset used: audiophile | high_energy | standard
   samplingRateHz    — from dr14meter report (null if not detected)
   averageBitrateKbs — from dr14meter report (null if not detected)
   bitsPerSample     — from dr14meter report (null if not detected)
   tracks            — map of filename → per-track DR14 value
 
-Genre profiles and DR14 thresholds:
+Scoring presets and DR14 thresholds:
 
   audiophile  (Classical, Jazz, Blues, Acoustic, Folk, Ambient, New-Age)
     DR≥14→S  DR≥12→A  DR≥9→B  DR≥6→C  DR<6→F
@@ -91,12 +93,12 @@ Genre profiles and DR14 thresholds:
 
   high_energy (Rock, Metal, Punk, EDM, Hip-Hop, Electronic, Trap)
     DR≥11→S  DR≥9→A  DR≥7→B  DR≥4→C  DR<4→F
-    Intentional loudness is genre convention.
+    Intentional loudness is stylistic convention.
 
   standard    (Pop, R&B, Country, World, Unknown)
     DR≥12→S  DR≥9→A  DR≥7→B  DR≥5→C  DR<5→F
 
-Override genre profile:
+Override scoring preset:
   GENRE_PROFILE=audiophile audlint-value /path/to/album
 
 Dependencies: audlint-analyze, dr14meter, python3
@@ -149,14 +151,7 @@ have "$PYTHON_BIN" || { echo "Missing dependency: python3" >&2; exit 1; }
 recode_to="$("$AUDLINT_ANALYZE_BIN" "$ALBUM_DIR")"
 if [[ ! "$recode_to" =~ ^[0-9]+/[0-9]+$ ]]; then
   # Fallback: read profile cache directly (handles "Re-encoding not needed").
-  profile_file="$ALBUM_DIR/.sox_album_profile"
-  if [[ -f "$profile_file" ]]; then
-    target_sr="$(grep -E '^TARGET_SR=' "$profile_file" | head -n1 | cut -d= -f2- || true)"
-    target_bits="$(grep -E '^TARGET_BITS=' "$profile_file" | head -n1 | cut -d= -f2- || true)"
-    if [[ "$target_sr" =~ ^[0-9]+$ && "$target_bits" =~ ^[0-9]+$ ]]; then
-      recode_to="${target_sr}/${target_bits}"
-    fi
-  fi
+  recode_to="$(profile_cache_target_profile "$ALBUM_DIR" || true)"
 fi
 [[ "$recode_to" =~ ^[0-9]+/[0-9]+$ ]] || {
   echo "Unable to resolve recode target from audlint-analyze output" >&2
@@ -198,12 +193,8 @@ PY
 )" || { echo "Unable to locate dr14meter report in: $ALBUM_DIR" >&2; exit 1; }
 
 # ── Step 3: parse report + grade ───────────────────────────────────────────
-# Genre profile: env var > standard
+# Scoring preset: env var > standard (normalized in dr_grade.py)
 genre_profile="${GENRE_PROFILE:-standard}"
-case "$genre_profile" in
-audiophile | high_energy | standard) ;;
-*) genre_profile="standard" ;;
-esac
 
 "$PYTHON_BIN" - "$recode_to" "$report_file" "$ALBUM_DIR" "$genre_profile" "$DR_GRADE_PY" <<'PY'
 import json, os, re, sys, importlib.util
@@ -218,6 +209,7 @@ dr_grade_py = sys.argv[5]
 spec = importlib.util.spec_from_file_location("dr_grade", dr_grade_py)
 dr_grade_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dr_grade_mod)
+genre_profile = dr_grade_mod.normalize_genre_profile(genre_profile)
 
 with open(report_path, "r", encoding="utf-8", errors="replace") as f:
     lines = [line.rstrip("\n") for line in f]

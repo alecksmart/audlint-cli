@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# secure_backup.sh - strict pre-write album backup guard (SECURE_MODE=1).
+# secure_backup.sh - strict pre-write album backup guard (AUDL_PARANOIA_MODE=1).
 
 SECURE_BACKUP_LAST_ERROR=""
 
@@ -38,7 +38,7 @@ _secure_abs_dir() {
 }
 
 secure_mode_enabled() {
-  case "${SECURE_MODE:-0}" in
+  case "${AUDL_PARANOIA_MODE:-0}" in
   1 | true | TRUE | yes | YES | on | ON) return 0 ;;
   *) return 1 ;;
   esac
@@ -47,18 +47,18 @@ secure_mode_enabled() {
 secure_require_backup_config() {
   secure_mode_enabled || return 0
 
-  local src_raw="${SRC:-}"
-  local backup_raw="${LIB_BACKUP:-}"
+  local src_raw="${AUDL_PATH:-}"
+  local backup_raw="${AUDL_BACKUP_PATH:-}"
   local rsync_bin="${SECURE_BACKUP_RSYNC_BIN:-${RSYNC_BIN:-rsync}}"
 
-  [[ -n "$src_raw" ]] || _secure_fail "Secure mode error: SRC is not set."
-  [[ -n "$backup_raw" ]] || _secure_fail "Secure mode error: LIB_BACKUP is not set."
+  [[ -n "$src_raw" ]] || _secure_fail "Secure mode error: AUDL_PATH is not set."
+  [[ -n "$backup_raw" ]] || _secure_fail "Secure mode error: AUDL_BACKUP_PATH is not set."
 
   local src_abs backup_abs
-  src_abs="$(_secure_abs_dir "$src_raw")" || _secure_fail "Secure mode error: SRC is not a readable directory: $src_raw"
-  backup_abs="$(_secure_abs_dir "$backup_raw")" || _secure_fail "Secure mode error: LIB_BACKUP is not an existing readable directory: $backup_raw"
+  src_abs="$(_secure_abs_dir "$src_raw")" || _secure_fail "Secure mode error: AUDL_PATH is not a readable directory: $src_raw"
+  backup_abs="$(_secure_abs_dir "$backup_raw")" || _secure_fail "Secure mode error: AUDL_BACKUP_PATH is not an existing readable directory: $backup_raw"
 
-  [[ -w "$backup_abs" ]] || _secure_fail "Secure mode error: LIB_BACKUP is not writable: $backup_abs"
+  [[ -w "$backup_abs" ]] || _secure_fail "Secure mode error: AUDL_BACKUP_PATH is not writable: $backup_abs"
   _secure_has_bin "$rsync_bin" || _secure_fail "Secure mode error: rsync binary not found: $rsync_bin"
 }
 
@@ -85,8 +85,8 @@ secure_backup_album_tracks_once() {
 
   local album_abs src_abs backup_abs rsync_bin rel_path backup_album_dir
   album_abs="$(_secure_abs_dir "$album_dir")" || _secure_fail "Secure mode error: album directory not readable: $album_dir"
-  src_abs="$(_secure_abs_dir "${SRC:-}")" || _secure_fail "Secure mode error: SRC is invalid."
-  backup_abs="$(_secure_abs_dir "${LIB_BACKUP:-}")" || _secure_fail "Secure mode error: LIB_BACKUP is invalid."
+  src_abs="$(_secure_abs_dir "${AUDL_PATH:-}")" || _secure_fail "Secure mode error: AUDL_PATH is invalid."
+  backup_abs="$(_secure_abs_dir "${AUDL_BACKUP_PATH:-}")" || _secure_fail "Secure mode error: AUDL_BACKUP_PATH is invalid."
   rsync_bin="${SECURE_BACKUP_RSYNC_BIN:-${RSYNC_BIN:-rsync}}"
 
   if [[ "$album_abs" == "$src_abs" ]]; then
@@ -94,7 +94,7 @@ secure_backup_album_tracks_once() {
   elif [[ "$album_abs" == "$src_abs/"* ]]; then
     rel_path="${album_abs#"$src_abs"/}"
   else
-    _secure_fail "Secure mode error: album is outside SRC ($album_abs not under $src_abs)."
+    _secure_fail "Secure mode error: album is outside AUDL_PATH ($album_abs not under $src_abs)."
     return 1
   fi
 
@@ -137,4 +137,3 @@ secure_backup_album_tracks_once() {
     return 1
   fi
 }
-

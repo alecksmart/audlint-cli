@@ -1,22 +1,116 @@
 #!/usr/bin/env bash
 
+path_resolve() {
+  local target="${1:-}"
+  local resolved=""
+  local link_target=""
+  local parent=""
+  local base=""
+
+  [[ -n "$target" ]] || return 1
+
+  if command -v realpath >/dev/null 2>&1; then
+    resolved="$(realpath "$target" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+
+  if command -v readlink >/dev/null 2>&1; then
+    resolved="$(readlink -f "$target" 2>/dev/null || true)"
+    if [[ -n "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+
+    link_target="$(readlink "$target" 2>/dev/null || true)"
+    if [[ -n "$link_target" ]]; then
+      if [[ "$link_target" = /* ]]; then
+        printf '%s\n' "$link_target"
+      else
+        parent="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P)" || return 1
+        printf '%s/%s\n' "$parent" "$link_target"
+      fi
+      return 0
+    fi
+  fi
+
+  if [[ -d "$target" ]]; then
+    (cd "$target" 2>/dev/null && pwd -P)
+    return $?
+  fi
+
+  if [[ -e "$target" || -L "$target" ]]; then
+    parent="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P)" || return 1
+    base="$(basename "$target")"
+    printf '%s/%s\n' "$parent" "$base"
+    return 0
+  fi
+
+  printf '%s\n' "$target"
+}
+
+stat_epoch_mtime() {
+  local path="$1"
+  local out=""
+  if out="$(stat -f '%m' "$path" 2>/dev/null)"; then
+    if [[ "$out" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+  if out="$(stat -c '%Y' "$path" 2>/dev/null)"; then
+    if [[ "$out" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+stat_size_bytes() {
+  local path="$1"
+  local out=""
+  if out="$(stat -f '%z' "$path" 2>/dev/null)"; then
+    if [[ "$out" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+  if out="$(stat -c '%s' "$path" 2>/dev/null)"; then
+    if [[ "$out" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+date_format_epoch() {
+  local epoch="${1:-}"
+  local format="${2:-}"
+  local out=""
+
+  [[ "$epoch" =~ ^-?[0-9]+$ ]] || return 1
+  [[ -n "$format" ]] || return 2
+
+  if out="$(date -r "$epoch" "$format" 2>/dev/null)"; then
+    printf '%s' "$out"
+    return 0
+  fi
+  if out="$(date -d "@$epoch" "$format" 2>/dev/null)"; then
+    printf '%s' "$out"
+    return 0
+  fi
+  return 1
+}
+
 bootstrap_resolve_paths() {
   local entry="${1:-${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}}"
   local script_path="$entry"
 
-  if command -v realpath >/dev/null 2>&1; then
-    script_path="$(realpath "$script_path" 2>/dev/null || printf '%s' "$script_path")"
-  elif command -v readlink >/dev/null 2>&1; then
-    local link_target
-    link_target="$(readlink "$script_path" 2>/dev/null || true)"
-    if [[ -n "$link_target" ]]; then
-      if [[ "$link_target" = /* ]]; then
-        script_path="$link_target"
-      else
-        script_path="$(cd "$(dirname "$script_path")" && pwd)/$link_target"
-      fi
-    fi
-  fi
+  script_path="$(path_resolve "$script_path")"
 
   local script_dir
   script_dir="$(cd "$(dirname "$script_path")" && pwd)"
@@ -41,6 +135,18 @@ tty_ensure_line_mode() {
     stty sane </dev/tty 2>/dev/null || true
     stty echo icanon icrnl </dev/tty 2>/dev/null || true
   fi
+}
+
+tty_print_text() {
+  local text="${1-}"
+  if ! { printf '%s' "$text" >/dev/tty; } 2>/dev/null; then
+    printf '%s' "$text"
+  fi
+}
+
+tty_print_line() {
+  tty_print_text "${1-}"
+  tty_print_text $'\n'
 }
 
 tty_read_line() {
@@ -158,10 +264,31 @@ tty_read_key() {
 tty_prompt_line() {
   local prompt="${1:-}"
   local out_var="${2:-}"
+  local pad_top="${3:-0}"
 
   [[ -n "$out_var" ]] || return 2
-  if ! printf '%s' "$prompt" >/dev/tty 2>/dev/null; then
-    printf '%s' "$prompt"
+  if [[ "$pad_top" == "1" ]]; then
+    tty_print_text $'\n'
   fi
+  tty_print_text "$prompt"
   tty_read_line "$out_var"
+}
+
+tty_prompt_key() {
+  local prompt="${1:-}"
+  local out_var="${2:-}"
+  local silent="${3:-0}"
+  local pad_top="${4:-0}"
+  local rc=1
+
+  [[ -n "$out_var" ]] || return 2
+  if [[ "$pad_top" == "1" ]]; then
+    tty_print_text $'\n'
+  fi
+  tty_print_text "$prompt"
+  if tty_read_key "$out_var" "$silent"; then
+    rc=0
+  fi
+  tty_print_text $'\n'
+  return "$rc"
 }

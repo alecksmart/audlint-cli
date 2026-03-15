@@ -1,5 +1,4 @@
 import os
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -8,7 +7,7 @@ import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_SCRIPT = REPO_ROOT / "bin" / "dff2flac.sh"
 SRC_LIB_SH = REPO_ROOT / "lib" / "sh"
 
@@ -18,11 +17,11 @@ def _write_exec(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-class DffEncoderCliSmokeTests(unittest.TestCase):
+class DffEncoderSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         if not SRC_SCRIPT.exists():
-            raise unittest.SkipTest("dff2flac.sh is not migrated in current scope")
+            raise unittest.SkipTest("dff2flac.sh is not present in current scope")
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -32,7 +31,7 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         self._install_stubs()
 
         self.work_dir = self.tmpdir / "work"
-        self.script_dir = self.work_dir / "audio-encoder"
+        self.script_dir = self.work_dir / "bin"
         self.script_dir.mkdir(parents=True, exist_ok=True)
         self.lib_sh_dir = self.work_dir / "lib" / "sh"
         self.lib_sh_dir.mkdir(parents=True, exist_ok=True)
@@ -58,20 +57,53 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
             self.bin_dir / "ffprobe",
             textwrap.dedent(
                 """\
-                #!/bin/bash
+                #!/usr/bin/env bash
                 args="$*"
                 input="${@: -1}"
                 base="$(basename "$input")"
 
-                sr="2822400"
+                sample_rate="2822400"
+                codec="dsd_lsbf"
+                bits="1"
+                sample_fmt="s32"
+                bitrate="5644800"
+
                 case "$base" in
-                  *48fam* ) sr="3072000" ;;
-                  *low44* ) sr="88200" ;;
-                  *low48* ) sr="96000" ;;
+                  *48fam* ) sample_rate="3072000" ;;
+                  *low44* ) sample_rate="88200" ;;
+                  *low48* ) sample_rate="96000" ;;
                 esac
 
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<EOF
+[STREAM]
+index=0
+codec_name=$codec
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=$sample_rate
+bits_per_raw_sample=$bits
+bits_per_sample=0
+sample_fmt=$sample_fmt
+bit_rate=$bitrate
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=$bitrate
+TAG:album_artist=
+TAG:artist=
+TAG:title=
+TAG:album=
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
                 if [[ "$args" == *"stream=sample_rate"* ]]; then
-                  echo "$sr"
+                  echo "$sample_rate"
                   exit 0
                 fi
                 exit 0
@@ -83,7 +115,7 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
             self.bin_dir / "ffmpeg",
             textwrap.dedent(
                 f"""\
-                #!/bin/bash
+                #!/usr/bin/env bash
                 printf "%s\\n" "$*" >> "{ffmpeg_log}"
                 args="$*"
                 if [[ "$args" == *"volumedetect"* ]]; then
@@ -91,7 +123,7 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
                   exit 0
                 fi
                 if [[ "$args" == *"loudnorm=I=-23:TP=-1.5:LRA=11:print_format=summary"* ]]; then
-                  echo "Input True Peak: -2.0 dBTP" >&2
+                  echo "Input True Peak: ${{STUB_TRUE_PEAK:--2.0}} dBTP" >&2
                   exit 0
                 fi
                 out="${{@: -1}}"
@@ -102,13 +134,16 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
             ),
         )
         sox_log = self.tmpdir / "sox.log"
-        # sox stub: write an empty output file (second positional arg after skipping options).
         _write_exec(
             self.bin_dir / "sox",
             textwrap.dedent(
                 f"""\
-                #!/bin/bash
+                #!/usr/bin/env bash
                 printf '%s\\n' "$*" >> "{sox_log}"
+                if [[ "${{1:-}}" == "--help-format" || "${{1:-}}" == "--help" ]]; then
+                  echo "AUDIO FILE FORMATS: flac wav aiff aif aifc caf dsf dff wv ape mp4 mp3 aac ogg opus ffmpeg"
+                  exit 0
+                fi
                 args=("$@")
                 positionals=()
                 i=0
@@ -125,27 +160,29 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
                 """
             ),
         )
-        # metaflac stub: succeed silently.
         _write_exec(
             self.bin_dir / "metaflac",
             textwrap.dedent(
                 """\
-                #!/bin/bash
+                #!/usr/bin/env bash
                 exit 0
                 """
             ),
         )
 
-    def _run(self, args) -> subprocess.CompletedProcess:
+    def _run(self, args, extra_env=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["NO_COLOR"] = "1"
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [str(self.script), *args],
             cwd=str(self.album_dir),
             env=env,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=False,
         )
 
@@ -176,21 +213,23 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         out_file = self.album_dir / "flac_out" / "01 Song.flac"
         self.assertTrue(out_file.exists())
         self.assertIn("Saved", proc.stdout)
+        self.assertIn("Auto boost gain : +0.500 dB (enabled)", proc.stdout)
 
         sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
         self.assertIn("176400", sox_log)
         self.assertIn("-b 24", sox_log)
-<<<<<<< HEAD
-        self.assertIn("dither", sox_log)
-=======
-        # dither -s is not added for 24-bit output (no bit-depth reduction)
         self.assertNotIn("dither", sox_log)
->>>>>>> develop
-        # gain applied: boost is always on for dff2flac (true-peak auto-boost)
         self.assertIn("gain", sox_log)
-        # metadata tags are passed via metaflac --import-tags-from (stubbed); not in ffmpeg log
         ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
         self.assertNotIn("volumedetect", ffmpeg_log)
+
+    def test_hot_source_applies_negative_gain(self) -> None:
+        proc = self._run([], extra_env={"STUB_TRUE_PEAK": "0.1"})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Auto boost gain : -1.600 dB (enabled)", proc.stdout)
+
+        sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
+        self.assertIn("gain -1.600", sox_log)
 
     def test_48k_family_dff_uses_192k_target(self) -> None:
         (self.album_dir / "01 Song.dff").unlink()
@@ -213,7 +252,7 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
 
         sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
         self.assertIn("88200", sox_log)
-        self.assertNotIn("96k", sox_log)
+        self.assertNotIn("96000", sox_log)
         self.assertIn("-b 24", sox_log)
 
     def test_low_48_profile_does_not_upscale_sample_rate(self) -> None:
@@ -236,18 +275,18 @@ class DffEncoderCliSmokeTests(unittest.TestCase):
         self.assertIn("Inconsistent sources+details", proc.stdout)
 
     def test_dry_run_reuses_true_peak_cache(self) -> None:
-        proc_first = self._run(["--dry-run"])
-        self.assertEqual(proc_first.returncode, 0, msg=proc_first.stderr + "\n" + proc_first.stdout)
+        first = self._run(["--dry-run"])
+        self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)
         log_path = self.tmpdir / "ffmpeg.log"
         first_log = log_path.read_text(encoding="utf-8")
         self.assertIn("loudnorm=I=-23:TP=-1.5:LRA=11:print_format=summary", first_log)
 
         log_path.write_text("", encoding="utf-8")
-        proc_second = self._run(["--dry-run"])
-        self.assertEqual(proc_second.returncode, 0, msg=proc_second.stderr + "\n" + proc_second.stdout)
+        second = self._run(["--dry-run"])
+        self.assertEqual(second.returncode, 0, msg=second.stderr + "\n" + second.stdout)
         second_log = log_path.read_text(encoding="utf-8")
         self.assertNotIn("loudnorm=I=-23:TP=-1.5:LRA=11:print_format=summary", second_log)
-        self.assertIn("cache=hit", proc_second.stdout)
+        self.assertIn("cache=hit", second.stdout)
 
 
 if __name__ == "__main__":

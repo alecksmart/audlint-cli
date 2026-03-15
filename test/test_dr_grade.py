@@ -113,6 +113,23 @@ class DrGradeHighEnergyTests(unittest.TestCase):
 
 
 class DrGradeUnknownProfileTests(unittest.TestCase):
+    def test_normalize_genre_profile(self):
+        self.assertEqual(dr_grade.normalize_genre_profile("standard"), "standard")
+        self.assertEqual(dr_grade.normalize_genre_profile("audiophile"), "audiophile")
+        self.assertEqual(dr_grade.normalize_genre_profile("high_energy"), "high_energy")
+        self.assertEqual(dr_grade.normalize_genre_profile("classical"), "standard")
+        self.assertEqual(dr_grade.normalize_genre_profile(""), "standard")
+
+    def test_available_profiles_contains_expected_keys(self):
+        self.assertEqual(
+            set(dr_grade.available_profiles()),
+            {"audiophile", "high_energy", "standard"},
+        )
+
+    def test_thresholds_for_profile_uses_normalized_key(self):
+        self.assertEqual(dr_grade.thresholds_for_profile("standard"), ((12, "S"), (9, "A"), (7, "B"), (5, "C")))
+        self.assertEqual(dr_grade.thresholds_for_profile("unknown"), ((12, "S"), (9, "A"), (7, "B"), (5, "C")))
+
     def test_unknown_profile_falls_back_to_standard(self):
         # "classical" not a valid profile key → standard
         self.assertEqual(

@@ -67,7 +67,7 @@ class AudlintDoctorSmokeTests(unittest.TestCase):
         )
 
     def _install_stubs(self) -> None:
-        for name in ("ffmpeg", "ffprobe", "sqlite3", "rsync", "ssh"):
+        for name in ("ffmpeg", "ffprobe", "sqlite3", "rsync"):
             self._install_stub(name)
         self._install_stub("pyok")
         self._install_stub(
@@ -88,15 +88,15 @@ exit 1
     def _write_env(self, omit: set[str] | None = None) -> Path:
         omit = omit or set()
         values = {
-            "SRC": str(self.library_root),
-            "LIBRARY_DB": "$SRC/library.sqlite",
-            "PYTHON_BIN": "pyok",
-            "TABLE_PYTHON_BIN": "pyok",
-            "AUDLINT_CRON_INTERVAL_MIN": "20",
-            "AUDLINT_TASK_MAX_ALBUMS": "30",
-            "AUDLINT_TASK_MAX_TIME_SEC": "1080",
-            "AUDLINT_TASK_LOG": str(self.logs_dir / "audlint-task.log"),
-            "CUE2FLAC_OUTPUT_DIR": str(self.cue_output_dir),
+            "AUDL_PATH": str(self.library_root),
+            "AUDL_DB_PATH": "$AUDL_PATH/library.sqlite",
+            "AUDL_PYTHON_BIN": "pyok",
+            "AUDL_CRON_INTERVAL_MIN": "20",
+            "AUDL_TASK_MAX_ALBUMS": "30",
+            "AUDL_TASK_MAX_TIME_SEC": "1080",
+            "AUDL_TASK_LOG_PATH": str(self.logs_dir / "audlint-task.log"),
+            "AUDL_CUE2FLAC_OUTPUT_DIR": str(self.cue_output_dir),
+            "AUDL_SYNC_DEST": str(self.cue_output_dir),
         }
         lines = [f'{k}="{v}"' for k, v in values.items() if k not in omit]
         env_file = self.tmpdir / "doctor.env"
@@ -130,10 +130,10 @@ exit 1
         self.assertNotIn("[FAIL]", proc.stdout)
 
     def test_missing_required_env_fails(self) -> None:
-        env_file = self._write_env(omit={"AUDLINT_TASK_MAX_ALBUMS"})
+        env_file = self._write_env(omit={"AUDL_TASK_MAX_ALBUMS"})
         proc = self._run(["--env", str(env_file)])
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("[FAIL] env:AUDLINT_TASK_MAX_ALBUMS: missing", proc.stdout)
+        self.assertIn("[FAIL] env:AUDL_TASK_MAX_ALBUMS: missing", proc.stdout)
 
     def test_strict_mode_fails_on_warning(self) -> None:
         env_file = self._write_env()

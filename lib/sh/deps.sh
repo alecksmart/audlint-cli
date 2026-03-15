@@ -6,7 +6,9 @@ has_bin() {
 
 deps_ensure_common_path() {
   local dir
-  for dir in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+  for dir in "${AUDL_BIN_PATH:-$HOME/.local/bin}" /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+    dir="${dir/#\~/$HOME}"
+    dir="${dir//\$HOME/$HOME}"
     [[ -d "$dir" ]] || continue
     case ":${PATH:-}:" in
     *":$dir:"*) ;;

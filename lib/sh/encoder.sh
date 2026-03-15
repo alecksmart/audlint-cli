@@ -1,26 +1,16 @@
-<<<<<<< HEAD
-#!/opt/homebrew/bin/bash
-# encoder.sh - Encoder abstraction layer: sox (preferred) or ffmpeg (fallback).
-#
-# Sox produces superior dithered sample-rate conversion.
-=======
 #!/usr/bin/env bash
 # encoder.sh - Encoder abstraction layer: sox (preferred) or ffmpeg (fallback).
 #
 # Sox produces superior sample-rate conversion (VHQ, linear phase, steep filter).
 # Noise-shaped dither (dither -s) is added only when bit depth is actually reduced to 16-bit.
->>>>>>> develop
 # ffmpeg is used when sox is unavailable (or for non-FLAC source metadata injection).
 #
 # Depends on: deps.sh (has_bin), and externally: sox, metaflac, ffmpeg.
 
-<<<<<<< HEAD
-=======
 ENCODER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$ENCODER_LIB_DIR/codec_caps.sh"
 
->>>>>>> develop
 encoder_has_sox() {
   has_bin sox
 }
@@ -62,8 +52,6 @@ _encoder_sr_khz() {
   fi
 }
 
-<<<<<<< HEAD
-=======
 # _encoder_guess_codec_from_path <file>
 # Best-effort codec/container guess from file extension (lowercase).
 _encoder_guess_codec_from_path() {
@@ -78,7 +66,6 @@ _encoder_guess_codec_from_path() {
   printf '%s' "$codec"
 }
 
->>>>>>> develop
 # _encoder_copy_flac_tags <src_flac> <dst_flac>
 # Copies Vorbis comments from src to dst using metaflac.
 # Returns non-zero if metaflac fails.
@@ -91,13 +78,6 @@ _encoder_copy_flac_tags() {
     rm -f "$tmp_tags"
     return 1
   }
-<<<<<<< HEAD
-  metaflac --remove-all-tags --import-tags-from="$tmp_tags" "$dst" 2>/dev/null || {
-    rm -f "$tmp_tags"
-    return 1
-  }
-  rm -f "$tmp_tags"
-=======
   if metaflac --remove-all-tags --import-tags-from="$tmp_tags" "$dst" 2>/dev/null; then
     rm -f "$tmp_tags"
     return 0
@@ -111,7 +91,6 @@ _encoder_copy_flac_tags() {
     return 0
   fi
   return 1
->>>>>>> develop
 }
 
 # _encoder_inject_metadata_ffmpeg <src> <audio_flac> <out_flac>
@@ -156,31 +135,21 @@ _encoder_inject_tags_metaflac() {
 # encoder_to_flac --in <src> --out <dst> --sr <hz> --bits <16|24|32>
 #                 [--gain <dB>]
 #                 [--src-is-flac <0|1>]
-<<<<<<< HEAD
-=======
 #                 [--src-codec <codec>]
 #                 [--src-bits <bits>]
->>>>>>> develop
 #                 [--tags <TAG=value> ...]
 #
 # Encodes src to dst.flac at the given sample rate and bit depth.
 # Optional --gain applies a gain (dB) before SRC (sox path) or via filter (ffmpeg path).
 # --src-is-flac: 1 (default) means use metaflac for tag copy; 0 uses ffmpeg metadata pass.
-<<<<<<< HEAD
-=======
 # --src-codec: optional source codec/container hint (e.g. flac, m4a, opus).
 # --src-bits: source bit depth; when provided, noise-shaped dither is added only on actual
 #             bit-depth reduction (e.g. 24→16). When omitted, sox auto-dither handles it.
->>>>>>> develop
 # --tags: explicit TAG=value pairs for metaflac injection (used when src has no Vorbis comments).
 #
 # Returns non-zero on failure.
 encoder_to_flac() {
-<<<<<<< HEAD
-  local in="" out="" sr_hz="" bits="" gain_db="" src_is_flac=1
-=======
   local in="" out="" sr_hz="" bits="" gain_db="" src_is_flac=1 src_codec="" src_bits=""
->>>>>>> develop
   local -a extra_tags=()
 
   while [[ $# -gt 0 ]]; do
@@ -191,11 +160,8 @@ encoder_to_flac() {
     --bits) shift; bits="$1" ;;
     --gain) shift; gain_db="$1" ;;
     --src-is-flac) shift; src_is_flac="$1" ;;
-<<<<<<< HEAD
-=======
     --src-codec) shift; src_codec="$1" ;;
     --src-bits) shift; src_bits="$1" ;;
->>>>>>> develop
     --tags) shift; extra_tags+=("$1") ;;
     *) printf 'encoder_to_flac: unknown argument: %s\n' "$1" >&2; return 1 ;;
     esac
@@ -207,9 +173,6 @@ encoder_to_flac() {
     return 1
   }
 
-<<<<<<< HEAD
-  if encoder_has_sox; then
-=======
   local selected_backend="ffmpeg"
   local sox_input_mode="autodetect"
   local normalized_src_codec="$src_codec"
@@ -239,7 +202,6 @@ encoder_to_flac() {
   fi
 
   if [[ "$selected_backend" == "sox" ]]; then
->>>>>>> develop
     if ! has_bin metaflac && ((src_is_flac == 1)); then
       printf 'encoder_to_flac: sox is active but metaflac is not on PATH (required for tag copy)\n' >&2
       return 1
@@ -249,25 +211,18 @@ encoder_to_flac() {
     sr_k="$(_encoder_sr_khz "$sr_hz")"
 
     local sox_cmd=()
-<<<<<<< HEAD
-    sox_cmd=(sox "$in" -b "$bits" --compression 8 "$out")
-=======
     if [[ "$sox_input_mode" == "ffmpeg" ]]; then
       # Opus and similar edge cases may require forcing SoX input through ffmpeg.
       sox_cmd=(sox -t ffmpeg "$in" -b "$bits" --compression 8 "$out")
     else
       sox_cmd=(sox "$in" -b "$bits" --compression 8 "$out")
     fi
->>>>>>> develop
 
     # gain before rate conversion (sox chain order matters)
     if [[ -n "$gain_db" ]] && awk -v g="$gain_db" 'BEGIN{exit !(g+0 != 0)}'; then
       sox_cmd+=(gain "$gain_db")
     fi
 
-<<<<<<< HEAD
-    sox_cmd+=(rate -v -s -L "$sr_k" dither -s)
-=======
     sox_cmd+=(rate -v -s -L "$sr_k")
     # Add noise-shaped dither only when bit depth is actually being reduced.
     # Sox auto-dither (enabled by default) handles the general case; explicit
@@ -275,7 +230,6 @@ encoder_to_flac() {
     if [[ -n "$src_bits" ]] && ((bits < src_bits)) && ((bits <= 16)); then
       sox_cmd+=(dither -s)
     fi
->>>>>>> develop
 
     if ! "${sox_cmd[@]}"; then
       return 1
@@ -344,11 +298,7 @@ encoder_bake_gain_flac() {
       return 1
     fi
 
-<<<<<<< HEAD
-    if ! sox "$in" -b "$bits" --compression 8 "$out" gain "$gain_db" dither -s; then
-=======
     if ! sox "$in" -b "$bits" --compression 8 "$out" gain "$gain_db"; then
->>>>>>> develop
       return 1
     fi
 

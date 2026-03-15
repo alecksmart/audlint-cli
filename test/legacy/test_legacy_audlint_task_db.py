@@ -92,6 +92,95 @@ class AudlintTaskDbTests(unittest.TestCase):
                   echo "TAG:date=2005"
                   exit 0
                 fi
+                codec=""
+                if [[ "${STUB_FFPROBE_CODEC_EMPTY:-0}" != "1" ]]; then
+                  if [[ "$args" == *".sqlite"* || "$args" == *".bak"* || "$args" == *".stamp"* ]]; then
+                    codec=""
+                  elif [[ "$args" == *".m4a"* ]]; then
+                    codec="aac"
+                  elif [[ "$args" == *".mp3"* ]]; then
+                    codec="mp3"
+                  elif [[ "$args" == *".ogg"* ]]; then
+                    codec="vorbis"
+                  elif [[ "$args" == *".opus"* ]]; then
+                    codec="opus"
+                  elif [[ "$args" == *".wma"* ]]; then
+                    codec="wma"
+                  elif [[ "$args" == *".dsf"* || "$args" == *".dff"* ]]; then
+                    codec="dsd_lsbf"
+                  else
+                    codec="flac"
+                  fi
+                fi
+                sample_rate="96000"
+                if [[ "$args" == *"source-ultra"* ]]; then
+                  sample_rate="352800"
+                elif [[ "$args" == *"source-hires16"* ]]; then
+                  sample_rate="192000"
+                fi
+                bit_rate="1411000"
+                if [[ "$args" == *".m4a"* ]]; then
+                  bit_rate="256000"
+                elif [[ "$args" == *".mp3"* ]]; then
+                  bit_rate="320000"
+                elif [[ "$args" == *".ogg"* ]]; then
+                  bit_rate="192000"
+                elif [[ "$args" == *".opus"* ]]; then
+                  bit_rate="160000"
+                elif [[ "$args" == *".wma"* ]]; then
+                  bit_rate="192000"
+                fi
+                bits_raw="24"
+                if [[ "$args" == *"source-float"* ]]; then
+                  bits_raw="N/A"
+                elif [[ "$args" == *"source-i32"* ]]; then
+                  bits_raw="32"
+                elif [[ "$args" == *"source-16bit"* || "$args" == *"source-hires16"* ]]; then
+                  bits_raw="16"
+                fi
+                sample_fmt="s32"
+                if [[ "$args" == *"source-float"* ]]; then
+                  sample_fmt="fltp"
+                fi
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  if [[ "$args" == *".sqlite"* || "$args" == *".bak"* || "$args" == *".stamp"* ]]; then
+                    exit 0
+                  fi
+                  codec_tag_string="0x0055"
+                  codec_long_name="MPEG Audio Layer 3"
+                  profile="Layer III"
+                  if [[ "${STUB_FFPROBE_CODEC_META_UNKNOWN:-0}" == "1" ]]; then
+                    codec_tag_string="0xabcd"
+                    codec_long_name="Acme Future Codec"
+                    profile="Experimental"
+                  fi
+                  cat <<EOF
+[STREAM]
+index=0
+codec_name=$codec
+codec_tag_string=$codec_tag_string
+codec_long_name=$codec_long_name
+profile=$profile
+sample_rate=$sample_rate
+bits_per_raw_sample=$bits_raw
+bits_per_sample=0
+sample_fmt=$sample_fmt
+bit_rate=$bit_rate
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=$bit_rate
+TAG:album_artist=
+TAG:artist=Stub Artist
+TAG:album=Stub Album
+TAG:title=Stub Title
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
                 if [[ "$args" == *"stream=index"* ]]; then
                   if [[ "$args" == *".sqlite"* || "$args" == *".bak"* || "$args" == *".stamp"* ]]; then
                     echo ""
@@ -101,29 +190,7 @@ class AudlintTaskDbTests(unittest.TestCase):
                   exit 0
                 fi
                 if [[ "$args" == *"stream=codec_name"* ]]; then
-                  if [[ "${STUB_FFPROBE_CODEC_EMPTY:-0}" == "1" ]]; then
-                    echo ""
-                    exit 0
-                  fi
-                  if [[ "$args" == *".sqlite"* || "$args" == *".bak"* || "$args" == *".stamp"* ]]; then
-                    echo ""
-                    exit 0
-                  fi
-                  if [[ "$args" == *".m4a"* ]]; then
-                    echo "aac"
-                  elif [[ "$args" == *".mp3"* ]]; then
-                    echo "mp3"
-                  elif [[ "$args" == *".ogg"* ]]; then
-                    echo "vorbis"
-                  elif [[ "$args" == *".opus"* ]]; then
-                    echo "opus"
-                  elif [[ "$args" == *".wma"* ]]; then
-                    echo "wma"
-                  elif [[ "$args" == *".dsf"* || "$args" == *".dff"* ]]; then
-                    echo "dsd_lsbf"
-                  else
-                    echo "flac"
-                  fi
+                  echo "$codec"
                   exit 0
                 fi
                 if [[ "$args" == *"stream=codec_tag_string,codec_long_name,profile"* ]]; then
@@ -139,49 +206,19 @@ class AudlintTaskDbTests(unittest.TestCase):
                   exit 0
                 fi
                 if [[ "$args" == *"stream=sample_rate"* ]]; then
-                  if [[ "$args" == *"source-ultra"* ]]; then
-                    echo "352800"
-                  elif [[ "$args" == *"source-hires16"* ]]; then
-                    echo "192000"
-                  else
-                    echo "96000"
-                  fi
+                  echo "$sample_rate"
                   exit 0
                 fi
                 if [[ "$args" == *"stream=bit_rate"* || "$args" == *"format=bit_rate"* ]]; then
-                  if [[ "$args" == *".m4a"* ]]; then
-                    echo "256000"
-                  elif [[ "$args" == *".mp3"* ]]; then
-                    echo "320000"
-                  elif [[ "$args" == *".ogg"* ]]; then
-                    echo "192000"
-                  elif [[ "$args" == *".opus"* ]]; then
-                    echo "160000"
-                  elif [[ "$args" == *".wma"* ]]; then
-                    echo "192000"
-                  else
-                    echo "1411000"
-                  fi
+                  echo "$bit_rate"
                   exit 0
                 fi
                 if [[ "$args" == *"stream=bits_per_raw_sample"* ]]; then
-                  if [[ "$args" == *"source-float"* ]]; then
-                    echo "N/A"
-                  elif [[ "$args" == *"source-i32"* ]]; then
-                    echo "32"
-                  elif [[ "$args" == *"source-16bit"* || "$args" == *"source-hires16"* ]]; then
-                    echo "16"
-                  else
-                    echo "24"
-                  fi
+                  echo "$bits_raw"
                   exit 0
                 fi
                 if [[ "$args" == *"stream=sample_fmt"* ]]; then
-                  if [[ "$args" == *"source-float"* ]]; then
-                    echo "fltp"
-                  else
-                    echo "s32"
-                  fi
+                  echo "$sample_fmt"
                   exit 0
                 fi
                 if [[ "$args" == *"format=duration"* ]]; then
@@ -254,12 +291,18 @@ OUT
                 """\
                 #!/usr/bin/env bash
                 # Stub for audlint-value.sh used in unit tests.
+                album_dir="${1:-}"
                 if [[ "${STUB_AUDVALUE_FAIL:-0}" == "1" ]]; then
                   echo "audlint-value: simulated failure" >&2
                   exit 1
                 fi
                 if [[ "${STUB_AUDVALUE_DELAY_SEC:-0}" != "0" ]]; then
                   sleep "${STUB_AUDVALUE_DELAY_SEC}"
+                fi
+                if [[ "${STUB_AUDVALUE_TOUCH_ALBUM_DIR:-0}" == "1" && -n "$album_dir" && -d "$album_dir" ]]; then
+                  stamp="$album_dir/.audlint_task_touch.$$"
+                  : >"$stamp"
+                  rm -f "$stamp"
                 fi
                 grade="${STUB_AUDVALUE_GRADE:-A}"
                 dr="${STUB_AUDVALUE_DR:-9}"
@@ -303,10 +346,10 @@ OUT
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{self.script_dir}{os.pathsep}{env.get('PATH', '')}"
         env["TERM"] = "xterm"
-        env["LIBRARY_DB"] = str(db_path)
+        env["AUDL_DB_PATH"] = str(db_path)
         # Use real python3 for JSON parsing in audio.sh.
         real_py = _shutil.which("python3") or _shutil.which("python") or "python3"
-        env["PYTHON_BIN"] = real_py
+        env["AUDL_PYTHON_BIN"] = real_py
         env["NO_COLOR"] = "1"
         env["AUDLINT_TASK_LOCK_DIR"] = str(self.lock_dir)
         env["AUDLINT_TASK_DISCOVERY_CACHE_FILE"] = str(self.tmpdir / "audlint_task_last_discovery")
@@ -391,6 +434,28 @@ OUT
         self.assertEqual(row[0], "A")
         self.assertEqual(row[1], "Keep")
         self.assertEqual(row[2], 0)
+
+    def test_scan_mode_leaves_legacy_quality_score_empty(self) -> None:
+        root = self.tmpdir / "library"
+        album = root / "Artist Name" / "2005 - Album Name"
+        album.mkdir(parents=True)
+        (album / "01-track.flac").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT quality_score, dynamic_range_score FROM album_quality LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertIsNotNone(row)
+        self.assertIsNone(row[0])
+        self.assertEqual(row[1], 9)
 
     def test_scan_prioritizes_new_albums_before_changed(self) -> None:
         root = self.tmpdir / "library"
@@ -556,6 +621,90 @@ OUT
         finally:
             conn.close()
         self.assertEqual(pending_after_run2, 0)
+
+    def test_scan_roadmap_rekeys_stale_year_for_same_source_path(self) -> None:
+        root = self.tmpdir / "library"
+        album_dir = root / "Dire Straits" / "1991 - On Every Street"
+        album_dir.mkdir(parents=True)
+        (album_dir / "01-track.flac").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        init_proc = self._run(
+            ["--max-albums", "1", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={"STUB_FFPROBE_NO_TAGS": "1"},
+        )
+        self.assertEqual(init_proc.returncode, 0, msg=init_proc.stderr + "\n" + init_proc.stdout)
+
+        now = int(time.time())
+        source_path = str(album_dir)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO album_quality (
+                  artist, artist_lc, album, album_lc, year_int, source_path, last_checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("Dire Straits", "dire straits", "On Every Street", "on every street", 2000, source_path, now - 3600),
+            )
+            conn.execute("DELETE FROM scan_roadmap")
+            conn.execute(
+                """
+                INSERT INTO scan_roadmap (
+                  artist, artist_lc, album, album_lc, year_int, source_path, album_mtime, scan_kind, enqueued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'changed', ?)
+                """,
+                ("Dire Straits", "dire straits", "On Every Street", "on every street", 2000, source_path, now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO scan_roadmap (
+                  artist, artist_lc, album, album_lc, year_int, source_path, album_mtime, scan_kind, enqueued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'changed', ?)
+                """,
+                ("Dire Straits", "dire straits", "On Every Street", "on every street", 1991, source_path, now, now + 1),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        run_proc = self._run(
+            ["--max-albums", "5", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={"STUB_FFPROBE_NO_TAGS": "1"},
+        )
+        self.assertEqual(run_proc.returncode, 0, msg=run_proc.stderr + "\n" + run_proc.stdout)
+        self.assertIn("albums_analyzed=1", run_proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT year_int
+                  FROM album_quality
+                 WHERE artist_lc='dire straits'
+                   AND album_lc='on every street'
+                   AND source_path=?
+                 ORDER BY year_int
+                """,
+                (source_path,),
+            ).fetchall()
+            queued = conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM scan_roadmap
+                 WHERE source_path=?
+                """,
+                (source_path,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(rows, [(1991,)])
+        self.assertEqual(queued, 0)
 
     def test_scan_roadmap_enqueues_old_unscanned_album_even_with_old_mtime(self) -> None:
         root = self.tmpdir / "library"
@@ -1166,13 +1315,8 @@ OUT
 
     def test_scan_mode_keeps_downgrade_recode_after_previous_recode(self) -> None:
         """A previous recode timestamp does not suppress a later downgrade recode
-<<<<<<< HEAD:test/legacy/test_legacy_qty_seek_db.py
-        recommendation. If spectral analysis says 'Store as 48/24', needs_recode
-        remains actionable."""
-=======
         recommendation. If audlint-value says recodeTo=48000/24, needs_recode
         remains actionable (target 48000/24 < source 96000/24)."""
->>>>>>> develop:test/legacy/test_legacy_audlint_task_db.py
         root = self.tmpdir / "library"
         album_dir = root / "Artist Name" / "2005 - Album Name"
         album_dir.mkdir(parents=True)
@@ -1183,13 +1327,15 @@ OUT
         proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
-        # Simulate a previous recode by setting last_recoded_at > 0.
+        # Simulate a previous recode by setting last_recoded_at > 0 and aging
+        # last_checked_at so the touched album is deterministically re-queued.
         recoded_at = int(time.time()) - 86400
+        checked_at = recoded_at - 3600
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
-                "UPDATE album_quality SET last_recoded_at = ? WHERE 1",
-                (recoded_at,),
+                "UPDATE album_quality SET last_recoded_at = ?, last_checked_at = ?, checked_sort = ? WHERE 1",
+                (recoded_at, checked_at, checked_at),
             )
             conn.commit()
         finally:
@@ -1218,11 +1364,68 @@ OUT
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[1], 1, f"needs_recode must stay actionable, got recode_rec={row[0]!r}")
-<<<<<<< HEAD:test/legacy/test_legacy_qty_seek_db.py
-        self.assertIn("Store as 48/24", row[0], f"Expected downgrade recode target, got: {row[0]!r}")
-=======
         self.assertIn("48000/24", row[0], f"Expected downgrade recode target, got: {row[0]!r}")
->>>>>>> develop:test/legacy/test_legacy_audlint_task_db.py
+
+    def test_scan_mode_suppresses_chained_recode_after_auto_recode(self) -> None:
+        """A post-recode rescan must stay cascade-free.
+
+        When the previous row shows audlint already recoded the album from a
+        higher source profile, the follow-up scan should not propose a second
+        downgrade from the freshly created FLAC files."""
+        root = self.tmpdir / "library"
+        album_dir = root / "Artist Name" / "2005 - Album Name"
+        album_dir.mkdir(parents=True)
+        track = album_dir / "01-good.flac"
+        track.write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        recoded_at = int(time.time()) - 86400
+        checked_at = recoded_at - 3600
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE album_quality
+                SET current_quality = ?, recode_source_profile = ?, last_recoded_at = ?, last_checked_at = ?, checked_sort = ?
+                WHERE 1
+                """,
+                ("192000/24", "192000/24", recoded_at, checked_at, checked_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        now = int(time.time())
+        os.utime(track, (now + 5, now + 5))
+        os.utime(album_dir, (now + 5, now + 5))
+
+        proc2 = self._run(
+            ["--max-albums", "15", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={"STUB_AUDVALUE_RECODE_TO": "44100/24"},
+        )
+        self.assertEqual(proc2.returncode, 0, msg=proc2.stderr + "\n" + proc2.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT current_quality, recode_recommendation, needs_recode, recode_source_profile
+                FROM album_quality
+                LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "96000/24", "rescan should reflect the freshly recoded files")
+        self.assertEqual(row[1], "Keep as-is", f"expected chained downgrade suppression, got: {row[1]!r}")
+        self.assertEqual(row[2], 0, "needs_recode must stay off after audlint's own recode")
+        self.assertEqual(row[3], "192000/24", "original source profile should be preserved for future rescans")
 
     def test_scan_mode_adjusts_recode_bit_depth_for_16bit_source(self) -> None:
         root = self.tmpdir / "library"
@@ -1323,6 +1526,125 @@ OUT
         proc = self._run(["--max-albums", "15", "--full-discovery", str(root)], cwd=self.tmpdir, db_path=db_path, extra_env={"STUB_FFPROBE_NO_TAGS": "1"})
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("albums_skipped(fail_hold)=1", proc.stdout)
+
+    def test_scan_mode_retries_failed_row_when_album_dir_changes(self) -> None:
+        root = self.tmpdir / "library"
+        album = root / "Old Artist" / "1999 - Old Album"
+        album.mkdir(parents=True)
+        track = album / "01-good.flac"
+        track.write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        init_proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path, extra_env={"STUB_FFPROBE_NO_TAGS": "1"})
+        self.assertEqual(init_proc.returncode, 0, msg=init_proc.stderr + "\n" + init_proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            checked_at = conn.execute("SELECT last_checked_at FROM album_quality LIMIT 1").fetchone()[0]
+            conn.execute("UPDATE album_quality SET scan_failed=1, notes='manual hold'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        stale = checked_at - 60
+        os.utime(track, (stale, stale))
+        fresh = checked_at + 60
+        os.utime(album, (fresh, fresh))
+
+        proc = self._run(["--max-albums", "15", "--full-discovery", str(root)], cwd=self.tmpdir, db_path=db_path, extra_env={"STUB_FFPROBE_NO_TAGS": "1"})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("albums_skipped(fail_hold)=0", proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT scan_failed FROM album_quality LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], 0)
+
+    def test_scan_mode_does_not_requeue_album_when_scan_touches_dir(self) -> None:
+        root = self.tmpdir / "library"
+        album = root / "Old Artist" / "1999 - Old Album"
+        album.mkdir(parents=True)
+        (album / "01-good.flac").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        init_proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path, extra_env={"STUB_FFPROBE_NO_TAGS": "1"})
+        self.assertEqual(init_proc.returncode, 0, msg=init_proc.stderr + "\n" + init_proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT artist, artist_lc, album, album_lc, year_int, source_path FROM album_quality LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            conn.execute(
+                """
+                INSERT INTO scan_roadmap (
+                  artist, artist_lc, album, album_lc, year_int, source_path, album_mtime, scan_kind, enqueued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 'changed', 0)
+                """,
+                row,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        proc = self._run(
+            ["--max-albums", "15", "--full-discovery", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={"STUB_FFPROBE_NO_TAGS": "1", "STUB_AUDVALUE_TOUCH_ALBUM_DIR": "1"},
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("roadmap_pending=0", proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            pending = conn.execute("SELECT COUNT(*) FROM scan_roadmap").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(pending, 0)
+
+    def test_discovery_prunes_before_recode_dirs_in_full_and_incremental_modes(self) -> None:
+        root = self.tmpdir / "library"
+        album = root / "Artist Name" / "2005 - Album Name"
+        backup = album / "before-recode"
+        album.mkdir(parents=True)
+        backup.mkdir(parents=True)
+        (album / "01-main.flac").write_text("", encoding="utf-8")
+        (backup / "01-backup.opus").write_text("", encoding="utf-8")
+
+        cache_path = self.tmpdir / "audlint_task_last_discovery"
+        modes = (
+            ("full", ["--max-albums", "15", "--full-discovery", str(root)]),
+            ("incremental", ["--max-albums", "15", str(root)]),
+        )
+
+        for mode_name, args in modes:
+          with self.subTest(mode=mode_name):
+            db_path = self.tmpdir / f"{mode_name}.sqlite"
+            if cache_path.exists():
+              cache_path.unlink()
+            if mode_name == "incremental":
+              cache_path.write_text("cache", encoding="utf-8")
+              stale = time.time() - 3600
+              os.utime(cache_path, (stale, stale))
+
+            proc = self._run(args, cwd=self.tmpdir, db_path=db_path, extra_env={"STUB_FFPROBE_NO_TAGS": "1"})
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT source_path FROM album_quality ORDER BY source_path"
+                ).fetchall()
+            finally:
+                conn.close()
+
+            self.assertEqual(len(rows), 1, f"before-recode was discovered in {mode_name} mode: {rows!r}")
+            self.assertEqual(rows[0][0], str(album))
 
     def test_scan_mode_missing_root_is_safe_skip(self) -> None:
         missing_root = self.tmpdir / "missing-library"

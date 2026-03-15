@@ -158,12 +158,12 @@ def _discogs_fetch(artist: str, album: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Last.fm fallback (requires LASTFM_API_KEY env var)
+# Last.fm fallback (requires AUDL_LASTFM_API_KEY env var)
 # ---------------------------------------------------------------------------
 
 def _lastfm_fetch(artist: str, album: str) -> list[str]:
-    """Query Last.fm album.getInfo for top tags.  Requires LASTFM_API_KEY env var."""
-    api_key = os.environ.get("LASTFM_API_KEY", "")
+    """Query Last.fm album.getInfo for top tags.  Requires AUDL_LASTFM_API_KEY env var."""
+    api_key = os.environ.get("AUDL_LASTFM_API_KEY", "")
     if not api_key:
         return []
     try:
@@ -197,7 +197,7 @@ def get_genre_result(artist: str, album: str) -> tuple[str, str]:
     best_raw_tag — the highest-priority raw tag string (title-cased), or ''
                    if no tags were found.  Suitable for embedding as GENRE.
 
-    Tries MusicBrainz first, then Last.fm if LASTFM_API_KEY is set.
+    Tries MusicBrainz first, then Last.fm if AUDL_LASTFM_API_KEY is set.
     """
     tags = _mb_fetch(artist, album)
     if not tags:

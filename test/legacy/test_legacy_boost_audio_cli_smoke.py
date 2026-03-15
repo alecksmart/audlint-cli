@@ -1,6 +1,7 @@
 import os
 import stat
 import subprocess
+import shutil
 import tempfile
 import textwrap
 import unittest
@@ -100,6 +101,261 @@ class BoostCliSmokeTests(unittest.TestCase):
         self.assertTrue(any("2001 - Album One|-y" in line for line in lines))
         self.assertTrue(any("2002 - Album Two|-y" in line for line in lines))
         self.assertIn("Failure summary", proc.stdout)
+
+    def test_boost_album_uses_conservative_peak_margin(self) -> None:
+        album = self.tmpdir / "album"
+        album.mkdir(parents=True, exist_ok=True)
+        track = album / "01.flac"
+        track.write_text("", encoding="utf-8")
+
+        real_bc = shutil.which("bc") or "/usr/bin/bc"
+        _write_exec(self.bin_dir / "bc", f"#!/bin/bash\nexec '{real_bc}' \"$@\"\n")
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args="$*"
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* ]]; then
+                  echo "24"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bit_rate"* ]]; then
+                  echo "900000"
+                  exit 0
+                fi
+                if [[ "$args" == *"format_tags=CUESHEET"* ]]; then
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                if [[ "$*" == *"volumedetect"* ]]; then
+                  echo "[Parsed_volumedetect_0 @ 0x0] max_volume: -2.0 dB" >&2
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args=("$@")
+                positionals=()
+                i=0
+                while (( i < ${#args[@]} )); do
+                  case "${args[$i]}" in
+                    -b|-r|-c|-e|-t|-L|-R|-C|--compression) (( i += 2 )) || true ;;
+                    -*) (( i++ )) || true ;;
+                    *) positionals+=("${args[$i]}"); (( i++ )) || true ;;
+                  esac
+                done
+                out="${positionals[1]:-}"
+                mkdir -p "$(dirname "$out")"
+                : > "$out"
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "metaflac",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                for arg in "$@"; do
+                  case "$arg" in
+                    --export-tags-to=*)
+                      path="${arg#--export-tags-to=}"
+                      : > "$path"
+                      ;;
+                  esac
+                done
+                exit 0
+                """
+            ),
+        )
+
+        proc = self._run(BOOST_ALBUM, ["-y"], cwd=album)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Highest Peak:    -2.0 dB", proc.stdout)
+        self.assertRegex(proc.stdout, r"Net Gain:\s+\+0?\.5 dB")
+        self.assertTrue(track.exists())
+        self.assertTrue((album / "before-recode" / "01.flac").exists())
+
+    def test_boost_album_applies_negative_gain_for_hot_source(self) -> None:
+        album = self.tmpdir / "album_hot"
+        album.mkdir(parents=True, exist_ok=True)
+        track = album / "01.flac"
+        track.write_text("", encoding="utf-8")
+
+        real_bc = shutil.which("bc") or "/usr/bin/bc"
+        _write_exec(self.bin_dir / "bc", f"#!/bin/bash\nexec '{real_bc}' \"$@\"\n")
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args="$*"
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* ]]; then
+                  echo "24"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bit_rate"* ]]; then
+                  echo "900000"
+                  exit 0
+                fi
+                if [[ "$args" == *"format_tags=CUESHEET"* ]]; then
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                if [[ "$*" == *"volumedetect"* ]]; then
+                  echo "[Parsed_volumedetect_0 @ 0x0] max_volume: 0.1 dB" >&2
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args=("$@")
+                positionals=()
+                i=0
+                while (( i < ${#args[@]} )); do
+                  case "${args[$i]}" in
+                    -b|-r|-c|-e|-t|-L|-R|-C|--compression) (( i += 2 )) || true ;;
+                    -*) (( i++ )) || true ;;
+                    *) positionals+=("${args[$i]}"); (( i++ )) || true ;;
+                  esac
+                done
+                out="${positionals[1]:-}"
+                mkdir -p "$(dirname "$out")"
+                : > "$out"
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "metaflac",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                for arg in "$@"; do
+                  case "$arg" in
+                    --export-tags-to=*)
+                      path="${arg#--export-tags-to=}"
+                      : > "$path"
+                      ;;
+                  esac
+                done
+                exit 0
+                """
+            ),
+        )
+
+        proc = self._run(BOOST_ALBUM, ["-y"], cwd=album)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Highest Peak:    0.1 dB", proc.stdout)
+        self.assertRegex(proc.stdout, r"Net Gain:\s+-1\.6 dB")
+        self.assertTrue(track.exists())
+        self.assertTrue((album / "before-recode" / "01.flac").exists())
+
+    def test_boost_album_falls_back_to_audio_only_copy_for_problem_container(self) -> None:
+        album = self.tmpdir / "album_opus"
+        album.mkdir(parents=True, exist_ok=True)
+        track = album / "01.opus"
+        track.write_text("orig", encoding="utf-8")
+
+        real_bc = shutil.which("bc") or "/usr/bin/bc"
+        _write_exec(self.bin_dir / "bc", f"#!/bin/bash\nexec '{real_bc}' \"$@\"\n")
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args="$*"
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "opus"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* ]]; then
+                  echo "N/A"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bit_rate"* ]]; then
+                  echo "160000"
+                  exit 0
+                fi
+                if [[ "$args" == *"format_tags=CUESHEET"* ]]; then
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args="$*"
+                argv=("$@")
+                out=""
+                if (( ${#argv[@]} >= 2 )) && [[ "${argv[${#argv[@]}-1]}" == "-y" ]]; then
+                  out="${argv[${#argv[@]}-2]}"
+                elif (( ${#argv[@]} >= 1 )); then
+                  out="${argv[${#argv[@]}-1]}"
+                fi
+                if [[ "$args" == *"volumedetect"* ]]; then
+                  echo "[Parsed_volumedetect_0 @ 0x0] max_volume: -2.0 dB" >&2
+                  exit 0
+                fi
+                if [[ "$args" == *"-c copy"* && "$args" == *"-map 0"* && "$args" != *"-map 0:a"* ]]; then
+                  : > "$out"
+                  exit 1
+                fi
+                if [[ "$args" == *"-c:a copy"* && "$args" == *"-map 0:a"* ]]; then
+                  printf 'fixed' > "$out"
+                  exit 0
+                fi
+                : > "$out"
+                exit 0
+                """
+            ),
+        )
+
+        proc = self._run(BOOST_ALBUM, ["-y"], cwd=album)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Container issue; stripping cover art", proc.stdout)
+        self.assertEqual(track.read_text(encoding="utf-8"), "fixed")
 
 
 if __name__ == "__main__":

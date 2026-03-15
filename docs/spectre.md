@@ -7,6 +7,7 @@ Generate spectrogram images from audio files.
 `bin/spectre.sh` is the audio-to-image helper. It only generates spectrogram PNGs.
 
 Use `bin/audlint-spectre.sh` when you want to analyze an existing spectrogram image.
+For exact recode decisions, use `bin/audlint-analyze.sh` or `bin/audlint-value.sh`; image analysis can recover the sample-rate family, but exact bit depth is not directly observable from a spectrogram export.
 
 ## Usage
 

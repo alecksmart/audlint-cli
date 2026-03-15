@@ -19,16 +19,19 @@ fi
 BOOTSTRAP_DIR="$(cd "$(dirname "$BOOTSTRAP_SOURCE")" && pwd)"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/bootstrap.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 
 AUDLINT_TASK_BIN="${AUDLINT_TASK_BIN:-$SCRIPT_DIR/audlint-task.sh}"
-AUDLINT_TASK_MAX_ALBUMS="${AUDLINT_TASK_MAX_ALBUMS:-30}"
-AUDLINT_TASK_MAX_TIME_SEC="${AUDLINT_TASK_MAX_TIME_SEC:-0}"
-AUDLINT_TASK_LOG="${AUDLINT_TASK_LOG:-$HOME/audlint-task.log}"
-AUDLINT_LIBRARY_ROOT="${AUDLINT_LIBRARY_ROOT:-${LIBRARY_ROOT:-${SRC:-}}}"
-AUDLINT_CRON_INTERVAL_MIN="${AUDLINT_CRON_INTERVAL_MIN:-20}"
+AUDLINT_TASK_MAX_ALBUMS="${AUDL_TASK_MAX_ALBUMS:-30}"
+AUDLINT_TASK_MAX_TIME_SEC="${AUDL_TASK_MAX_TIME_SEC:-0}"
+AUDLINT_TASK_LOG="${AUDL_TASK_LOG_PATH:-$HOME/audlint-task.log}"
+AUDLINT_LIBRARY_ROOT="${AUDLINT_LIBRARY_ROOT:-${LIBRARY_ROOT:-${AUDL_PATH:-}}}"
+AUDLINT_CRON_INTERVAL_MIN="${AUDL_CRON_INTERVAL_MIN:-20}"
 AUDLINT_BOOST_SEEK_BIN="${AUDLINT_BOOST_SEEK_BIN:-$SCRIPT_DIR/boost_seek.sh}"
+MEDIA_PLAYER_PATH="${AUDL_MEDIA_PLAYER_PATH:-}"
 NO_COLOR="${NO_COLOR:-}"
 USE_COLOR=false
 C_RESET=""
@@ -51,8 +54,6 @@ fi
 
 CRON_BLOCK_BEGIN="# >>> audlint-cli maintain >>>"
 CRON_BLOCK_END="# <<< audlint-cli maintain <<<"
-BOOST_SELECT_KEYS="123456789abcdefghijklmnopqrstuvwxyz"
-
 paint() {
   local color="$1"
   local text="$2"
@@ -82,13 +83,10 @@ virtwin_set_right_hint() {
 
 pause_with_result() {
   local result="$1"
-  printf '\n%s press any key to continue' "$(paint "$C_RESULT" "$result")"
   local _key=""
-  if declare -f tty_read_key >/dev/null 2>&1; then
-    tty_read_key _key 1 || true
-  else
-    IFS= read -r -n 1 -s _key </dev/tty || true
-  fi
+  tty_print_text $'\n'
+  tty_print_line "$(paint "$C_RESULT" "$result")"
+  ui_prompt_key "[any key Continue] > " _key 1 0 || true
   exit 0
 }
 
@@ -103,6 +101,10 @@ int_ge() {
   local min="$2"
   [[ "$raw" =~ ^[0-9]+$ ]] || return 1
   ((raw >= min))
+}
+
+player_attached() {
+  [[ -n "$MEDIA_PLAYER_PATH" && -d "$MEDIA_PLAYER_PATH" && -w "$MEDIA_PLAYER_PATH" ]]
 }
 
 read_crontab_raw() {
@@ -191,12 +193,12 @@ install_cron_block() {
     pause_with_result "Install failed: AUDLINT_LIBRARY_ROOT is missing or invalid."
   fi
   if ! int_ge "$AUDLINT_TASK_MAX_ALBUMS" 1; then
-    pause_with_result "Install failed: AUDLINT_TASK_MAX_ALBUMS must be >= 1."
+    pause_with_result "Install failed: AUDL_TASK_MAX_ALBUMS must be >= 1."
   fi
 
   local schedule
   if ! schedule="$(cron_schedule_for_interval "$AUDLINT_CRON_INTERVAL_MIN")"; then
-    pause_with_result "Install failed: unsupported AUDLINT_CRON_INTERVAL_MIN ($AUDLINT_CRON_INTERVAL_MIN)."
+    pause_with_result "Install failed: unsupported AUDL_CRON_INTERVAL_MIN ($AUDLINT_CRON_INTERVAL_MIN)."
   fi
 
   local cron_max_time
@@ -242,7 +244,7 @@ run_manual_maintain_once() {
     pause_with_result "Run failed: AUDLINT_LIBRARY_ROOT is missing or invalid."
   fi
   if ! int_ge "$AUDLINT_TASK_MAX_ALBUMS" 1; then
-    pause_with_result "Run failed: AUDLINT_TASK_MAX_ALBUMS must be >= 1."
+    pause_with_result "Run failed: AUDL_TASK_MAX_ALBUMS must be >= 1."
   fi
 
   local task_log_dir
@@ -259,7 +261,13 @@ run_manual_maintain_once() {
   cmd+=("$AUDLINT_LIBRARY_ROOT")
 
   printf 'Running maintenance task...\n\n'
-  if "${cmd[@]}" 2>&1 | tee -a "$AUDLINT_TASK_LOG"; then
+  local cmd_rc=0
+  if [[ "$USE_COLOR" == true && -z "$NO_COLOR" ]]; then
+    FORCE_COLOR=1 "${cmd[@]}" 2>&1 | tee -a "$AUDLINT_TASK_LOG" || cmd_rc=${PIPESTATUS[0]}
+  else
+    "${cmd[@]}" 2>&1 | tee -a "$AUDLINT_TASK_LOG" || cmd_rc=${PIPESTATUS[0]}
+  fi
+  if ((cmd_rc == 0)); then
     pause_with_result "Maintenance run completed."
   fi
   pause_with_result "Maintenance run failed."
@@ -271,14 +279,14 @@ view_task_log() {
   fi
   printf 'Task log (live): %s\n' "$AUDLINT_TASK_LOG"
   printf -- '-----------\n'
-  printf 'Press any key to stop live view.\n\n'
+  printf '[any key Stop live view] >\n\n'
 
   if ! command -v tail >/dev/null 2>&1; then
     cat "$AUDLINT_TASK_LOG"
     pause_with_result "Live log unavailable: tail command not found."
   fi
 
-  virtwin_set_right_hint "press any key to exit"
+  virtwin_set_right_hint "[any key Stop]"
   tail -n 120 -F "$AUDLINT_TASK_LOG" &
   local tail_pid=$!
   local _key=""
@@ -313,6 +321,45 @@ run_boost_gain_for_dir() {
   pause_with_result "Boost gain failed (exit $rc)."
 }
 
+confirm_clear_player_files_prompt() {
+  local prompt_text='Clear all player files? [y Clear, n Cancel] > '
+  local choice=""
+  ui_prompt_key "$prompt_text" choice 1 1 || choice="n"
+  [[ "${choice,,}" == "y" ]]
+}
+
+clear_player_files() {
+  if ! player_attached; then
+    pause_with_result "Clear skipped: AUDL_MEDIA_PLAYER_PATH is missing or not writable."
+  fi
+
+  local resolved_path=""
+  resolved_path="$(path_resolve "$MEDIA_PLAYER_PATH" 2>/dev/null || printf '%s' "$MEDIA_PLAYER_PATH")"
+  case "$resolved_path" in
+  "" | "/" | "/Volumes" | "/Users" | "/System" | "/private" | "/tmp" | "$HOME")
+    pause_with_result "Clear failed: unsafe player path ($resolved_path)."
+    ;;
+  esac
+
+  if ! confirm_clear_player_files_prompt; then
+    pause_with_result "Player clear cancelled."
+  fi
+
+  local before_count=0
+  before_count="$(find "$MEDIA_PLAYER_PATH" -mindepth 1 -print 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
+
+  if ! find "$MEDIA_PLAYER_PATH" -mindepth 1 -exec rm -rf -- {} + 2>/dev/null; then
+    pause_with_result "Player clear failed: could not remove all files."
+  fi
+
+  local after_count=0
+  after_count="$(find "$MEDIA_PLAYER_PATH" -mindepth 1 -print 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [[ "$after_count" =~ ^[0-9]+$ ]] || after_count=0
+
+  pause_with_result "Player cleared. items_before=$before_count items_remaining=$after_count"
+}
+
 print_boost_choice_grid() {
   local dirs_var="$1"
   local count="$2"
@@ -324,7 +371,7 @@ print_boost_choice_grid() {
   line_len=0
 
   for ((idx=0; idx<count; idx++)); do
-    key="${BOOST_SELECT_KEYS:idx:1}"
+    key="$(menu_choice_label "$((idx + 1))")"
     base="$(basename "${dirs_ref[$idx]}")"
     plain="[$key] $base"
     token="$(paint "$C_SELECT" "[$key]") $(paint "$C_VALUE" "$base")"
@@ -364,16 +411,15 @@ boost_gain_page() {
   printf -- '%s\n' "$(paint "$C_TITLE" "-----------")"
   printf '%s %s\n\n' "$(paint "$C_LABEL" "Library Root:")" "$(paint "$C_VALUE" "$AUDLINT_LIBRARY_ROOT")"
 
-  local max_choices="${#BOOST_SELECT_KEYS}"
+  local max_choices=35
   local show_count="${#dirs[@]}"
   if ((show_count > max_choices)); then
     show_count="$max_choices"
   fi
 
   local -a picked=()
-  local idx key base
+  local idx
   for ((idx=0; idx<show_count; idx++)); do
-    key="${BOOST_SELECT_KEYS:idx:1}"
     picked+=("${dirs[$idx]}")
   done
   print_boost_choice_grid picked "$show_count"
@@ -381,27 +427,21 @@ boost_gain_page() {
     printf '\nShowing first %d directories (of %d).\n' "$max_choices" "${#dirs[@]}"
   fi
   printf '%s %s\n' "$(paint "$C_SELECT" "[q]")" "$(paint "$C_LABEL" "Cancel")"
-  printf '\nselect directory > '
 
   local sel=""
-  if declare -f tty_read_key >/dev/null 2>&1; then
-    tty_read_key sel 1 || sel="q"
-  else
-    IFS= read -r -n 1 -s sel </dev/tty || sel="q"
-  fi
+  ui_prompt_key "select directory > " sel 1 1 || sel="q"
   sel="${sel,,}"
-  printf '\n'
 
   if [[ "$sel" == "q" ]]; then
     return 0
   fi
 
-  local prefix sel_idx
-  if [[ "$BOOST_SELECT_KEYS" != *"$sel"* ]]; then
+  local sel_idx=""
+  sel_idx="$(menu_choice_index_from_key "$sel" "$show_count" || true)"
+  if [[ ! "$sel_idx" =~ ^[0-9]+$ ]]; then
     return 0
   fi
-  prefix="${BOOST_SELECT_KEYS%%"$sel"*}"
-  sel_idx="${#prefix}"
+  sel_idx=$((sel_idx - 1))
   if ((sel_idx < 0 || sel_idx >= show_count)); then
     return 0
   fi
@@ -411,39 +451,45 @@ boost_gain_page() {
 
 print_menu() {
   local cron_state="$1"
+  local player_ready="$2"
   printf '%s\n' "$(paint "$C_TITLE" "Maintenance")"
   printf -- '%s\n' "$(paint "$C_TITLE" "-----------")"
   printf '%s %s\n' "$(paint "$C_LABEL" "Task:")" "$(paint "$C_VALUE" "$AUDLINT_TASK_BIN")"
   printf '%s %s\n' "$(paint "$C_LABEL" "Library Root:")" "$(paint "$C_VALUE" "${AUDLINT_LIBRARY_ROOT:--}")"
   printf '%s %s\n' "$(paint "$C_LABEL" "Cron interval:")" "$(paint "$C_VALUE" "${AUDLINT_CRON_INTERVAL_MIN} min")"
+  if [[ "$player_ready" == "yes" ]]; then
+    printf '%s %s\n' "$(paint "$C_LABEL" "Player Path:")" "$(paint "$C_VALUE" "$MEDIA_PLAYER_PATH")"
+  fi
   printf '\n'
   if [[ "$cron_state" == "installed" ]]; then
-    printf '%s\n' "$(paint "$C_ACTION" "[u Uninstall Cron]")"
+    printf '%s\n' "$(hint_button u "Uninstall Cron")"
   else
-    printf '%s\n' "$(paint "$C_ACTION" "[m Run Maintainance]")"
-    printf '%s\n' "$(paint "$C_ACTION" "[i Install Cron]")"
+    printf '%s\n' "$(hint_button m "Run Maintenance")"
+    printf '%s\n' "$(hint_button i "Install Cron")"
   fi
-  printf '%s\n' "$(paint "$C_ACTION" "[b Boost Gain]")"
-  printf '%s\n' "$(paint "$C_ACTION" "[l View Log]")"
-  printf '%s\n' "$(paint "$C_ACTION" "[q Exit to Main Window]")"
-  printf '\n%s ' "$(paint "$C_LABEL" "choice >")"
+  if [[ "$player_ready" == "yes" ]]; then
+    printf '%s\n' "$(hint_button t "Clear Player Files")"
+  fi
+  printf '%s\n' "$(hint_button b "Boost Gain")"
+  printf '%s\n' "$(hint_button l "View Log")"
+  printf '%s\n' "$(hint_button q "Exit to Main Window")"
+  printf '\n'
 }
 
 main() {
   while true; do
     local cron_state="stopped"
+    local player_ready="no"
     if cron_is_installed; then
       cron_state="installed"
     fi
-
-    print_menu "$cron_state"
-    local key=""
-    if declare -f tty_read_key >/dev/null 2>&1; then
-      tty_read_key key 1 || key="q"
-    else
-      IFS= read -r -n 1 -s key </dev/tty || key="q"
+    if player_attached; then
+      player_ready="yes"
     fi
-    printf '\n'
+
+    print_menu "$cron_state" "$player_ready"
+    local key=""
+    ui_prompt_key "choice > " key 1 0 || key="q"
 
     case "${key,,}" in
     m)
@@ -466,6 +512,12 @@ main() {
       ;;
     b)
       boost_gain_page
+      ;;
+    t)
+      if [[ "$player_ready" != "yes" ]]; then
+        pause_with_result "Clear skipped: player is not attached."
+      fi
+      clear_player_files
       ;;
     l)
       view_task_log

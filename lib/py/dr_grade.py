@@ -52,7 +52,7 @@ import sys
 # Thresholds: (min_dr_inclusive, grade) in descending order of DR.
 # ---------------------------------------------------------------------------
 
-_THRESHOLDS: dict[str, list[tuple[int, str]]] = {
+_THRESHOLDS: dict[str, tuple[tuple[int, str], ...]] = {
     "audiophile": [
         (14, "S"),
         (12, "A"),
@@ -73,7 +73,26 @@ _THRESHOLDS: dict[str, list[tuple[int, str]]] = {
     ],
 }
 
+_THRESHOLDS = {k: tuple(v) for k, v in _THRESHOLDS.items()}
 _VALID_PROFILES = frozenset(_THRESHOLDS)
+DEFAULT_PROFILE = "standard"
+
+
+def normalize_genre_profile(genre_profile: str | None, default: str = DEFAULT_PROFILE) -> str:
+    """Normalize profile key; unknown/empty values fall back to *default*."""
+    profile = (genre_profile or "").strip()
+    return profile if profile in _VALID_PROFILES else default
+
+
+def thresholds_for_profile(genre_profile: str | None = DEFAULT_PROFILE) -> tuple[tuple[int, str], ...]:
+    """Return immutable DR threshold table for the normalized profile."""
+    profile = normalize_genre_profile(genre_profile)
+    return _THRESHOLDS[profile]
+
+
+def available_profiles() -> tuple[str, ...]:
+    """Return supported profile keys in stable order."""
+    return tuple(sorted(_VALID_PROFILES))
 
 
 def grade_from_dr(dr: int | float, genre_profile: str = "standard") -> str:
@@ -85,8 +104,8 @@ def grade_from_dr(dr: int | float, genre_profile: str = "standard") -> str:
 
     Returns one of: 'S', 'A', 'B', 'C', 'F'.
     """
-    profile = genre_profile if genre_profile in _VALID_PROFILES else "standard"
-    thresholds = _THRESHOLDS[profile]
+    profile = normalize_genre_profile(genre_profile)
+    thresholds = thresholds_for_profile(profile)
     dr_int = int(dr)
     for min_dr, letter in thresholds:
         if dr_int >= min_dr:

@@ -108,6 +108,18 @@ class SpectreCliSmokeTests(unittest.TestCase):
         self.assertTrue((self.album_dir / "01.png").exists())
         self.assertTrue((self.album_dir / "02.png").exists())
 
+    def test_directory_mode_discovers_audio_symlinks(self) -> None:
+        self._install_common_stubs()
+        source_dir = self.tmpdir / "source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        real_track = source_dir / "01.flac"
+        real_track.write_text("", encoding="utf-8")
+        os.symlink(real_track, self.album_dir / "01.flac")
+
+        proc = self._run([str(self.album_dir)])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((self.album_dir / "album_spectre.png").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,7 +60,8 @@ MAX_WINDOWS="${AUDLINT_ANALYZE_MAX_WINDOWS:-12}"
 FINGERPRINT_SAMPLE_BYTES="${AUDLINT_ANALYZE_FINGERPRINT_SAMPLE_BYTES:-65536}"
 FINGERPRINT_MODE="meta+headtail-v1"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${AUDL_PYTHON_BIN:-python3}"
+AUDLINT_ANALYZE_PY="${AUDLINT_ANALYZE_PY:-$SCRIPT_DIR/../lib/py/audlint_analyze.py}"
 
 show_help() {
   cat <<'EOF'
@@ -88,6 +89,9 @@ Environment overrides:
   AUDLINT_ANALYZE_FINGERPRINT_SAMPLE_BYTES
                                 bytes sampled from file head+tail for content hash
                                 (default: 65536)
+  AUDLINT_ANALYZE_DECODE_TIMEOUT_SEC
+                                per-window decoder timeout before fallback
+                                (default: max(20, WINDOW_SEC*4))
 
 Dependencies: sox (sox_ng recommended), soxi, python3 (with numpy)
 Optional:     ffprobe — duration fallback for ALAC/AAC-in-M4A containers
@@ -113,6 +117,10 @@ if ! have "$PYTHON_BIN"; then
   echo "Missing dep: python3" >&2
   exit 1
 fi
+if [[ ! -f "$AUDLINT_ANALYZE_PY" ]]; then
+  echo "Missing helper: $AUDLINT_ANALYZE_PY" >&2
+  exit 1
+fi
 if ! { have sox && have soxi; } && ! have ffmpeg; then
   echo "Missing deps: require sox+soxi or ffmpeg for audio decode" >&2
   exit 1
@@ -129,69 +137,12 @@ fi
 PROFILE_FILE="$ALBUM_DIR/.sox_album_profile"
 DONE_FILE="$ALBUM_DIR/.sox_album_done"
 
-profile_get() {
-  local key="$1"
-  grep -E "^${key}=" "$PROFILE_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true
-}
-
 compute_source_fingerprint() {
-  "$PYTHON_BIN" - "$ALBUM_DIR" "$FINGERPRINT_SAMPLE_BYTES" "${FILES[@]}" <<'PY'
-import hashlib
-import os
-import sys
-
-album_dir = sys.argv[1]
-sample_bytes = int(sys.argv[2])
-files = sorted(sys.argv[3:])
-
-h = hashlib.sha256()
-h.update(b"audlint-analyze-source-fingerprint-v1\0")
-h.update(str(sample_bytes).encode("ascii", "strict"))
-h.update(b"\0")
-
-for path in files:
-    rel = os.path.relpath(path, album_dir)
-    st = os.stat(path, follow_symlinks=True)
-    h.update(rel.encode("utf-8", "surrogateescape"))
-    h.update(b"\0")
-    h.update(str(st.st_size).encode("ascii", "strict"))
-    h.update(b"\0")
-    h.update(str(st.st_mtime_ns).encode("ascii", "strict"))
-    h.update(b"\0")
-
-    with open(path, "rb") as fh:
-        head = fh.read(sample_bytes)
-        if st.st_size > sample_bytes:
-            fh.seek(max(0, st.st_size - sample_bytes))
-            tail = fh.read(sample_bytes)
-        else:
-            tail = b""
-
-    h.update(hashlib.blake2b(head, digest_size=16).digest())
-    h.update(hashlib.blake2b(tail, digest_size=16).digest())
-
-print(h.hexdigest())
-PY
+  "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" source-fingerprint "$ALBUM_DIR" "$FINGERPRINT_SAMPLE_BYTES" "${FILES[@]}"
 }
 
 compute_config_fingerprint() {
-  "$PYTHON_BIN" - "$SCRIPT_RULESET" "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "$FINGERPRINT_SAMPLE_BYTES" "$FINGERPRINT_MODE" <<'PY'
-import hashlib
-import sys
-
-parts = [
-    "audlint-analyze-config-fingerprint-v1",
-    f"ruleset={sys.argv[1]}",
-    f"headroom_hz={sys.argv[2]}",
-    f"thresh_rel_db={sys.argv[3]}",
-    f"window_sec={sys.argv[4]}",
-    f"max_windows={sys.argv[5]}",
-    f"fp_sample_bytes={sys.argv[6]}",
-    f"fp_mode={sys.argv[7]}",
-]
-joined = "\n".join(parts).encode("utf-8", "strict")
-print(hashlib.sha256(joined).hexdigest())
-PY
+  "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" config-fingerprint "$SCRIPT_RULESET" "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "$FINGERPRINT_SAMPLE_BYTES" "$FINGERPRINT_MODE"
 }
 
 album_matches_target_profile() {
@@ -199,19 +150,8 @@ album_matches_target_profile() {
   local target_bits="$2"
   local f sr bits
   for f in "${FILES[@]}"; do
-    sr="$(soxi -r "$f" 2>/dev/null || true)"
-    bits="$(soxi -b "$f" 2>/dev/null || true)"
-    sr="${sr%%.*}"
-    bits="${bits%%.*}"
-
-    if [[ ! "$sr" =~ ^[0-9]+$ || "$sr" -le 0 ]]; then
-      sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of default=nokey=1:noprint_wrappers=1 "$f" </dev/null 2>/dev/null | head -n1 || true)"
-      sr="${sr%%.*}"
-    fi
-    if [[ ! "$bits" =~ ^[0-9]+$ || "$bits" -le 0 ]]; then
-      bits="$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample,bits_per_sample -of default=nokey=1:noprint_wrappers=1 "$f" </dev/null 2>/dev/null | awk 'NF{print; exit}' || true)"
-      bits="${bits%%.*}"
-    fi
+    sr="$(audio_probe_sample_rate_hz "$f")"
+    bits="$(audio_probe_bit_depth_bits "$f")"
     [[ "$sr" =~ ^[0-9]+$ && "$bits" =~ ^[0-9]+$ ]] || return 1
     [[ "$sr" == "$target_sr" ]] || return 1
     (( bits >= target_bits )) || return 1
@@ -222,7 +162,7 @@ album_matches_target_profile() {
 # collect audio files (non-recursive)
 mapfile -t FILES < <(
   # shellcheck disable=SC2046
-  find "$ALBUM_DIR" -maxdepth 1 -type f \( $(audio_find_iname_args) \) -print | sort
+  find "$ALBUM_DIR" -maxdepth 1 \( -type f -o -type l \) \( $(audio_find_iname_args) \) -print | sort
 )
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
@@ -236,12 +176,12 @@ CURRENT_CONFIG_FINGERPRINT="$(compute_config_fingerprint)"
 # If already profiled and marked done, verify and short-circuit.
 # JSON mode always performs a fresh analysis because callers expect per-track details.
 if [[ "$OUTPUT_MODE" != "json" && -f "$PROFILE_FILE" && -f "$DONE_FILE" ]]; then
-  PROFILE_RULESET="$(profile_get RULESET)"
-  PROFILE_TARGET_SR="$(profile_get TARGET_SR)"
-  PROFILE_TARGET_BITS="$(profile_get TARGET_BITS)"
-  PROFILE_SOURCE_FINGERPRINT="$(profile_get SOURCE_FINGERPRINT)"
-  PROFILE_CONFIG_FINGERPRINT="$(profile_get CONFIG_FINGERPRINT)"
-  PROFILE_FINGERPRINT_MODE="$(profile_get FINGERPRINT_MODE)"
+  PROFILE_RULESET="$(profile_cache_get "$PROFILE_FILE" RULESET)"
+  PROFILE_TARGET_SR="$(profile_cache_get "$PROFILE_FILE" TARGET_SR)"
+  PROFILE_TARGET_BITS="$(profile_cache_get "$PROFILE_FILE" TARGET_BITS)"
+  PROFILE_SOURCE_FINGERPRINT="$(profile_cache_get "$PROFILE_FILE" SOURCE_FINGERPRINT)"
+  PROFILE_CONFIG_FINGERPRINT="$(profile_cache_get "$PROFILE_FILE" CONFIG_FINGERPRINT)"
+  PROFILE_FINGERPRINT_MODE="$(profile_cache_get "$PROFILE_FILE" FINGERPRINT_MODE)"
 
   if [[ "$PROFILE_RULESET" == "$SCRIPT_RULESET" \
     && -n "$PROFILE_TARGET_SR" \
@@ -259,187 +199,11 @@ fi
 # Analyse all tracks → choose album target.
 tmpjson="$(mktemp -t sox_analyze.XXXXXX)"
 
-# shellcheck disable=SC2016
-"$PYTHON_BIN" - "${FILES[@]}" "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" <<'PY' >"$tmpjson"
-import sys, subprocess, statistics, json, shutil
-
-files = sys.argv[1:-4]
-HEADROOM_HZ = int(sys.argv[-4])
-THRESH_REL_DB = float(sys.argv[-3])
-WINDOW_SEC = float(sys.argv[-2])
-MAX_WINDOWS = int(sys.argv[-1])
-
-HAS_FFPROBE = shutil.which("ffprobe") is not None
-HAS_FFMPEG  = shutil.which("ffmpeg") is not None
-
-def soxi(field, path):
-    p = subprocess.run(["soxi", field, path], capture_output=True, text=True)
-    if p.returncode != 0:
-        return None
-    try:
-        return float(p.stdout.strip())
-    except Exception:
-        return None
-
-def ffprobe_stream(path, field):
-    if not HAS_FFPROBE:
-        return None
-    p = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a:0",
-         "-show_entries", f"stream={field}",
-         "-of", "default=nokey=1:noprint_wrappers=1", path],
-        capture_output=True, text=True,
-    )
-    if p.returncode != 0:
-        return None
-    for line in p.stdout.splitlines():
-        try:
-            v = float(line.strip())
-            return v if v > 0 else None
-        except Exception:
-            pass
-    return None
-
-def ffprobe_duration(path):
-    if not HAS_FFPROBE:
-        return None
-    p = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=nokey=1:noprint_wrappers=1", path],
-        capture_output=True, text=True,
-    )
-    if p.returncode != 0:
-        return None
-    for line in p.stdout.splitlines():
-        try:
-            return float(line.strip())
-        except Exception:
-            pass
-    return None
-
-def audio_meta(path):
-    sr   = soxi("-r", path)
-    dur  = soxi("-D", path)
-    bits = soxi("-b", path)
-    # soxi returns None or 0 for formats it cannot handle (e.g. opus, AAC-in-M4A).
-    if not sr or sr <= 0:
-        sr = ffprobe_stream(path, "sample_rate")
-    if dur is None or dur <= 0:
-        dur = ffprobe_duration(path)
-    if not bits or bits <= 0:
-        bits = ffprobe_stream(path, "bits_per_raw_sample") or ffprobe_stream(path, "bits_per_sample")
-    return sr, dur, bits
-
-def decode_window(path, sr, t0):
-    """Return raw f32le mono bytes for one analysis window, trying sox then ffmpeg."""
-    cmd = ["sox", path, "-t", "f32", "-c", "1", "-r", str(int(sr)), "-", "trim", f"{t0}", f"{WINDOW_SEC}"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    raw = p.stdout.read()
-    p.wait()
-    if p.returncode == 0 and raw:
-        return raw
-    if HAS_FFMPEG:
-        cmd = ["ffmpeg", "-v", "error", "-ss", f"{t0}", "-t", f"{WINDOW_SEC}",
-               "-i", path, "-ac", "1", "-ar", str(int(sr)), "-f", "f32le", "-"]
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        raw = p.stdout.read()
-        p.wait()
-        if p.returncode == 0 and raw:
-            return raw
-    return b""
-
-def analyze_cutoff(path):
-    sr, dur, _ = audio_meta(path)
-    if not sr or not dur:
-        return None, None, None
-
-    nwin = min(MAX_WINDOWS, max(1, int(dur // WINDOW_SEC)))
-    starts = []
-    if nwin == 1:
-        starts = [max(0.0, (dur - WINDOW_SEC) * 0.5)]
-    else:
-        for i in range(nwin):
-            t = (dur - WINDOW_SEC) * (0.1 + 0.8 * (i / (nwin - 1)))
-            starts.append(max(0.0, min(t, max(0.0, dur - WINDOW_SEC))))
-
-    cutoffs = []
-    try:
-        import numpy as np
-    except Exception:
-        return sr, dur, None
-
-    for t0 in starts:
-        raw = decode_window(path, sr, t0)
-        if not raw:
-            continue
-
-        x = np.frombuffer(raw, dtype=np.float32)
-        if x.size < int(sr):  # too short
-            continue
-        x = x - np.mean(x)
-        w = np.hanning(x.size)
-        X = np.fft.rfft(x * w)
-        mag = np.abs(X)
-        peak = mag.max() if mag.size else 0.0
-        if peak <= 0:
-            continue
-
-        db = 20.0 * np.log10(np.maximum(mag / peak, 1e-12))
-        idx = (db >= THRESH_REL_DB).nonzero()[0]
-        if idx.size == 0:
-            continue
-        k = int(idx.max())
-        # rfft has N/2+1 bins; Nyquist is sr/2 at last bin
-        f = (k / (mag.size - 1)) * (sr / 2.0)
-        cutoffs.append(float(f))
-
-    if not cutoffs:
-        return sr, dur, None
-    return sr, dur, float(statistics.median(cutoffs))
-
-def map_to_target_sr(cutoff_hz, sr_in):
-    if cutoff_hz is None:
-        return int(sr_in)
-    eff = max(0.0, cutoff_hz + HEADROOM_HZ)
-    if eff <= 22050:
-        tgt = 44100
-    elif eff <= 24000:
-        tgt = 48000
-    elif eff <= 48000:
-        tgt = 96000
-    else:
-        tgt = 192000
-    return int(min(tgt, sr_in))  # never upsample
-
-tracks = []
-for f in files:
-    sr_in, _, bits_in = audio_meta(f)
-    sr, dur, cutoff = analyze_cutoff(f)
-    if sr is None:
-        continue
-    tgt_sr = map_to_target_sr(cutoff, sr)
-    tracks.append({
-        "file": f,
-        "sr_in": int(sr_in) if sr_in else None,
-        "bits_in": int(bits_in) if bits_in else None,
-        "cutoff_hz": cutoff,
-        "tgt_sr": tgt_sr,
-    })
-
-if not tracks:
-    print(json.dumps({"error": "no_tracks"}))
-    sys.exit(0)
-
-album_sr = max(t["tgt_sr"] for t in tracks if t["tgt_sr"] is not None)
-
-bits_list = [t["bits_in"] for t in tracks if t["bits_in"]]
-album_bits = 24
-if bits_list:
-    album_bits = min(24, max(bits_list))
-    album_bits = 16 if album_bits < 16 else album_bits
-
-print(json.dumps({"album_sr": int(album_sr), "album_bits": int(album_bits), "tracks": tracks}))
-PY
+if ! "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" analyze "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "${FILES[@]}" >"$tmpjson"; then
+  echo "Analysis failed." >&2
+  rm -f "$tmpjson"
+  exit 1
+fi
 
 if ! grep -q '"album_sr"' "$tmpjson"; then
   echo "Analysis failed." >&2

@@ -1,8 +1,9 @@
 BASH_BIN ?= $(shell if [ -x /opt/homebrew/bin/bash ]; then echo /opt/homebrew/bin/bash; elif [ -x /usr/local/bin/bash ]; then echo /usr/local/bin/bash; else command -v bash; fi)
 SHELL := $(BASH_BIN)
 
-PYTHON_BIN ?= python3
-PREFIX ?= $(HOME)/bin
+AUDL_PYTHON_BIN ?= python3
+ENV_AUDL_BIN_PATH := $(shell if [ -f .env ]; then set -a; . ./.env >/dev/null 2>&1; printf '%s' "$${AUDL_BIN_PATH:-}"; fi)
+PREFIX ?= $(if $(AUDL_BIN_PATH),$(AUDL_BIN_PATH),$(if $(ENV_AUDL_BIN_PATH),$(ENV_AUDL_BIN_PATH),$(HOME)/.local/bin))
 # Installable scripts: all bin/*.sh scripts (includes audlint-analyze.sh, audlint-value.sh, audlint-spectre.sh).
 INSTALLABLE_SCRIPTS := $(sort $(notdir $(wildcard bin/*.sh)))
 INSTALLABLE_ALIASES := \
@@ -33,7 +34,7 @@ help:
 		"  test-legacy  Run migrated legacy test suite in test/legacy" \
 		"  test         Run test-core + test-legacy" \
 		"  check        Run lint + fmt-check + bash5-check + test" \
-		"  db-reset     Truncate album_quality + scan_roadmap (requires LIBRARY_DB env var)"
+		"  db-reset     Truncate album_quality + scan_roadmap (requires AUDL_DB_PATH env var)"
 
 install:
 	@mkdir -p "$(PREFIX)"
@@ -75,25 +76,25 @@ bash5-check:
 	@test/sh/bash5_consistency.sh lib/sh bin
 
 test-core:
-	@$(PYTHON_BIN) -m unittest discover -s test -p 'test_*.py'
+	@$(AUDL_PYTHON_BIN) -m unittest discover -s test -p 'test_*.py'
 
 test-spectre:
-	@$(PYTHON_BIN) -m unittest discover -s test -p 'test_spectre_cli_smoke.py' -v
+	@$(AUDL_PYTHON_BIN) -m unittest discover -s test -p 'test_spectre_cli_smoke.py' -v
 
 test-legacy:
-	@$(PYTHON_BIN) -m unittest discover -s test/legacy -p 'test_*.py'
+	@$(AUDL_PYTHON_BIN) -m unittest discover -s test/legacy -p 'test_*.py'
 
 test: test-core test-legacy
 
 check: lint fmt-check bash5-check test
 
 db-reset:
-	@test -n "$(LIBRARY_DB)" || { echo "Error: LIBRARY_DB env var is required. Run: LIBRARY_DB=/path/to/library.sqlite make db-reset"; exit 1; }
-	@test -f "$(LIBRARY_DB)" || { echo "Error: database not found: $(LIBRARY_DB)"; exit 1; }
-	@printf "Resetting album_quality and scan_roadmap in: %s\n" "$(LIBRARY_DB)"
+	@test -n "$(AUDL_DB_PATH)" || { echo "Error: AUDL_DB_PATH env var is required. Run: AUDL_DB_PATH=/path/to/library.sqlite make db-reset"; exit 1; }
+	@test -f "$(AUDL_DB_PATH)" || { echo "Error: database not found: $(AUDL_DB_PATH)"; exit 1; }
+	@printf "Resetting album_quality and scan_roadmap in: %s\n" "$(AUDL_DB_PATH)"
 	@printf "This will clear all scan results for a full rescan. Continue? [y/N] " && read ans && [ "$${ans}" = "y" ]
-	@sqlite3 "$(LIBRARY_DB)" "DELETE FROM album_quality; DELETE FROM scan_roadmap;" && \
+	@sqlite3 "$(AUDL_DB_PATH)" "DELETE FROM album_quality; DELETE FROM scan_roadmap;" && \
 		printf "Reset complete. album_quality and scan_roadmap are now empty.\n"
-	@_db_slug=$$(printf '%s' "$(LIBRARY_DB)" | tr -cs 'A-Za-z0-9_-' '_'); \
+	@_db_slug=$$(printf '%s' "$(AUDL_DB_PATH)" | tr -cs 'A-Za-z0-9_-' '_'); \
 		_cache="$${TMPDIR:-/tmp}/audlint_task_last_discovery_$${_db_slug}"; \
 		rm -f "$$_cache" && printf "Discovery cache cleared: %s\n" "$$_cache" || true

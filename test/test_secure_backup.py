@@ -22,15 +22,15 @@ class SecureBackupTests(unittest.TestCase):
         )
 
     def test_mode_off_skips_backup_guard(self) -> None:
-        proc = self._run_shell('unset SRC LIB_BACKUP; SECURE_MODE=0; secure_backup_album_tracks_once "/missing" "test"; echo "rc:$?"')
+        proc = self._run_shell('unset AUDL_PATH AUDL_BACKUP_PATH; AUDL_PARANOIA_MODE=0; secure_backup_album_tracks_once "/missing" "test"; echo "rc:$?"')
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertIn("rc:0", proc.stdout)
 
     def test_mode_on_requires_config(self) -> None:
-        proc = self._run_shell('unset SRC LIB_BACKUP; SECURE_MODE=1; secure_backup_album_tracks_once "/missing" "test"; echo "rc:$?"')
+        proc = self._run_shell('unset AUDL_PATH AUDL_BACKUP_PATH; AUDL_PARANOIA_MODE=1; secure_backup_album_tracks_once "/missing" "test"; echo "rc:$?"')
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertIn("rc:1", proc.stdout)
-        self.assertIn("SRC is not set", proc.stderr)
+        self.assertIn("AUDL_PATH is not set", proc.stderr)
 
     def test_backup_tracks_to_relative_album_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -46,7 +46,7 @@ class SecureBackupTests(unittest.TestCase):
             (album / "cover.jpg").write_bytes(b"img")
 
             cmd = (
-                f'SECURE_MODE=1; SRC="{src_root}"; LIB_BACKUP="{backup_root}"; '
+                f'AUDL_PARANOIA_MODE=1; AUDL_PATH="{src_root}"; AUDL_BACKUP_PATH="{backup_root}"; '
                 f'secure_backup_album_tracks_once "{album}" "test-copy"; echo "rc:$?"'
             )
             proc = self._run_shell(cmd)
@@ -70,7 +70,7 @@ class SecureBackupTests(unittest.TestCase):
             (album / "01 - Material Girl.flac").write_bytes(b"a")
 
             cmd_first = (
-                f'SECURE_MODE=1; SRC="{src_root}"; LIB_BACKUP="{backup_root}"; '
+                f'AUDL_PARANOIA_MODE=1; AUDL_PATH="{src_root}"; AUDL_BACKUP_PATH="{backup_root}"; '
                 f'secure_backup_album_tracks_once "{album}" "first"; echo "rc:$?"'
             )
             first = self._run_shell(cmd_first)
@@ -80,7 +80,7 @@ class SecureBackupTests(unittest.TestCase):
             (album / "03 - New Song.flac").write_bytes(b"new")
 
             cmd_second = (
-                f'SECURE_MODE=1; SRC="{src_root}"; LIB_BACKUP="{backup_root}"; '
+                f'AUDL_PARANOIA_MODE=1; AUDL_PATH="{src_root}"; AUDL_BACKUP_PATH="{backup_root}"; '
                 f'secure_backup_album_tracks_once "{album}" "second"; echo "rc:$?"'
             )
             second = self._run_shell(cmd_second)

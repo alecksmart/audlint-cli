@@ -28,6 +28,8 @@ audio_collect_files() {
       *.dff
       *.wv
       *.ape
+      *.dts
+      *.dca
       *.mp4
       *.mp3
       *.aac
@@ -46,6 +48,8 @@ audio_collect_files() {
       "$dir"/*.dff
       "$dir"/*.wv
       "$dir"/*.ape
+      "$dir"/*.dts
+      "$dir"/*.dca
       "$dir"/*.mp4
       "$dir"/*.mp3
       "$dir"/*.aac
@@ -79,6 +83,8 @@ audio_find_iname_args() {
     '-o' '-iname' '*.dff' \
     '-o' '-iname' '*.wv' \
     '-o' '-iname' '*.ape' \
+    '-o' '-iname' '*.dts' \
+    '-o' '-iname' '*.dca' \
     '-o' '-iname' '*.mp4' \
     '-o' '-iname' '*.mp3' \
     '-o' '-iname' '*.aac' \
@@ -93,17 +99,258 @@ audio_has_files() {
   ((${#files[@]} > 0))
 }
 
+_audio_ffprobe_meta_cache_init() {
+  if ! declare -p AUDIO_FFPROBE_META_CACHE >/dev/null 2>&1; then
+    declare -gA AUDIO_FFPROBE_META_CACHE=()
+  fi
+}
+
+_audio_ffprobe_meta_key() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g;s/__*/_/g;s/^_//;s/_$//'
+}
+
+_audio_ffprobe_meta_parse() {
+  local raw="$1"
+  local section="" line key val normalized_key
+
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    case "$line" in
+    "[STREAM]"*) section="stream" ;;
+    "[/STREAM]"*) section="" ;;
+    "[FORMAT]"*) section="format" ;;
+    "[/FORMAT]"*) section="" ;;
+    TAG:*=*)
+      key="${line%%=*}"
+      val="${line#*=}"
+      normalized_key="$(_audio_ffprobe_meta_key "${key#TAG:}")"
+      [[ -n "$normalized_key" ]] || continue
+      [[ -n "$section" ]] || section="format"
+      printf '%s_tag_%s=%s\n' "$section" "$normalized_key" "$val"
+      ;;
+    *=*)
+      [[ -n "$section" ]] || continue
+      key="${line%%=*}"
+      val="${line#*=}"
+      normalized_key="$(_audio_ffprobe_meta_key "$key")"
+      [[ -n "$normalized_key" ]] || continue
+      printf '%s_%s=%s\n' "$section" "$normalized_key" "$val"
+      ;;
+    esac
+  done <<< "$raw"
+}
+
+audio_ffprobe_meta_dump() {
+  local in="$1"
+  local raw normalized
+
+  _audio_ffprobe_meta_cache_init
+  if [[ -v AUDIO_FFPROBE_META_CACHE["$in"] ]]; then
+    printf '%s' "${AUDIO_FFPROBE_META_CACHE["$in"]}"
+    return 0
+  fi
+
+  raw="$(
+    ffprobe -v error -select_streams a:0 \
+      -show_entries stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics \
+      -of default=noprint_wrappers=0:nokey=0 \
+      "$in" </dev/null 2>/dev/null || true
+  )"
+  normalized="$(_audio_ffprobe_meta_parse "$raw")"
+  AUDIO_FFPROBE_META_CACHE["$in"]="$normalized"
+  printf '%s' "$normalized"
+}
+
+audio_ffprobe_meta_prime() {
+  audio_ffprobe_meta_dump "$1" >/dev/null
+}
+
+audio_ffprobe_meta_get() {
+  local in="$1"
+  local key="$2"
+  local normalized_key metadata line
+
+  normalized_key="$(_audio_ffprobe_meta_key "$key")"
+  [[ -n "$normalized_key" ]] || {
+    printf ''
+    return 0
+  }
+
+  metadata="$(audio_ffprobe_meta_dump "$in")"
+  while IFS= read -r line; do
+    [[ "$line" == "$normalized_key="* ]] || continue
+    printf '%s' "${line#*=}"
+    return 0
+  done <<< "$metadata"
+  printf ''
+}
+
+audio_probe_tag_value() {
+  local in="$1"
+  local tag_key
+  tag_key="$(_audio_ffprobe_meta_key "${2:-}")"
+  [[ -n "$tag_key" ]] || {
+    printf ''
+    return 0
+  }
+  audio_ffprobe_meta_get "$in" "format_tag_${tag_key}"
+}
+
 audio_probe_sample_rate_hz() {
   local in="$1"
   local sr
-  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  sr="${sr%%,*}"
+  audio_ffprobe_meta_prime "$in"
+  sr="$(audio_ffprobe_meta_get "$in" "stream_sample_rate")"
   sr="$(printf '%s' "$sr" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   if [[ "$sr" =~ ^[0-9]+$ ]] && ((sr > 0)); then
     printf '%s' "$sr"
   else
     printf '0'
   fi
+}
+
+audio_sample_fmt_to_bits() {
+  case "${1:-}" in
+  s16 | s16p) printf '16' ;;
+  s24 | s24p) printf '24' ;;
+  s32 | s32p | flt | fltp) printf '32' ;;
+  dbl | dblp) printf '64' ;;
+  *) printf '0' ;;
+  esac
+}
+
+audio_sample_fmt_to_bit_label() {
+  case "${1:-}" in
+  s16 | s16p) printf '16' ;;
+  s24 | s24p) printf '24' ;;
+  s32 | s32p) printf '32' ;;
+  flt | fltp) printf '32f' ;;
+  dbl | dblp) printf '64f' ;;
+  *) printf '' ;;
+  esac
+}
+
+audio_is_dsd_codec() {
+  case "${1:-}" in
+  dsd*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+audio_normalize_source_bit_depth() {
+  local codec="${1:-}"
+  local bit_depth="${2:-}"
+
+  if audio_is_dsd_codec "$codec"; then
+    # DSD can probe as 1-bit; keep the PCM recode ceiling at 24-bit.
+    if [[ ! "$bit_depth" =~ ^[0-9]+$ ]] || ((bit_depth < 24)); then
+      printf '24'
+      return 0
+    fi
+  fi
+
+  if [[ "$bit_depth" =~ ^[0-9]+$ ]] && ((bit_depth > 0)); then
+    printf '%s' "$bit_depth"
+  else
+    printf '0'
+  fi
+}
+
+audio_probe_bit_depth_label() {
+  local in="$1"
+  local codec="${2:-}"
+  local bps bps_fallback sfmt label
+
+  audio_ffprobe_meta_prime "$in"
+  if [[ -z "$codec" ]]; then
+    codec="$(audio_codec_name "$in" || true)"
+  fi
+
+  bps="$(audio_ffprobe_meta_get "$in" "stream_bits_per_raw_sample")"
+  bps="$(printf '%s' "$bps" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ "$bps" =~ ^[0-9]+$ ]] && ((bps > 0)); then
+    label="$bps"
+  else
+    bps_fallback="$(audio_ffprobe_meta_get "$in" "stream_bits_per_sample")"
+    bps_fallback="$(printf '%s' "$bps_fallback" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [[ "$bps_fallback" =~ ^[0-9]+$ ]] && ((bps_fallback > 0)); then
+      label="$bps_fallback"
+    else
+      sfmt="$(audio_ffprobe_meta_get "$in" "stream_sample_fmt")"
+      sfmt="$(printf '%s' "$sfmt" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      label="$(audio_sample_fmt_to_bit_label "$sfmt")"
+    fi
+  fi
+
+  if audio_is_dsd_codec "$codec"; then
+    if [[ ! "$label" =~ ^[0-9]+$ ]] || ((label < 24)); then
+      label="24"
+    fi
+  fi
+
+  printf '%s' "$label"
+}
+
+audio_probe_bitrate_bps() {
+  local in="$1"
+  local raw
+  audio_ffprobe_meta_prime "$in"
+  raw="$(audio_ffprobe_meta_get "$in" "stream_bit_rate")"
+  raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" == "0" ]]; then
+    raw="$(audio_ffprobe_meta_get "$in" "format_bit_rate")"
+    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  fi
+  if [[ "$raw" =~ ^[0-9]+$ ]] && ((raw > 0)); then
+    printf '%s\n' "$raw"
+  else
+    printf '0\n'
+  fi
+}
+
+audio_probe_duration_seconds() {
+  local in="$1"
+  local dur
+  audio_ffprobe_meta_prime "$in"
+  dur="$(audio_ffprobe_meta_get "$in" "format_duration")"
+  dur="$(printf '%s' "$dur" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ "$dur" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    printf '%s\n' "$dur"
+  else
+    printf '0\n'
+  fi
+}
+
+audio_probe_channels() {
+  local in="$1"
+  local ch
+  audio_ffprobe_meta_prime "$in"
+  ch="$(audio_ffprobe_meta_get "$in" "stream_channels")"
+  ch="$(printf '%s' "$ch" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ "$ch" =~ ^[0-9]+$ ]] && ((ch > 0)); then
+    printf '%s\n' "$ch"
+  else
+    printf '0\n'
+  fi
+}
+
+audio_probe_bit_depth_bits() {
+  local in="$1"
+  local codec="${2:-}"
+  local label
+
+  label="$(audio_probe_bit_depth_label "$in" "$codec")"
+  case "$label" in
+  32f) printf '32' ;;
+  64f) printf '64' ;;
+  *)
+    if [[ "$label" =~ ^[0-9]+$ ]] && ((label > 0)); then
+      printf '%s' "$label"
+    else
+      printf '0'
+    fi
+    ;;
+  esac
 }
 
 audio_dsd_max_pcm_profile() {
@@ -144,11 +391,47 @@ audio_float_ge() {
   awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>=b)}'
 }
 
+audio_float_abs_ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN{if (a < 0) a = -a; if (b < 0) b = -b; exit !(a>=b)}'
+}
+
+audio_db_gain_label() {
+  local gain="$1"
+  local precision="${2:-3}"
+  awk -v v="$gain" -v p="$precision" 'BEGIN{
+    n = v + 0
+    fmt = sprintf("%%.%df", p)
+    if (n >= 0) fmt = "+" fmt
+    printf fmt, n
+  }'
+}
+
+audio_auto_boost_target_true_peak_db() {
+  # Resampling can introduce a few new overs after source-side true-peak analysis,
+  # so boosted recodes keep a conservative finished-file ceiling.
+  printf '%s' '-1.5'
+}
+
+audio_auto_boost_min_apply_db() {
+  printf '%s' '0.3'
+}
+
 audio_probe_true_peak_db() {
   local in="$1"
-  local out peak
+  local out peak line tail
   out="$(ffmpeg -hide_banner -nostdin -i "$in" -af "loudnorm=I=-23:TP=-1.5:LRA=11:print_format=summary" -vn -sn -dn -f null /dev/null 2>&1 || true)"
-  peak="$(printf '%s\n' "$out" | awk '/Input True Peak/ {print $(NF-1); exit}')"
+  peak=""
+  while IFS= read -r line; do
+    case "$line" in
+    *"Input True Peak:"*)
+      tail="${line#*Input True Peak:}"
+      # Parse the first token after the marker (e.g. "-2.0" from "-2.0 dBTP")
+      # without awk, so UTF-8 filenames in ffmpeg logs do not break parsing.
+      read -r peak _ <<<"$tail"
+      break
+      ;;
+    esac
+  done <<<"$out"
   peak="${peak#+}"
   if audio_is_float_number "$peak"; then
     printf '%s' "$peak"
@@ -286,8 +569,8 @@ audio_codec_name() {
   local codec codec_tag codec_long profile raw_meta ext detail audio_stream_idx base
   local has_stream_detail=0
   local -a detail_parts=()
-  codec="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  codec="${codec%%,*}"
+  audio_ffprobe_meta_prime "$in"
+  codec="$(audio_ffprobe_meta_get "$in" "stream_codec_name")"
   codec="$(printf '%s' "$codec" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   case "$codec" in
   mpegaudio | mpeg_audio | mpeg_layer_3 | mpeg1layer3) codec="mp3" ;;
@@ -302,19 +585,18 @@ audio_codec_name() {
     return 0
   fi
 
-  audio_stream_idx="$(ffprobe -v error -select_streams a:0 -show_entries stream=index -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  audio_stream_idx="${audio_stream_idx%%,*}"
+  audio_stream_idx="$(audio_ffprobe_meta_get "$in" "stream_index")"
   audio_stream_idx="$(printf '%s' "$audio_stream_idx" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   if [[ ! "$audio_stream_idx" =~ ^[0-9]+$ ]]; then
     printf ''
     return 0
   fi
 
-  raw_meta="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_tag_string,codec_long_name,profile -of default=noprint_wrappers=1:nokey=0 "$in" </dev/null 2>/dev/null || true)"
+  raw_meta="$(audio_ffprobe_meta_dump "$in")"
   [[ -n "$raw_meta" ]] || { printf ''; return 0; }
-  codec_tag="$(printf '%s\n' "$raw_meta" | awk -F'=' '/^codec_tag_string=/{print $2; exit}')"
-  codec_long="$(printf '%s\n' "$raw_meta" | awk -F'=' '/^codec_long_name=/{print $2; exit}')"
-  profile="$(printf '%s\n' "$raw_meta" | awk -F'=' '/^profile=/{print $2; exit}')"
+  codec_tag="$(audio_ffprobe_meta_get "$in" "stream_codec_tag_string")"
+  codec_long="$(audio_ffprobe_meta_get "$in" "stream_codec_long_name")"
+  profile="$(audio_ffprobe_meta_get "$in" "stream_profile")"
 
   codec_tag="$(printf '%s' "$codec_tag" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[^a-z0-9._+-]/_/g;s/__*/_/g')"
   codec_long="$(printf '%s' "$codec_long" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]]\+/_/g;s/[^a-z0-9._+-]/_/g;s/__*/_/g')"
@@ -376,29 +658,13 @@ audio_is_lossy_codec() {
 
 # Returns the source quality label for a single audio file in canonical format
 # SR_HZ/BITS (e.g. "44100/24", "96000/24", "44100/32f").
-# Uses three separate ffprobe fields: sample_rate, bits_per_raw_sample, sample_fmt.
+# Uses the shared ffprobe-based probe path so recode planners and UI agree.
 audio_source_quality_label() {
   local in="$1"
-  local sr bps sfmt bit_label normalized
-  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  bps="$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  sfmt="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_fmt -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  sr="${sr%%,*}"
-  bps="${bps%%,*}"
-  sfmt="${sfmt%%,*}"
-  bit_label=""
-  if [[ -n "$bps" && "$bps" != "N/A" ]]; then
-    bit_label="$bps"
-  else
-    case "$sfmt" in
-    s16 | s16p) bit_label="16" ;;
-    s24 | s24p) bit_label="24" ;;
-    s32 | s32p) bit_label="32" ;;
-    flt | fltp) bit_label="32f" ;;
-    dbl | dblp) bit_label="64f" ;;
-    *) bit_label="" ;;
-    esac
-  fi
+  local sr bit_label normalized codec
+  sr="$(audio_probe_sample_rate_hz "$in")"
+  codec="$(audio_codec_name "$in" || true)"
+  bit_label="$(audio_probe_bit_depth_label "$in" "$codec")"
   if [[ "$sr" =~ ^[0-9]+$ ]] && ((sr > 0)) && [[ -n "$bit_label" ]]; then
     normalized="$(profile_normalize "${sr}/${bit_label}" || true)"
     if [[ -n "$normalized" ]]; then
@@ -433,6 +699,71 @@ audio_album_source_quality_label() {
   done
   [[ -n "$first" ]] || first="?"
   printf '%s\n' "$first"
+}
+
+audio_album_summary() {
+  local files_var="$1"
+  local out_var="${2:-AUDIO_ALBUM_SUMMARY}"
+  # shellcheck disable=SC2178
+  local -n files_ref="$files_var"
+  # shellcheck disable=SC2178
+  local -n out_ref="$out_var"
+  local first_quality="" first_codec="" quality codec bitrate_bps bitrate_kbps
+  local total_kbps=0 bitrate_count=0 has_lossy=0 file_count=0
+  local f
+
+  out_ref=()
+  out_ref[source_quality]="?"
+  out_ref[bitrate_label]=""
+  out_ref[codec_name]="unknown"
+  out_ref[has_lossy]="0"
+  out_ref[file_count]="0"
+
+  for f in "${files_ref[@]}"; do
+    audio_ffprobe_meta_prime "$f"
+    quality="$(audio_source_quality_label "$f" || true)"
+    [[ -n "$quality" ]] || quality="?"
+    codec="$(audio_codec_name "$f" || true)"
+    [[ -n "$codec" ]] || codec="unknown"
+    bitrate_bps="$(audio_probe_bitrate_bps "$f" || true)"
+    bitrate_kbps=0
+    if [[ "$bitrate_bps" =~ ^[0-9]+$ ]] && ((bitrate_bps > 0)); then
+      bitrate_kbps=$(((bitrate_bps + 500) / 1000))
+      total_kbps=$((total_kbps + bitrate_kbps))
+      bitrate_count=$((bitrate_count + 1))
+    fi
+    if audio_is_lossy_codec "$codec"; then
+      has_lossy=1
+    fi
+
+    if [[ -z "$first_quality" ]]; then
+      first_quality="$quality"
+    elif [[ "$quality" != "$first_quality" ]]; then
+      first_quality="mixed"
+    fi
+
+    if [[ -z "$first_codec" ]]; then
+      first_codec="$codec"
+    elif [[ "$codec" != "$first_codec" ]]; then
+      first_codec="mixed"
+    fi
+
+    file_count=$((file_count + 1))
+  done
+
+  if ((file_count > 0)); then
+    out_ref[file_count]="$file_count"
+  fi
+  if [[ -n "$first_quality" ]]; then
+    out_ref[source_quality]="$first_quality"
+  fi
+  if [[ -n "$first_codec" ]]; then
+    out_ref[codec_name]="$first_codec"
+  fi
+  if ((bitrate_count > 0)); then
+    out_ref[bitrate_label]="$(((total_kbps + (bitrate_count / 2)) / bitrate_count))k"
+  fi
+  out_ref[has_lossy]="$has_lossy"
 }
 
 # Remove tab, newline, and carriage-return characters from a string (for safe
@@ -503,7 +834,7 @@ audvalue_scan_album() {
   [[ -x "$audlint_value_bin" ]] || return 1
 
   # AUDLINT_VALUE_PYTHON_BIN allows tests to override python3 for JSON parsing
-  # independently of PYTHON_BIN.
+  # independently of AUDL_PYTHON_BIN.
   local python_bin="${AUDLINT_VALUE_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
   local json_out
   json_out="$(GENRE_PROFILE="$genre_profile" "$audlint_value_bin" "$album_dir" 2>/dev/null)" || return 1

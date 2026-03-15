@@ -291,7 +291,6 @@ check_bin_required ffmpeg
 check_bin_required ffprobe
 check_bin_required sqlite3
 check_bin_required rsync
-check_bin_required ssh
 check_bin_optional sox
 check_bin_optional soxi
 check_bin_optional metaflac
@@ -307,74 +306,58 @@ check_bin_optional tail
 note ""
 note "Environment checks"
 note "------------------"
-check_env_required SRC
-check_env_required LIBRARY_DB
-check_env_required PYTHON_BIN
-check_env_required TABLE_PYTHON_BIN
-check_env_required AUDLINT_CRON_INTERVAL_MIN
-check_env_required AUDLINT_TASK_MAX_ALBUMS
-check_env_required AUDLINT_TASK_MAX_TIME_SEC
-check_env_required AUDLINT_TASK_LOG
-check_env_required CUE2FLAC_OUTPUT_DIR
-check_env_optional DST_USER_HOST
-check_env_optional DST_PATH
-check_env_optional SSH_KEY
-check_env_optional MEDIA_PLAYER_PATH
-check_env_optional LASTFM_API_KEY
+check_env_required AUDL_PATH
+check_env_required AUDL_DB_PATH
+check_env_required AUDL_PYTHON_BIN
+check_env_required AUDL_CRON_INTERVAL_MIN
+check_env_required AUDL_TASK_MAX_ALBUMS
+check_env_required AUDL_TASK_MAX_TIME_SEC
+check_env_required AUDL_TASK_LOG_PATH
+check_env_required AUDL_CUE2FLAC_OUTPUT_DIR
+check_env_optional AUDL_SYNC_DEST
+check_env_optional AUDL_MEDIA_PLAYER_PATH
+check_env_optional AUDL_LASTFM_API_KEY
 
-check_int_ge AUDLINT_CRON_INTERVAL_MIN 1
-check_int_ge AUDLINT_TASK_MAX_ALBUMS 1
-check_int_ge AUDLINT_TASK_MAX_TIME_SEC 0
+check_int_ge AUDL_CRON_INTERVAL_MIN 1
+check_int_ge AUDL_TASK_MAX_ALBUMS 1
+check_int_ge AUDL_TASK_MAX_TIME_SEC 0
 
-if [[ -n "${SRC:-}" ]]; then
-  check_dir_readable "path:SRC" "${SRC:-}"
+if [[ -n "${AUDL_PATH:-}" ]]; then
+  check_dir_readable "path:AUDL_PATH" "${AUDL_PATH:-}"
 fi
-if [[ -n "${LIBRARY_DB:-}" ]]; then
-  check_path_parent_writable "path:LIBRARY_DB" "${LIBRARY_DB:-}"
-  db_expanded="$(env_expand_value "${LIBRARY_DB:-}")"
+if [[ -n "${AUDL_DB_PATH:-}" ]]; then
+  check_path_parent_writable "path:AUDL_DB_PATH" "${AUDL_DB_PATH:-}"
+  db_expanded="$(env_expand_value "${AUDL_DB_PATH:-}")"
   if [[ -f "$db_expanded" ]]; then
     if [[ -r "$db_expanded" ]]; then
-      report_ok "path:LIBRARY_DB file" "$db_expanded"
+      report_ok "path:AUDL_DB_PATH file" "$db_expanded"
     else
-      report_fail "path:LIBRARY_DB file" "not readable: $db_expanded"
+      report_fail "path:AUDL_DB_PATH file" "not readable: $db_expanded"
     fi
   else
-    report_warn "path:LIBRARY_DB file" "does not exist yet: $db_expanded"
+    report_warn "path:AUDL_DB_PATH file" "does not exist yet: $db_expanded"
   fi
 fi
-if [[ -n "${AUDLINT_TASK_LOG:-}" ]]; then
-  check_path_parent_writable "path:AUDLINT_TASK_LOG" "${AUDLINT_TASK_LOG:-}"
+if [[ -n "${AUDL_TASK_LOG_PATH:-}" ]]; then
+  check_path_parent_writable "path:AUDL_TASK_LOG_PATH" "${AUDL_TASK_LOG_PATH:-}"
 fi
-if [[ -n "${CUE2FLAC_OUTPUT_DIR:-}" ]]; then
-  check_dir_writable "path:CUE2FLAC_OUTPUT_DIR" "${CUE2FLAC_OUTPUT_DIR:-}"
+if [[ -n "${AUDL_CUE2FLAC_OUTPUT_DIR:-}" ]]; then
+  check_dir_writable "path:AUDL_CUE2FLAC_OUTPUT_DIR" "${AUDL_CUE2FLAC_OUTPUT_DIR:-}"
 fi
-if [[ -n "${MEDIA_PLAYER_PATH:-}" ]]; then
-  check_dir_readable "path:MEDIA_PLAYER_PATH" "${MEDIA_PLAYER_PATH:-}"
+if [[ -n "${AUDL_SYNC_DEST:-}" ]]; then
+  check_dir_writable "path:AUDL_SYNC_DEST" "${AUDL_SYNC_DEST:-}"
 fi
-
-if [[ -n "${DST_USER_HOST:-}" && -z "${DST_PATH:-}" ]]; then
-  report_fail "env:DST_PATH" "required when DST_USER_HOST is set"
-fi
-if [[ -n "${DST_USER_HOST:-}" ]]; then
-  check_file_readable_if_set "path:SSH_KEY" "${SSH_KEY:-}"
-elif [[ -n "${DST_PATH:-}" || -n "${SSH_KEY:-}" ]]; then
-  report_warn "sync env" "DST_PATH/SSH_KEY set without DST_USER_HOST"
+if [[ -n "${AUDL_MEDIA_PLAYER_PATH:-}" ]]; then
+  check_dir_readable "path:AUDL_MEDIA_PLAYER_PATH" "${AUDL_MEDIA_PLAYER_PATH:-}"
 fi
 
-if [[ -n "${PYTHON_BIN:-}" ]]; then
-  if has_bin "$PYTHON_BIN"; then
-    report_ok "python:PYTHON_BIN" "$(command -v "$PYTHON_BIN")"
-    check_python_import "$PYTHON_BIN" numpy "python:numpy"
+if [[ -n "${AUDL_PYTHON_BIN:-}" ]]; then
+  if has_bin "$AUDL_PYTHON_BIN"; then
+    report_ok "python:AUDL_PYTHON_BIN" "$(command -v "$AUDL_PYTHON_BIN")"
+    check_python_import "$AUDL_PYTHON_BIN" numpy "python:numpy"
+    check_python_import "$AUDL_PYTHON_BIN" rich "python:rich"
   else
-    report_fail "python:PYTHON_BIN" "command not found: $PYTHON_BIN"
-  fi
-fi
-if [[ -n "${TABLE_PYTHON_BIN:-}" ]]; then
-  if has_bin "$TABLE_PYTHON_BIN"; then
-    report_ok "python:TABLE_PYTHON_BIN" "$(command -v "$TABLE_PYTHON_BIN")"
-    check_python_import "$TABLE_PYTHON_BIN" rich "python:rich"
-  else
-    report_fail "python:TABLE_PYTHON_BIN" "command not found: $TABLE_PYTHON_BIN"
+    report_fail "python:AUDL_PYTHON_BIN" "command not found: $AUDL_PYTHON_BIN"
   fi
 fi
 

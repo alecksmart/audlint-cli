@@ -19,6 +19,9 @@ ENV_FILE="$SCRIPT_DIR/.env"
 
 FORCE=0
 DRY_RUN=0
+PRINT_INSTALL_GUIDE=0
+OS_FAMILY_OVERRIDE=""
+DISTRO_ID_OVERRIDE=""
 
 detect_os_family() {
 	local uname_s
@@ -39,95 +42,159 @@ detect_linux_distro_id() {
 	printf '%s' "$distro"
 }
 
-print_dependency_guidance() {
-	local -a missing_bins=("$@")
-	((${#missing_bins[@]} > 0)) || return 0
+resolve_os_family() {
+	if [[ -n "$OS_FAMILY_OVERRIDE" ]]; then
+		printf '%s' "$OS_FAMILY_OVERRIDE"
+		return 0
+	fi
+	detect_os_family
+}
 
+resolve_linux_distro_id() {
+	if [[ -n "$DISTRO_ID_OVERRIDE" ]]; then
+		printf '%s' "$DISTRO_ID_OVERRIDE"
+		return 0
+	fi
+	detect_linux_distro_id
+}
+
+set_platform_override() {
+	local raw="${1:-}"
+	case "${raw,,}" in
+	macos | darwin)
+		OS_FAMILY_OVERRIDE="macos"
+		DISTRO_ID_OVERRIDE=""
+		;;
+	debian | ubuntu | fedora)
+		OS_FAMILY_OVERRIDE="linux"
+		DISTRO_ID_OVERRIDE="${raw,,}"
+		;;
+	linux)
+		OS_FAMILY_OVERRIDE="linux"
+		DISTRO_ID_OVERRIDE="unknown"
+		;;
+	*)
+		echo "Error: unsupported platform override: $raw" >&2
+		return 1
+		;;
+	esac
+}
+
+print_install_guide() {
+	local py_bin="${1:-python3}"
+	shift || true
+	local -a missing_bins=("$@")
 	local os_family distro_id
-	os_family="$(detect_os_family)"
+	os_family="$(resolve_os_family)"
 	printf '\nDependency install guidance:\n'
 	if [[ "$os_family" == "linux" ]]; then
-		distro_id="$(detect_linux_distro_id)"
+		distro_id="$(resolve_linux_distro_id)"
 		case "$distro_id" in
 		ubuntu | debian)
 			printf '  Debian/Ubuntu:\n'
 			printf '    sudo apt update\n'
-			printf '    sudo apt install -y bash ffmpeg sox flac sqlite3 rsync openssh-client cron python3 python3-pip\n'
-			printf '    python3 -m pip install --user dr14meter\n'
+			printf '    sudo apt install -y bash sqlite3 ffmpeg sox flac rsync cron tesseract-ocr python3 python3-pip zip\n'
+			printf '    %s -m pip install --user numpy opencv-python pytesseract rich dr14meter\n' "$py_bin"
 			printf '    sudo systemctl enable --now cron\n'
 			;;
 		fedora)
 			printf '  Fedora:\n'
-			printf '    sudo dnf install -y bash ffmpeg sox flac sqlite rsync openssh-clients cronie python3 python3-pip\n'
-			printf '    python3 -m pip install --user dr14meter\n'
+			printf '    sudo dnf install -y bash sqlite ffmpeg sox flac rsync cronie tesseract python3 python3-pip zip\n'
+			printf '    %s -m pip install --user numpy opencv-python pytesseract rich dr14meter\n' "$py_bin"
 			printf '    sudo systemctl enable --now crond\n'
 			;;
 		*)
-			printf '  Linux (%s): install missing tools with your package manager.\n' "$distro_id"
-			printf '  Required: bash ffmpeg sox flac sqlite3 rsync ssh crontab python3 + dr14meter\n'
+			printf '  Linux (%s): install the equivalent of:\n' "$distro_id"
+			printf '    system packages: bash sqlite3 ffmpeg sox flac rsync crontab tesseract python3 python3-pip zip\n'
+			printf '    python packages: numpy opencv-python pytesseract rich dr14meter\n'
 			;;
 		esac
 	elif [[ "$os_family" == "macos" ]]; then
 		printf '  macOS (Homebrew):\n'
-		printf '    brew install bash ffmpeg sox flac sqlite rsync openssh\n'
-		printf '    python3 -m pip install --user dr14meter\n'
+		printf '    brew install bash sqlite ffmpeg sox flac rsync tesseract python\n'
+		printf '    %s -m pip install --user numpy opencv-python pytesseract rich dr14meter\n' "$py_bin"
 	else
 		printf '  Unknown platform: install required tools manually.\n'
+		printf '    system packages: bash sqlite3 ffmpeg sox flac rsync crontab tesseract python3 python3-pip zip\n'
+		printf '    python packages: numpy opencv-python pytesseract rich dr14meter\n'
 	fi
-	printf '  Missing detected in this run: %s\n' "${missing_bins[*]}"
+	if ((${#missing_bins[@]} > 0)); then
+		printf '  Missing detected in this run: %s\n' "${missing_bins[*]}"
+	fi
 }
 
-print_spectre_optional_guidance() {
-	local py_bin="$1"
-	local os_family distro_id
-	os_family="$(detect_os_family)"
-	printf '\nOptional install guidance (audlint-spectre.sh only):\n'
-	if [[ "$os_family" == "linux" ]]; then
-		distro_id="$(detect_linux_distro_id)"
-		case "$distro_id" in
-		ubuntu | debian)
-			printf '  Debian/Ubuntu:\n'
-			printf '    sudo apt update\n'
-			printf '    sudo apt install -y tesseract-ocr\n'
-			;;
-		fedora)
-			printf '  Fedora:\n'
-			printf '    sudo dnf install -y tesseract\n'
-			;;
-		*)
-			printf '  Linux (%s): install tesseract with your package manager.\n' "$distro_id"
-			;;
-		esac
-	elif [[ "$os_family" == "macos" ]]; then
-		printf '  macOS (Homebrew):\n'
-		printf '    brew install tesseract\n'
+default_audl_python_bin() {
+	if [[ "$(resolve_os_family)" == "linux" ]]; then
+		printf '/usr/bin/python3'
 	else
-		printf '  Unknown platform: install tesseract manually.\n'
+		printf 'python3'
 	fi
-	printf '  Python packages:\n'
-	printf '    %s -m pip install opencv-python numpy pytesseract\n' "$py_bin"
 }
 
 show_help() {
 	cat <<'EOF'
 Usage:
   install.sh [--force] [--dry-run]
+  install.sh --print-install-guide [--platform <macos|linux|debian|ubuntu|fedora>]
 
 Description:
   Prompt for configuration values and generate .env in the project root.
 
 Options:
-  --force     Overwrite existing .env.
-  --dry-run   Print generated .env content to stdout; do not write.
+  --force                Overwrite existing .env.
+  --dry-run              Print generated .env content to stdout; do not write.
+  --print-install-guide  Print dependency install commands for the selected platform and exit.
+  --platform             Override platform detection for --print-install-guide.
 EOF
 }
 
 expand_value() {
 	local raw="$1"
-	# Safely expand $HOME and ~ only; no eval on arbitrary user input.
+	local out=""
+	local ch=""
+	local next=""
+	local rest=""
+	local var_name=""
+	local i=0
+	local len=0
+
+	# Support shell-style paths in prompts without eval/command substitution.
 	raw="${raw/#\~/$HOME}"
-	raw="${raw//\$HOME/$HOME}"
-	printf '%s' "$raw"
+	len=${#raw}
+	while ((i < len)); do
+		ch="${raw:i:1}"
+		if [[ "$ch" == '$' ]]; then
+			next="${raw:i+1:1}"
+			if [[ "$next" == '{' ]]; then
+				rest="${raw:i+2}"
+				if [[ "$rest" =~ ^([A-Za-z_][A-Za-z0-9_]*)\} ]]; then
+					var_name="${BASH_REMATCH[1]}"
+					if [[ -v "$var_name" ]]; then
+						out+="${!var_name}"
+					else
+						out+="\${$var_name}"
+					fi
+					i=$((i + ${#var_name} + 3))
+					continue
+				fi
+			elif [[ "$next" =~ [A-Za-z_] ]]; then
+				rest="${raw:i+1}"
+				if [[ "$rest" =~ ^([A-Za-z_][A-Za-z0-9_]*) ]]; then
+					var_name="${BASH_REMATCH[1]}"
+					if [[ -v "$var_name" ]]; then
+						out+="${!var_name}"
+					else
+						out+="\$${var_name}"
+					fi
+					i=$((i + ${#var_name} + 1))
+					continue
+				fi
+			fi
+		fi
+		out+="$ch"
+		i=$((i + 1))
+	done
+	printf '%s' "$out"
 }
 
 prompt_required() {
@@ -152,6 +219,19 @@ prompt_optional() {
 	local input=""
 	printf '%s (optional): ' "$prompt"
 	IFS= read -r input || exit 1
+	printf -v "$out_var" '%s' "$input"
+}
+
+prompt_with_default() {
+	local prompt="$1"
+	local out_var="$2"
+	local default_value="$3"
+	local input=""
+	printf '%s [%s]: ' "$prompt" "$default_value"
+	IFS= read -r input || exit 1
+	if [[ -z "$input" ]]; then
+		input="$default_value"
+	fi
 	printf -v "$out_var" '%s' "$input"
 }
 
@@ -197,15 +277,15 @@ validate_db_path() {
 	expanded="$(expand_value "$raw")"
 	parent="$(dirname "$expanded")"
 	if [[ ! -d "$parent" ]]; then
-		echo "Invalid LIBRARY_DB: parent directory does not exist: $parent" >&2
+		echo "Invalid AUDL_DB_PATH: parent directory does not exist: $parent" >&2
 		return 1
 	fi
 	if [[ -e "$expanded" && ! -r "$expanded" ]]; then
-		echo "Invalid LIBRARY_DB: file exists but is not readable: $expanded" >&2
+		echo "Invalid AUDL_DB_PATH: file exists but is not readable: $expanded" >&2
 		return 1
 	fi
 	if [[ ! -e "$expanded" && ! -w "$parent" ]]; then
-		echo "Invalid LIBRARY_DB: file does not exist and parent is not writable: $parent" >&2
+		echo "Invalid AUDL_DB_PATH: file does not exist and parent is not writable: $parent" >&2
 		return 1
 	fi
 	return 0
@@ -259,7 +339,44 @@ validate_optional_media_path() {
 	local expanded
 	expanded="$(expand_value "$raw")"
 	if [[ ! -d "$expanded" ]]; then
-		echo "Invalid MEDIA_PLAYER_PATH: directory does not exist: $expanded" >&2
+		echo "Invalid AUDL_MEDIA_PLAYER_PATH: directory does not exist: $expanded" >&2
+		return 1
+	fi
+	return 0
+}
+
+validate_optional_writable_dir() {
+	local raw="$1"
+	local label="${2:-directory}"
+	[[ -n "$raw" ]] || return 0
+	local expanded
+	expanded="$(expand_value "$raw")"
+	if [[ ! -d "$expanded" ]]; then
+		echo "Invalid $label: directory does not exist: $expanded" >&2
+		return 1
+	fi
+	if [[ ! -w "$expanded" ]]; then
+		echo "Invalid $label: directory is not writable: $expanded" >&2
+		return 1
+	fi
+	return 0
+}
+
+validate_dir_or_creatable_parent() {
+	local raw="$1"
+	local label="${2:-directory}"
+	local expanded parent
+	expanded="$(expand_value "$raw")"
+	if [[ -e "$expanded" && ! -d "$expanded" ]]; then
+		echo "Invalid $label: path exists but is not a directory: $expanded" >&2
+		return 1
+	fi
+	if [[ -d "$expanded" ]]; then
+		return 0
+	fi
+	parent="$(dirname "$expanded")"
+	if [[ ! -d "$parent" ]]; then
+		echo "Invalid $label: parent directory does not exist: $parent" >&2
 		return 1
 	fi
 	return 0
@@ -370,50 +487,57 @@ prompt_optional_until_valid_label() {
 	done
 }
 
+prompt_with_default_until_valid_label() {
+	local prompt="$1"
+	local out_var="$2"
+	local default_value="$3"
+	local validator="$4"
+	local label="$5"
+	local value=""
+	while true; do
+		prompt_with_default "$prompt" value "$default_value"
+		if "$validator" "$value" "$label"; then
+			printf -v "$out_var" '%s' "$value"
+			return 0
+		fi
+	done
+}
+
 render_env() {
 	cat <<EOF
-SRC="$SRC"
-LIBRARY_DB="$LIBRARY_DB"
-DST_USER_HOST="$DST_USER_HOST"
-DST_PATH="$DST_PATH"
-SSH_KEY="$SSH_KEY"
-PYTHON_BIN="$PYTHON_BIN"
-TABLE_PYTHON_BIN="$TABLE_PYTHON_BIN"
-MEDIA_PLAYER_PATH="$MEDIA_PLAYER_PATH"
-LASTFM_API_KEY="$LASTFM_API_KEY"
-<<<<<<< HEAD
-QTY_SEEK_MAX_ALBUMS=$QTY_SEEK_MAX_ALBUMS
-QTY_SEEK_LOG="$QTY_SEEK_LOG"
-=======
-SECURE_MODE=$SECURE_MODE
-LIB_BACKUP="$LIB_BACKUP"
-AUDLINT_CRON_INTERVAL_MIN=$AUDLINT_CRON_INTERVAL_MIN
-AUDLINT_TASK_MAX_ALBUMS=$AUDLINT_TASK_MAX_ALBUMS
-AUDLINT_TASK_MAX_TIME_SEC=$AUDLINT_TASK_MAX_TIME_SEC
-AUDLINT_TASK_LOG="$AUDLINT_TASK_LOG"
->>>>>>> develop
-CUE2FLAC_OUTPUT_DIR="$CUE2FLAC_OUTPUT_DIR"
+AUDL_BIN_PATH="$AUDL_BIN_PATH"
+AUDL_PATH="$AUDL_PATH"
+AUDL_DB_PATH="$AUDL_DB_PATH"
+AUDL_CACHE_PATH="$AUDL_CACHE_PATH"
+AUDL_SYNC_DEST="$AUDL_SYNC_DEST"
+AUDL_PYTHON_BIN="$AUDL_PYTHON_BIN"
+AUDL_MEDIA_PLAYER_PATH="$AUDL_MEDIA_PLAYER_PATH"
+AUDL_LASTFM_API_KEY="$AUDL_LASTFM_API_KEY"
+AUDL_PARANOIA_MODE=$AUDL_PARANOIA_MODE
+AUDL_BACKUP_PATH="$AUDL_BACKUP_PATH"
+AUDL_CRON_INTERVAL_MIN=$AUDL_CRON_INTERVAL_MIN
+AUDL_TASK_MAX_ALBUMS=$AUDL_TASK_MAX_ALBUMS
+AUDL_TASK_MAX_TIME_SEC=$AUDL_TASK_MAX_TIME_SEC
+AUDL_TASK_LOG_PATH="$AUDL_TASK_LOG_PATH"
+AUDL_CUE2FLAC_OUTPUT_DIR="$AUDL_CUE2FLAC_OUTPUT_DIR"
+AUDL_HIDE_SUPPORT_GREETER=$AUDL_HIDE_SUPPORT_GREETER
 EOF
 }
 
 sanity_check() {
 	local ok=1
 	printf '\n--- Sanity check ---\n'
-	printf 'Platform: %s' "$(detect_os_family)"
-	if [[ "$(detect_os_family)" == "linux" ]]; then
-		printf ' (%s)' "$(detect_linux_distro_id)"
+	printf 'Platform: %s' "$(resolve_os_family)"
+	if [[ "$(resolve_os_family)" == "linux" ]]; then
+		printf ' (%s)' "$(resolve_linux_distro_id)"
 	fi
 	printf '\n'
 
 	# Required system binaries
 	# sox/soxi: sox_ng recommended (handles ALAC/AAC duration in M4A containers)
 	local bin
-<<<<<<< HEAD
-	for bin in sqlite3 ffmpeg ffprobe sox metaflac rsync ssh; do
-=======
 	local -a missing_required=()
-	for bin in sqlite3 ffmpeg ffprobe sox soxi metaflac dr14meter rsync ssh crontab; do
->>>>>>> develop
+	for bin in sqlite3 ffmpeg ffprobe sox soxi metaflac dr14meter rsync crontab zip; do
 		if command -v "$bin" >/dev/null 2>&1; then
 			printf 'OK      %s (%s)\n' "$bin" "$(command -v "$bin")"
 		else
@@ -425,12 +549,19 @@ sanity_check() {
 
 	# Python binary from prompt
 	local py_expanded
-	py_expanded="$(expand_value "$PYTHON_BIN")"
+	py_expanded="$(expand_value "$AUDL_PYTHON_BIN")"
+	local bin_path_expanded
+	bin_path_expanded="$(expand_value "$AUDL_BIN_PATH")"
 	if command -v "$py_expanded" >/dev/null 2>&1 || [[ -x "$py_expanded" ]]; then
-		printf 'OK      PYTHON_BIN (%s)\n' "$py_expanded"
+		printf 'OK      AUDL_PYTHON_BIN (%s)\n' "$py_expanded"
 	else
-		printf 'MISSING PYTHON_BIN: %s\n' "$py_expanded"
+		printf 'MISSING AUDL_PYTHON_BIN: %s\n' "$py_expanded"
 		ok=0
+	fi
+	if [[ -d "$bin_path_expanded" ]]; then
+		printf 'OK      AUDL_BIN_PATH (%s)\n' "$bin_path_expanded"
+	else
+		printf 'INFO    AUDL_BIN_PATH will be created on install (%s)\n' "$bin_path_expanded"
 	fi
 
 	# Optional tag-writer tools
@@ -463,23 +594,21 @@ sanity_check() {
 			fi
 		done
 	else
-		printf 'absent  python modules check skipped (PYTHON_BIN unavailable)\n'
+		printf 'absent  python modules check skipped (AUDL_PYTHON_BIN unavailable)\n'
 		missing_spectre+=("python_bin_unavailable")
 	fi
 
 	if ((${#missing_spectre[@]} > 0)); then
 		printf 'NOTE    audlint-spectre.sh optional deps missing: %s\n' "${missing_spectre[*]}"
-		print_spectre_optional_guidance "$py_expanded"
 	fi
 
-	# SSH key if provided
-	if [[ -n "$SSH_KEY" ]]; then
-		local sk_expanded
-		sk_expanded="$(expand_value "$SSH_KEY")"
-		if [[ -f "$sk_expanded" && -r "$sk_expanded" ]]; then
-			printf '\nOK      SSH_KEY (%s)\n' "$sk_expanded"
+	if [[ -n "$AUDL_SYNC_DEST" ]]; then
+		local sync_dest_expanded
+		sync_dest_expanded="$(expand_value "$AUDL_SYNC_DEST")"
+		if [[ -d "$sync_dest_expanded" && -w "$sync_dest_expanded" ]]; then
+			printf '\nOK      AUDL_SYNC_DEST (%s)\n' "$sync_dest_expanded"
 		else
-			printf '\nWARN    SSH_KEY not found: %s\n' "$sk_expanded"
+			printf '\nWARN    AUDL_SYNC_DEST missing or not writable: %s\n' "$sync_dest_expanded"
 		fi
 	fi
 
@@ -489,9 +618,19 @@ sanity_check() {
 	else
 		printf 'Verdict: NOT READY — missing required dependencies above.\n'
 		printf '         .env will still be written; fix missing tools before running.\n'
-		print_dependency_guidance "${missing_required[@]}"
 	fi
-	printf '--------------------\n'
+	if ((${#missing_required[@]} > 0 || ${#missing_spectre[@]} > 0)); then
+		local -a guidance_missing=()
+		local item
+		for item in "${missing_required[@]}"; do
+			guidance_missing+=("$item")
+		done
+		for item in "${missing_spectre[@]}"; do
+			guidance_missing+=("$item")
+		done
+		print_install_guide "$py_expanded" "${guidance_missing[@]}"
+	fi
+	printf -- '--------------------\n'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -501,6 +640,17 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--dry-run)
 		DRY_RUN=1
+		;;
+	--print-install-guide)
+		PRINT_INSTALL_GUIDE=1
+		;;
+	--platform)
+		shift
+		[[ $# -gt 0 ]] || {
+			echo "Error: --platform requires a value." >&2
+			exit 2
+		}
+		set_platform_override "$1" || exit 2
 		;;
 	-h | --help)
 		show_help
@@ -515,6 +665,11 @@ while [[ $# -gt 0 ]]; do
 	shift
 done
 
+if [[ "$PRINT_INSTALL_GUIDE" == "1" ]]; then
+	print_install_guide "python3"
+	exit 0
+fi
+
 if [[ -f "$ENV_FILE" && "$FORCE" != "1" && "$DRY_RUN" != "1" ]]; then
 	echo "Error: $ENV_FILE already exists. Use --force to overwrite." >&2
 	exit 1
@@ -524,33 +679,43 @@ echo "Enter .env values."
 echo "Use literals or shell-style paths (for example \$HOME/...)."
 echo
 
-prompt_until_valid_label "SRC (library root directory)" SRC validate_existing_dir "SRC"
-export SRC
-prompt_until_valid "LIBRARY_DB path" LIBRARY_DB validate_db_path
+DEFAULT_AUDL_BIN_PATH="${AUDL_BIN_PATH:-\$HOME/.local/bin}"
+DEFAULT_AUDL_PATH="${AUDL_PATH:-/Volumes/Music/Library}"
+DEFAULT_AUDL_SYNC_DEST="${AUDL_SYNC_DEST:-\$HOME/Desktop/Music}"
+DEFAULT_AUDL_MEDIA_PLAYER_PATH="${AUDL_MEDIA_PLAYER_PATH:-/Volumes/Music}"
+DEFAULT_AUDL_PARANOIA_MODE="${AUDL_PARANOIA_MODE:-0}"
+DEFAULT_AUDL_BACKUP_PATH="${AUDL_BACKUP_PATH:-/Volumes/Music/Backup}"
+DEFAULT_AUDL_CRON_INTERVAL_MIN="${AUDL_CRON_INTERVAL_MIN:-20}"
+DEFAULT_AUDL_TASK_MAX_ALBUMS="${AUDL_TASK_MAX_ALBUMS:-30}"
+DEFAULT_AUDL_TASK_MAX_TIME_SEC="${AUDL_TASK_MAX_TIME_SEC:-1080}"
+DEFAULT_AUDL_TASK_LOG_PATH="${AUDL_TASK_LOG_PATH:-\$HOME/audlint-task.log}"
+DEFAULT_AUDL_CUE2FLAC_OUTPUT_DIR="${AUDL_CUE2FLAC_OUTPUT_DIR:-/Volumes/Music/Encoded}"
+DEFAULT_AUDL_HIDE_SUPPORT_GREETER="${AUDL_HIDE_SUPPORT_GREETER:-0}"
+DEFAULT_AUDL_PYTHON_BIN="${AUDL_PYTHON_BIN:-$(default_audl_python_bin)}"
 
-prompt_optional "DST_USER_HOST (for sync action, e.g. user@host)" DST_USER_HOST
-prompt_optional "DST_PATH (remote destination path)" DST_PATH
-prompt_optional_until_valid_label "SSH_KEY path" SSH_KEY validate_optional_file_readable "SSH_KEY"
+prompt_with_default_until_valid_label "AUDL_BIN_PATH (installed audlint bin directory)" AUDL_BIN_PATH "$DEFAULT_AUDL_BIN_PATH" validate_dir_or_creatable_parent "AUDL_BIN_PATH"
+prompt_with_default_until_valid_label "AUDL_PATH (library root directory)" AUDL_PATH "$DEFAULT_AUDL_PATH" validate_existing_dir "AUDL_PATH"
+export AUDL_PATH
+DEFAULT_AUDL_DB_PATH="${AUDL_DB_PATH:-\$AUDL_PATH/library.sqlite}"
+prompt_with_default_until_valid_label "AUDL_DB_PATH path" AUDL_DB_PATH "$DEFAULT_AUDL_DB_PATH" validate_db_path "AUDL_DB_PATH"
+AUDL_CACHE_PATH="${AUDL_CACHE_PATH:-\$AUDL_PATH/library.cache}"
 
-prompt_until_valid_label "PYTHON_BIN (command or absolute path)" PYTHON_BIN validate_bin "PYTHON_BIN"
-TABLE_PYTHON_BIN="$PYTHON_BIN"
+prompt_with_default_until_valid_label "AUDL_SYNC_DEST (mounted sync destination path)" AUDL_SYNC_DEST "$DEFAULT_AUDL_SYNC_DEST" validate_optional_writable_dir "AUDL_SYNC_DEST"
 
-prompt_optional_until_valid "MEDIA_PLAYER_PATH (local mount path)" MEDIA_PLAYER_PATH validate_optional_media_path
-prompt_optional "LASTFM_API_KEY" LASTFM_API_KEY
+prompt_with_default_until_valid_label "AUDL_PYTHON_BIN (command or absolute path)" AUDL_PYTHON_BIN "$DEFAULT_AUDL_PYTHON_BIN" validate_bin "AUDL_PYTHON_BIN"
 
-<<<<<<< HEAD
-prompt_until_valid_label "QTY_SEEK_MAX_ALBUMS" QTY_SEEK_MAX_ALBUMS validate_int_ge_1 "QTY_SEEK_MAX_ALBUMS"
-prompt_until_valid "QTY_SEEK_LOG path" QTY_SEEK_LOG validate_log_path
-=======
-prompt_until_valid_label "SECURE_MODE (0|1)" SECURE_MODE validate_secure_mode "SECURE_MODE"
-prompt_until_valid_label "LIB_BACKUP (backup root directory)" LIB_BACKUP validate_existing_writable_dir "LIB_BACKUP"
+prompt_with_default_until_valid_label "AUDL_MEDIA_PLAYER_PATH (local mount path)" AUDL_MEDIA_PLAYER_PATH "$DEFAULT_AUDL_MEDIA_PLAYER_PATH" validate_optional_media_path "AUDL_MEDIA_PLAYER_PATH"
+prompt_optional "AUDL_LASTFM_API_KEY" AUDL_LASTFM_API_KEY
 
-prompt_until_valid_label "AUDLINT_CRON_INTERVAL_MIN" AUDLINT_CRON_INTERVAL_MIN validate_int_ge_1 "AUDLINT_CRON_INTERVAL_MIN"
-prompt_until_valid_label "AUDLINT_TASK_MAX_ALBUMS" AUDLINT_TASK_MAX_ALBUMS validate_int_ge_1 "AUDLINT_TASK_MAX_ALBUMS"
-prompt_until_valid_label "AUDLINT_TASK_MAX_TIME_SEC" AUDLINT_TASK_MAX_TIME_SEC validate_int_ge_0 "AUDLINT_TASK_MAX_TIME_SEC"
-prompt_until_valid_label "AUDLINT_TASK_LOG path" AUDLINT_TASK_LOG validate_log_path "AUDLINT_TASK_LOG"
->>>>>>> develop
-prompt_until_valid_label "CUE2FLAC_OUTPUT_DIR (output root for cue2flac splits)" CUE2FLAC_OUTPUT_DIR validate_existing_dir "CUE2FLAC_OUTPUT_DIR"
+prompt_with_default_until_valid_label "AUDL_PARANOIA_MODE (0|1)" AUDL_PARANOIA_MODE "$DEFAULT_AUDL_PARANOIA_MODE" validate_secure_mode "AUDL_PARANOIA_MODE"
+prompt_with_default_until_valid_label "AUDL_BACKUP_PATH (backup root directory)" AUDL_BACKUP_PATH "$DEFAULT_AUDL_BACKUP_PATH" validate_existing_writable_dir "AUDL_BACKUP_PATH"
+
+prompt_with_default_until_valid_label "AUDL_CRON_INTERVAL_MIN" AUDL_CRON_INTERVAL_MIN "$DEFAULT_AUDL_CRON_INTERVAL_MIN" validate_int_ge_1 "AUDL_CRON_INTERVAL_MIN"
+prompt_with_default_until_valid_label "AUDL_TASK_MAX_ALBUMS" AUDL_TASK_MAX_ALBUMS "$DEFAULT_AUDL_TASK_MAX_ALBUMS" validate_int_ge_1 "AUDL_TASK_MAX_ALBUMS"
+prompt_with_default_until_valid_label "AUDL_TASK_MAX_TIME_SEC" AUDL_TASK_MAX_TIME_SEC "$DEFAULT_AUDL_TASK_MAX_TIME_SEC" validate_int_ge_0 "AUDL_TASK_MAX_TIME_SEC"
+prompt_with_default_until_valid_label "AUDL_TASK_LOG_PATH path" AUDL_TASK_LOG_PATH "$DEFAULT_AUDL_TASK_LOG_PATH" validate_log_path "AUDL_TASK_LOG_PATH"
+prompt_with_default_until_valid_label "AUDL_CUE2FLAC_OUTPUT_DIR (output root for cue2flac splits)" AUDL_CUE2FLAC_OUTPUT_DIR "$DEFAULT_AUDL_CUE2FLAC_OUTPUT_DIR" validate_existing_dir "AUDL_CUE2FLAC_OUTPUT_DIR"
+AUDL_HIDE_SUPPORT_GREETER="$DEFAULT_AUDL_HIDE_SUPPORT_GREETER"
 
 sanity_check
 

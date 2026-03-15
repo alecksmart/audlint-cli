@@ -47,58 +47,35 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
         (self.src_dir / ".DS_Store").write_text("", encoding="utf-8")
         (self.src_dir / "._junk").write_text("", encoding="utf-8")
 
-        self.ssh_key = self.tmpdir / "id_rsa"
-        self.ssh_key.write_text("dummy", encoding="utf-8")
+        self.sync_dest = self.tmpdir / "mounted-dest"
+        self.sync_dest.mkdir(parents=True, exist_ok=True)
 
         self.env_path = self.work_dir / ".env"
-        self._write_env(include_ssh_key=True)
+        self._write_env(sync_dest=self.sync_dest)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _write_env(self, include_ssh_key: bool) -> None:
-        ssh_line = f'SSH_KEY="{self.ssh_key}"\n' if include_ssh_key else ""
+    def _write_env(self, sync_dest: Path) -> None:
         self.env_path.write_text(
             textwrap.dedent(
                 f"""\
-                SRC="{self.src_dir}"
-                DST_USER_HOST="user@example"
-                DST_PATH="/srv/music"
-                {ssh_line}"""
+                AUDL_PATH="{self.src_dir}"
+                AUDL_SYNC_DEST="{sync_dest}"
+                """
             ),
             encoding="utf-8",
         )
 
     def _install_stubs(self) -> None:
         _write_exec(
-            self.bin_dir / "ssh",
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$SSH_LOG\"\n[[ \"$*\" == *\"test -d\"* ]] && exit 1\nexit 0\n",
-        )
-        _write_exec(
             self.bin_dir / "rsync",
-            "#!/usr/bin/env bash\n"
-            "if [[ \"${1:-}\" == \"--help\" ]]; then\n"
-            "  case \"${RSYNC_HELP_MODE:-protect}\" in\n"
-            "    secluded) printf '%s\\n' 'rsync help --secluded-args';;\n"
-            "    none) printf '%s\\n' 'rsync help legacy';;\n"
-            "    *) printf '%s\\n' 'rsync help --protect-args';;\n"
-            "  esac\n"
-            "  exit 0\n"
-            "fi\n"
-            "printf '%s\\n' \"$*\" >> \"$RSYNC_LOG\"\n"
-            "if [[ \"${RSYNC_FAIL_ON_PROTECT_ARGS:-0}\" == \"1\" && \"$*\" == *\"--protect-args\"* ]]; then\n"
-            "  exit 1\n"
-            "fi\n"
-            "if [[ \"${RSYNC_FAIL_ON_SECLUDED_ARGS:-0}\" == \"1\" && \"$*\" == *\"--secluded-args\"* ]]; then\n"
-            "  exit 1\n"
-            "fi\n"
-            "exit 0\n",
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$RSYNC_LOG\"\nexit 0\n",
         )
 
     def _run(self, args, extra_env=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
-        env["SSH_LOG"] = str(self.tmpdir / "ssh.log")
         env["RSYNC_LOG"] = str(self.tmpdir / "rsync.log")
         env["NO_COLOR"] = "1"
         if extra_env:
@@ -121,7 +98,7 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
         self.assertNotEqual(bad_proc.returncode, 0)
         self.assertIn("Usage:", bad_proc.stderr)
 
-    def test_dry_run_debug_runs_with_stubbed_ssh_rsync(self) -> None:
+    def test_dry_run_debug_runs_with_stubbed_local_rsync(self) -> None:
         proc = self._run(["--dry-run", "--debug"])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Debug mode enabled", proc.stderr)
@@ -129,22 +106,48 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
 
         rsync_log = (self.tmpdir / "rsync.log").read_text(encoding="utf-8")
         self.assertIn("--dry-run", rsync_log)
-        self.assertIn("user@example:/srv/music/", rsync_log)
-
-        ssh_log = (self.tmpdir / "ssh.log").read_text(encoding="utf-8")
-        self.assertIn("test -d '/srv/music'", ssh_log)
+        self.assertIn("--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r", rsync_log)
+        self.assertIn(f"{self.sync_dest}/", rsync_log)
+        self.assertNotIn("@", rsync_log)
 
         self.assertFalse((self.src_dir / ".DS_Store").exists())
         self.assertFalse((self.src_dir / "._junk").exists())
 
-    def test_dry_run_without_ssh_key_uses_default_identity(self) -> None:
-        self._write_env(include_ssh_key=False)
+    def test_dry_run_allows_missing_destination_but_logs_it(self) -> None:
+        missing_dest = self.tmpdir / "missing-dest"
+        self._write_env(sync_dest=missing_dest)
+
         proc = self._run(["--dry-run"])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("SSH key: <default identity>", proc.stdout)
+        self.assertIn("Destination path does not exist (dry-run)", proc.stdout)
 
-        ssh_log = (self.tmpdir / "ssh.log").read_text(encoding="utf-8")
-        self.assertNotIn("-i ", ssh_log)
+        rsync_log = (self.tmpdir / "rsync.log").read_text(encoding="utf-8")
+        self.assertIn(f"{missing_dest}/", rsync_log)
+
+    def test_non_dry_run_creates_destination_and_syncs_to_local_path(self) -> None:
+        created_dest = self.tmpdir / "created-dest"
+        self._write_env(sync_dest=created_dest)
+
+        proc = self._run([])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue(created_dest.exists())
+
+        rsync_log = (self.tmpdir / "rsync.log").read_text(encoding="utf-8")
+        self.assertIn("--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r", rsync_log)
+        self.assertIn(f"{created_dest}/", rsync_log)
+
+    def test_non_dry_run_fails_when_destination_is_not_writable(self) -> None:
+        locked_dest = self.tmpdir / "locked-dest"
+        locked_dest.mkdir(parents=True, exist_ok=True)
+        locked_dest.chmod(0o555)
+        self._write_env(sync_dest=locked_dest)
+        try:
+            proc = self._run([])
+        finally:
+            locked_dest.chmod(0o755)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("is not writable", proc.stderr)
 
 
 if __name__ == "__main__":

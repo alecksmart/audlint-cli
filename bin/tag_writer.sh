@@ -29,6 +29,10 @@ if [[ -f "$_TW_SCRIPT_DIR/../lib/sh/secure_backup.sh" ]]; then
   # shellcheck source=/dev/null
   source "$_TW_SCRIPT_DIR/../lib/sh/secure_backup.sh"
 fi
+if [[ -f "$_TW_SCRIPT_DIR/../lib/sh/audio.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$_TW_SCRIPT_DIR/../lib/sh/audio.sh"
+fi
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -206,11 +210,7 @@ _tw_detect_format() {
   ext="${ext,,}"
   local codec=""
   if _tw_has_bin ffprobe; then
-    codec="$(ffprobe -v error -select_streams a:0 \
-      -show_entries stream=codec_name \
-      -of default=noprint_wrappers=1:nokey=1 \
-      "$file" </dev/null 2>/dev/null || true)"
-    codec="${codec%%,*}"
+    codec="$(audio_codec_name "$file" || true)"
   fi
   # Normalise codec name; fall back to extension.
   case "${codec,,}" in

@@ -1,20 +1,12 @@
-<<<<<<< HEAD
-#!/opt/homebrew/bin/bash
-# cue2flac.sh — Split a high-resolution audio file into per-track FLACs using a .cue sheet.
-#
-# Usage:
-#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--check-upscale] [--out <output_root>] [--dry-run] [--yes]
-=======
 #!/usr/bin/env bash
 # cue2flac.sh — Split a high-resolution audio file into per-track FLACs using a .cue sheet.
 #
 # Usage:
 #   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--help-profiles] [--check-upscale] [--out <output_root>] [--dry-run] [--yes]
->>>>>>> develop
 #
 # Input:  directory containing source audio + .cue, OR direct path to a .cue file.
-# Output: CUE2FLAC_OUTPUT_DIR/<Artist>/<Year> - <Album>/NN Track Title.flac
-#         (CUE2FLAC_OUTPUT_DIR loaded from .env, default: $HOME/Downloads/Encoded)
+# Output: AUDL_CUE2FLAC_OUTPUT_DIR/<Artist>/<Year> - <Album>/NN Track Title.flac
+#         (AUDL_CUE2FLAC_OUTPUT_DIR loaded from .env, default: $HOME/Downloads/Encoded)
 #
 # Splitting:     ffmpeg -ss/-t (sector-accurate timecodes from CUE INDEX 01)
 # Encoding:      encoder.sh abstraction (sox preferred, ffmpeg fallback)
@@ -23,13 +15,8 @@
 # Tagging:       metaflac --import-tags-from (explicit TAG=value from CUE metadata)
 # Formats:       FLAC, WAV (native sox); WavPack/APE/DSF/DFF (pre-convert to temp WAV via ffmpeg)
 # Multi-file:    CUE sheets with multiple FILE directives (e.g. vinyl Side A / Side B) are supported.
-<<<<<<< HEAD
-# --check-upscale: spectral bandwidth analysis via spectre_eval.py to detect fake hi-res;
-#                  auto-selects the recommended encode profile instead of defaulting to 192/24.
-=======
 # --check-upscale: spectral target analysis via audlint-analyze.sh;
 #                  auto-selects the recommended encode profile instead of defaulting to 192000/24.
->>>>>>> develop
 
 set -Eeuo pipefail
 
@@ -58,11 +45,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 # shellcheck source=/dev/null
-<<<<<<< HEAD
-=======
 source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
 # shellcheck source=/dev/null
->>>>>>> develop
 source "$BOOTSTRAP_DIR/../lib/sh/python.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
@@ -72,64 +56,40 @@ env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 ui_init_colors
 
-<<<<<<< HEAD
-PY_HELPER="${SCRIPT_DIR}/spectre_eval.py"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-=======
 AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$SCRIPT_DIR/audlint-analyze.sh}"
->>>>>>> develop
 
 require_bins ffmpeg ffprobe >/dev/null || exit 2
 
 # === DEFAULTS ===
 INPUT_ARG="."
-<<<<<<< HEAD
-DEFAULT_PROFILE="192/24"
-=======
 DEFAULT_PROFILE="192000/24"
->>>>>>> develop
 TARGET_PROFILE=""
 CHECK_UPSCALE=0
 OUTPUT_ROOT_ARG=""
 DRY_RUN=0
 ASSUME_YES=0
-SAFETY_MARGIN_DB="-1.0"
-MIN_APPLY_GAIN_DB="0.3"
+SAFETY_MARGIN_DB="$(audio_auto_boost_target_true_peak_db)"
+MIN_APPLY_GAIN_DB="$(audio_auto_boost_min_apply_db)"
 
-<<<<<<< HEAD
-usage() {
-=======
 show_help() {
->>>>>>> develop
   cat <<'EOF_HELP'
 Usage:
   cue2flac.sh [<dir>|<file.cue>] [options]
 
 Options:
-<<<<<<< HEAD
-  --profile <sr/bits>    Target encode profile (default: 192/24). No upscale. Mutually exclusive with --check-upscale.
-  --check-upscale        Run spectral analysis to detect fake hi-res and auto-select the best encode profile.
-=======
   --profile <sr/bits>    Target encode profile (default: 192000/24). No upscale. Mutually exclusive with --check-upscale.
   --help-profiles        Show accepted profile input forms and common targets.
   --check-upscale        Run audlint-analyze spectral target detection and auto-select the best encode profile.
->>>>>>> develop
-  --out <path>           Override CUE2FLAC_OUTPUT_DIR from .env.
+  --out <path>           Override AUDL_CUE2FLAC_OUTPUT_DIR from .env.
   --dry-run              Print plan and track list; no files written.
   --yes                  Skip confirmation prompt.
   -h, --help             Show this help.
 
 Input:  Directory containing audio + .cue, or direct path to .cue file.
-Output: <CUE2FLAC_OUTPUT_DIR>/<Artist>/<Year> - <Album>/NN Track Title.flac
+Output: <AUDL_CUE2FLAC_OUTPUT_DIR>/<Artist>/<Year> - <Album>/NN Track Title.flac
 EOF_HELP
 }
 
-<<<<<<< HEAD
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-  -h | --help)
-    usage
-=======
 show_help_profiles() {
   profile_print_help
   printf '\n'
@@ -137,6 +97,86 @@ show_help_profiles() {
   printf '\ncue2flac profile limits:\n'
   printf '  - Target bits accepted: 16, 24, 32\n'
   printf '  - Fuzzy inputs accepted; normalized internally before validation.\n'
+}
+
+# CUE FILE resolution priority when the referenced extension is wrong/missing.
+# Example: CUE says "album.wav" but only "album.ape" exists on disk.
+CUE_SOURCE_EXT_PRIORITY=(flac wav wv ape dsf dff)
+
+cue_resolve_source_file() {
+  local source_dir="$1"
+  local cue_ref="$2"
+  local candidate=""
+  local stem=""
+  local ext=""
+
+  [[ -n "$cue_ref" ]] || return 1
+
+  # Exact path first.
+  candidate="$source_dir/$cue_ref"
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Case-insensitive exact name match in source dir.
+  candidate="$(find "$source_dir" -maxdepth 1 -type f -iname "$cue_ref" | head -n 1 || true)"
+  if [[ -n "$candidate" && -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  # Extension fallback using the same basename in known source formats.
+  stem="$cue_ref"
+  if [[ "$cue_ref" == *.* ]]; then
+    stem="${cue_ref%.*}"
+  fi
+  [[ -n "$stem" ]] || return 1
+
+  for ext in "${CUE_SOURCE_EXT_PRIORITY[@]}"; do
+    candidate="$source_dir/$stem.$ext"
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    candidate="$(find "$source_dir" -maxdepth 1 -type f -iname "$stem.$ext" | head -n 1 || true)"
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+cue_count_resolvable_file_refs() {
+  local cue_path="$1"
+  local source_dir="$2"
+  local line ref
+  local total=0
+  local matched=0
+  local candidate=""
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*FILE[[:space:]]+ ]] || continue
+
+    ref=""
+    if [[ "$line" =~ ^[[:space:]]*FILE[[:space:]]+\"([^\"]+)\" ]]; then
+      ref="${BASH_REMATCH[1]}"
+    else
+      ref="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*FILE[[:space:]]+//; s/[[:space:]]+[[:alnum:]_]+[[:space:]]*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//')"
+    fi
+    [[ -n "$ref" ]] || continue
+
+    ((total += 1))
+    candidate="$(cue_resolve_source_file "$source_dir" "$ref" || true)"
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      ((matched += 1))
+    fi
+  done <"$cue_path"
+
+  printf '%s %s\n' "$matched" "$total"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -147,7 +187,6 @@ while [[ $# -gt 0 ]]; do
     ;;
   --help-profiles)
     show_help_profiles
->>>>>>> develop
     exit 0
     ;;
   --profile)
@@ -175,11 +214,7 @@ while [[ $# -gt 0 ]]; do
     ;;
   -*)
     echo "Error: unknown option: $1" >&2
-<<<<<<< HEAD
-    usage
-=======
     show_help >&2
->>>>>>> develop
     exit 2
     ;;
   *)
@@ -200,19 +235,32 @@ CUE_FILE=""
 SOURCE_DIR=""
 
 if [[ -f "$INPUT_ARG" && "${INPUT_ARG,,}" == *.cue ]]; then
-  CUE_FILE="$(realpath "$INPUT_ARG" 2>/dev/null || printf '%s' "$INPUT_ARG")"
+  CUE_FILE="$(path_resolve "$INPUT_ARG" 2>/dev/null || printf '%s' "$INPUT_ARG")"
   SOURCE_DIR="$(dirname "$CUE_FILE")"
 elif [[ -d "$INPUT_ARG" ]]; then
-  SOURCE_DIR="$(realpath "$INPUT_ARG" 2>/dev/null || printf '%s' "$INPUT_ARG")"
+  SOURCE_DIR="$(path_resolve "$INPUT_ARG" 2>/dev/null || printf '%s' "$INPUT_ARG")"
   mapfile -t _cue_candidates < <(find "$SOURCE_DIR" -maxdepth 1 -iname "*.cue" | sort || true)
   if ((${#_cue_candidates[@]} == 0)); then
     CUE_FILE=""
   elif ((${#_cue_candidates[@]} == 1)); then
     CUE_FILE="${_cue_candidates[0]}"
   else
-    echo "Error: multiple .cue files found in '$SOURCE_DIR'; specify one explicitly." >&2
-    printf '  %s\n' "${_cue_candidates[@]}" >&2
-    exit 2
+    declare -a _resolvable_candidates=()
+    for _candidate in "${_cue_candidates[@]}"; do
+      read -r _matched _total < <(cue_count_resolvable_file_refs "$_candidate" "$SOURCE_DIR")
+      if [[ "$_matched" =~ ^[0-9]+$ && "$_total" =~ ^[0-9]+$ ]] && ((_total > 0)) && ((_matched == _total)); then
+        _resolvable_candidates+=("$_candidate")
+      fi
+    done
+
+    if ((${#_resolvable_candidates[@]} == 1)); then
+      CUE_FILE="${_resolvable_candidates[0]}"
+      printf 'Auto-selected CUE: %s (unique candidate with resolvable FILE references)\n' "$CUE_FILE"
+    else
+      echo "Error: multiple .cue files found in '$SOURCE_DIR'; specify one explicitly." >&2
+      printf '  %s\n' "${_cue_candidates[@]}" >&2
+      exit 2
+    fi
   fi
 else
   echo "Error: '$INPUT_ARG' is not a directory or .cue file." >&2
@@ -224,22 +272,74 @@ if [[ -z "$CUE_FILE" || ! -f "$CUE_FILE" ]]; then
   exit 1
 fi
 
+cue_trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+cue_extract_line_value() {
+  local line="$1"
+  local directive="$2"
+  local value="${line%$'\r'}"
+  value="$(cue_trim_whitespace "$value")"
+  [[ "$value" == "$directive"* ]] || return 1
+  value="${value#"$directive"}"
+  value="$(cue_trim_whitespace "$value")"
+  if [[ "$value" == \"*\" ]]; then
+    value="${value#\"}"
+    value="${value%%\"*}"
+  fi
+  value="$(cue_trim_whitespace "$value")"
+  printf '%s' "$value"
+}
+
+cue_extract_file_key() {
+  local line="$1"
+  local value="${line%$'\r'}"
+  if [[ "$value" =~ ^[[:space:]]*FILE[[:space:]]+\"([^\"]+)\" ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  value="$(cue_extract_line_value "$value" "FILE" || true)"
+  if [[ "$value" =~ ^(.+)[[:space:]]+[[:alnum:]_]+$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  fi
+  value="$(cue_trim_whitespace "$value")"
+  printf '%s' "$value"
+}
+
 # === PARSE CUE: GLOBAL METADATA ===
 ALBUM=""
 DATE=""
 GENRE=""
 GLOBAL_ARTIST=""
-ALBUM="$(awk -F'"' '/^TITLE[[:space:]]/ {print $2; exit}' "$CUE_FILE")"
-DATE="$(awk -F'"' '/^REM[[:space:]]+DATE[[:space:]]/ {print $2; exit}' "$CUE_FILE")"
-if [[ -z "$DATE" ]]; then
-  DATE="$(awk -F'"' '/^REM[[:space:]]+YEAR[[:space:]]/ {print $2; exit}' "$CUE_FILE")"
-fi
-GLOBAL_ARTIST="$(awk -F'"' '/^PERFORMER[[:space:]]/ {print $2; exit}' "$CUE_FILE")"
-GENRE="$(awk -F'"' '/^REM[[:space:]]+GENRE[[:space:]]/ {print $2; exit}' "$CUE_FILE")"
+DATE_FROM_CUE=""
+YEAR_FROM_CUE=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%$'\r'}"
+  [[ "$line" =~ ^[[:space:]]*TRACK[[:space:]]+ ]] && break
+
+  if [[ -z "$ALBUM" && "$line" =~ ^TITLE[[:space:]]+ ]]; then
+    ALBUM="$(cue_extract_line_value "$line" "TITLE" || true)"
+  elif [[ -z "$GLOBAL_ARTIST" && "$line" =~ ^PERFORMER[[:space:]]+ ]]; then
+    GLOBAL_ARTIST="$(cue_extract_line_value "$line" "PERFORMER" || true)"
+  elif [[ -z "$GENRE" && "$line" =~ ^REM[[:space:]]+GENRE[[:space:]]+ ]]; then
+    GENRE="$(cue_extract_line_value "$line" "REM GENRE" || true)"
+  elif [[ -z "$DATE_FROM_CUE" && "$line" =~ ^REM[[:space:]]+DATE[[:space:]]+ ]]; then
+    DATE_FROM_CUE="$(cue_extract_line_value "$line" "REM DATE" || true)"
+  elif [[ -z "$YEAR_FROM_CUE" && "$line" =~ ^REM[[:space:]]+YEAR[[:space:]]+ ]]; then
+    YEAR_FROM_CUE="$(cue_extract_line_value "$line" "REM YEAR" || true)"
+  fi
+done <"$CUE_FILE"
+DATE="${DATE_FROM_CUE:-$YEAR_FROM_CUE}"
 
 # Extract 4-digit year from DATE (handles YYYY or YYYY-MM-DD)
 YEAR=""
 if [[ "$DATE" =~ ^([0-9]{4}) ]]; then
+  YEAR="${BASH_REMATCH[1]}"
+elif [[ "$YEAR_FROM_CUE" =~ ^([0-9]{4}) ]]; then
   YEAR="${BASH_REMATCH[1]}"
 else
   YEAR="YYYY"
@@ -261,13 +361,14 @@ _current_file_key=""
 current_track=0
 in_track=0
 _prev_track_in_file=0  # track number of the last track seen for the current FILE block
-while IFS= read -r line; do
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%$'\r'}"
   if [[ "$line" =~ ^[[:space:]]*FILE[[:space:]]+ ]]; then
     # Mark the previous track (last in its file block) before switching files
     if ((_prev_track_in_file > 0)); then
       TRACK_IS_LAST_IN_FILE[$_prev_track_in_file]=1
     fi
-    _current_file_key="$(printf '%s' "$line" | sed -n 's/.*FILE[[:space:]]*"\(.*\)".*/\1/p')"
+    _current_file_key="$(cue_extract_file_key "$line")"
     # Record unique file keys in order
     local_found=0
     for _k in "${CUE_FILE_KEYS[@]+"${CUE_FILE_KEYS[@]}"}"; do
@@ -284,13 +385,16 @@ while IFS= read -r line; do
     TRACK_IS_LAST_IN_FILE[$current_track]=0
     _prev_track_in_file=$current_track
   elif ((in_track == 1)) && [[ "$line" =~ ^[[:space:]]*TITLE[[:space:]] ]]; then
-    title=$(printf '%s' "$line" | sed -n 's/.*TITLE[[:space:]]*"\(.*\)"/\1/p')
+    title="$(cue_extract_line_value "$line" "TITLE" || true)"
     TITLES[$current_track]="$title"
   elif ((in_track == 1)) && [[ "$line" =~ ^[[:space:]]*PERFORMER[[:space:]] ]]; then
-    performer=$(printf '%s' "$line" | sed -n 's/.*PERFORMER[[:space:]]*"\(.*\)"/\1/p')
+    performer="$(cue_extract_line_value "$line" "PERFORMER" || true)"
     PERFORMERS[$current_track]="$performer"
-  elif ((in_track == 1)) && [[ "$line" =~ ^[[:space:]]*INDEX[[:space:]]+01[[:space:]]+([0-9]{1,2}:[0-9]{2}:[0-9]{2}) ]]; then
-    INDEXES[$current_track]="${BASH_REMATCH[1]}"
+  elif ((in_track == 1)) && [[ "$line" =~ ^[[:space:]]*[Ii][Nn][Dd][Ee][Xx][[:space:]]+([0-9]{1,2})[[:space:]]+([0-9]{1,3}:[0-9]{2}:[0-9]{2}) ]]; then
+    _idx_num="$((10#${BASH_REMATCH[1]}))"
+    if ((_idx_num == 1)); then
+      INDEXES[$current_track]="${BASH_REMATCH[2]}"
+    fi
   fi
 done <"$CUE_FILE"
 # Mark the very last track as last-in-file
@@ -312,11 +416,7 @@ fi
 # Map each CUE FILE key (basename) to its full path on disk.
 declare -A CUE_FILE_PATHS=()
 for _key in "${CUE_FILE_KEYS[@]}"; do
-  # Try exact basename match first, then case-insensitive search
-  _candidate="$SOURCE_DIR/$_key"
-  if [[ ! -f "$_candidate" ]]; then
-    _candidate="$(find "$SOURCE_DIR" -maxdepth 1 -iname "$_key" | head -n 1 || true)"
-  fi
+  _candidate="$(cue_resolve_source_file "$SOURCE_DIR" "$_key" || true)"
   if [[ -z "$_candidate" || ! -f "$_candidate" ]]; then
     echo "Error: audio file referenced in CUE not found: '$_key' (looked in '$SOURCE_DIR')" >&2
     exit 1
@@ -348,9 +448,37 @@ cue_index_to_seconds() {
 # Build start-second array
 declare -a TRACK_START_SEC=()
 for t in $(seq 1 "$TOTAL_TRACKS"); do
-  idx="${INDEXES[$t]:-00:00:00}"
+  idx="${INDEXES[$t]:-}"
+  if [[ -z "$idx" ]]; then
+    echo "Error: missing INDEX 01 time for track $t in '$CUE_FILE'." >&2
+    echo "       cue2flac requires INDEX 01 for every track to split safely." >&2
+    exit 1
+  fi
   TRACK_START_SEC[$t]="$(cue_index_to_seconds "$idx")"
 done
+
+# Validate per-file start times are strictly increasing, otherwise splitting can
+# produce negative durations and merged/garbled output.
+declare -A _prev_start_by_file=()
+declare -A _prev_track_by_file=()
+for t in $(seq 1 "$TOTAL_TRACKS"); do
+  _track_key="${TRACK_FILE_KEY[$t]:-${CUE_FILE_KEYS[0]}}"
+  _cur_start="${TRACK_START_SEC[$t]}"
+  _prev_start="${_prev_start_by_file[$_track_key]:-}"
+  if [[ -n "$_prev_start" ]]; then
+    _is_increasing="$(awk -v cur="$_cur_start" -v prev="$_prev_start" 'BEGIN{if ((cur+0) > (prev+0)) print 1; else print 0}')"
+    if [[ "$_is_increasing" != "1" ]]; then
+      _prev_track="${_prev_track_by_file[$_track_key]}"
+      echo "Error: non-increasing INDEX 01 timeline in '$CUE_FILE' for file '$_track_key'." >&2
+      echo "       track $_prev_track (${INDEXES[$_prev_track]}) -> track $t (${INDEXES[$t]})." >&2
+      echo "       Fix the CUE track INDEX values and retry." >&2
+      exit 1
+    fi
+  fi
+  _prev_start_by_file[$_track_key]="$_cur_start"
+  _prev_track_by_file[$_track_key]="$t"
+done
+unset _prev_start_by_file _prev_track_by_file _track_key _cur_start _prev_start _is_increasing _prev_track _idx_num
 
 # === SANITIZE PATH COMPONENT ===
 sanitize_path_component() {
@@ -359,7 +487,7 @@ sanitize_path_component() {
 }
 
 # === OUTPUT DIRECTORY ===
-OUTPUT_ROOT="${OUTPUT_ROOT_ARG:-${CUE2FLAC_OUTPUT_DIR:-$HOME/Downloads/Encoded}}"
+OUTPUT_ROOT="${OUTPUT_ROOT_ARG:-${AUDL_CUE2FLAC_OUTPUT_DIR:-$HOME/Downloads/Encoded}}"
 ARTIST_SAFE="$(sanitize_path_component "${GLOBAL_ARTIST:-Unknown Artist}")"
 ALBUM_SAFE="$(sanitize_path_component "${YEAR} - ${ALBUM:-Unknown Album}")"
 OUTPUT_DIR="$OUTPUT_ROOT/$ARTIST_SAFE/$ALBUM_SAFE"
@@ -376,26 +504,15 @@ _TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/cue2flac.XXXXXX")"
 # === PROFILE PARSING ===
 parse_profile() {
   local raw="$1"
-<<<<<<< HEAD
-  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
-  [[ "$raw" =~ ^([0-9]+([.][0-9]+)?)/([0-9]{1,2})$ ]] || return 1
-  local sr_part="${BASH_REMATCH[1]}"
-  local bits_part="${BASH_REMATCH[3]}"
-=======
   local normalized bits_part
   normalized="$(profile_normalize "$raw" || true)"
   [[ -n "$normalized" ]] || return 1
   bits_part="${normalized#*/}"
->>>>>>> develop
   case "$bits_part" in
   16 | 24 | 32) ;;
   *) return 1 ;;
   esac
-<<<<<<< HEAD
-  PARSED_SR_HZ="$(awk -v s="$sr_part" 'BEGIN{printf "%.0f", s*1000.0;}')"
-=======
   PARSED_SR_HZ="${normalized%%/*}"
->>>>>>> develop
   PARSED_BITS="$bits_part"
 }
 
@@ -403,11 +520,7 @@ PARSED_SR_HZ=0
 PARSED_BITS=0
 profile_to_parse="${TARGET_PROFILE:-$DEFAULT_PROFILE}"
 if ! parse_profile "$profile_to_parse"; then
-<<<<<<< HEAD
-  echo "Error: invalid profile '$profile_to_parse' (expected format like 96/24, 44.1/16)." >&2
-=======
   echo "Error: invalid profile '$profile_to_parse' (run --help-profiles for accepted forms)." >&2
->>>>>>> develop
   exit 2
 fi
 TARGET_SR_HZ="$PARSED_SR_HZ"
@@ -455,11 +568,7 @@ for _key in "${CUE_FILE_KEYS[@]}"; do
       -vn -c:a pcm_s32 -ar "$_dsd_target_sr" \
       "$_work_wav" </dev/null
   else
-    _wvape_bits="$(ffprobe -v error -select_streams a:0 \
-      -show_entries stream=bits_per_raw_sample -of csv=p=0 \
-      "$_src" </dev/null 2>/dev/null || true)"
-    _wvape_bits="${_wvape_bits%%,*}"
-    _wvape_bits="$(printf '%s' "$_wvape_bits" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    _wvape_bits="$(audio_probe_bit_depth_bits "$_src" || true)"
     if [[ ! "$_wvape_bits" =~ ^[0-9]+$ ]] || ((_wvape_bits <= 0)); then
       _wvape_bits=24
     fi
@@ -476,95 +585,52 @@ for _key in "${CUE_FILE_KEYS[@]}"; do
   WORK_SOURCE_MAP["$_key"]="$_work_wav"
 done
 
-# WORK_SOURCE = work path of the first file (used for probe + upscale check)
+# WORK_SOURCE = work path of the first file (used for source display, true peak,
+# and per-track extraction)
 WORK_SOURCE="${WORK_SOURCE_MAP[${CUE_FILE_KEYS[0]}]}"
 
 # === PROBE SOURCE SR AND BIT DEPTH (cap target to source) ===
 SRC_SR_HZ="$(audio_probe_sample_rate_hz "$WORK_SOURCE")"
-SRC_BITS="$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 \
-  "$WORK_SOURCE" </dev/null 2>/dev/null || true)"
-SRC_BITS="${SRC_BITS%%,*}"
-SRC_BITS="$(printf '%s' "$SRC_BITS" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+SRC_BITS="$(audio_probe_bit_depth_bits "$WORK_SOURCE" || true)"
 if [[ ! "$SRC_BITS" =~ ^[0-9]+$ ]] || ((SRC_BITS <= 0)); then
   SRC_BITS=24
 fi
 
-# No upscale: cap target SR and bits to source
-if [[ "$SRC_SR_HZ" =~ ^[0-9]+$ ]] && ((SRC_SR_HZ > 0)) && ((TARGET_SR_HZ > SRC_SR_HZ)); then
-  TARGET_SR_HZ="$SRC_SR_HZ"
+# No upscale: cap target SR and bits to the lowest referenced source profile.
+CAP_SR_HZ="$SRC_SR_HZ"
+CAP_BITS="$SRC_BITS"
+for _key in "${CUE_FILE_KEYS[@]}"; do
+  _cap_src="${WORK_SOURCE_MAP[$_key]}"
+  [[ -n "$_cap_src" ]] || continue
+
+  _cap_sr_hz="$(audio_probe_sample_rate_hz "$_cap_src")"
+  if [[ "$_cap_sr_hz" =~ ^[0-9]+$ ]] && (( _cap_sr_hz > 0 )); then
+    if [[ ! "$CAP_SR_HZ" =~ ^[0-9]+$ ]] || ((CAP_SR_HZ <= 0)) || (( _cap_sr_hz < CAP_SR_HZ )); then
+      CAP_SR_HZ="$_cap_sr_hz"
+    fi
+  fi
+
+  _cap_bits="$(audio_probe_bit_depth_bits "$_cap_src" || true)"
+  if [[ ! "$_cap_bits" =~ ^[0-9]+$ ]] || (( _cap_bits <= 0 )); then
+    _cap_bits=24
+  fi
+  if [[ ! "$CAP_BITS" =~ ^[0-9]+$ ]] || ((CAP_BITS <= 0)) || (( _cap_bits < CAP_BITS )); then
+    CAP_BITS="$_cap_bits"
+  fi
+done
+
+if [[ "$CAP_SR_HZ" =~ ^[0-9]+$ ]] && ((CAP_SR_HZ > 0)) && ((TARGET_SR_HZ > CAP_SR_HZ)); then
+  TARGET_SR_HZ="$CAP_SR_HZ"
 fi
-if ((TARGET_BITS > SRC_BITS)); then
-  TARGET_BITS="$SRC_BITS"
+if [[ "$CAP_BITS" =~ ^[0-9]+$ ]] && ((CAP_BITS > 0)) && ((TARGET_BITS > CAP_BITS)); then
+  TARGET_BITS="$CAP_BITS"
 fi
 
-<<<<<<< HEAD
-TARGET_SR_KHZ="$(awk -v s="$TARGET_SR_HZ" 'BEGIN{printf "%.4g", s/1000.0;}')"
-TARGET_PROFILE_LABEL="${TARGET_SR_KHZ}/${TARGET_BITS}"
-=======
 TARGET_PROFILE_LABEL="${TARGET_SR_HZ}/${TARGET_BITS}"
->>>>>>> develop
 
 # === SPECTRAL UPSCALE CHECK ===
 UPSCALE_CHECK_LABEL=""
 if ((CHECK_UPSCALE == 1)); then
-<<<<<<< HEAD
-  if [[ ! -f "$PY_HELPER" ]]; then
-    echo "Error: --check-upscale requires spectre_eval.py alongside cue2flac.sh (not found: $PY_HELPER)." >&2
-    exit 2
-  fi
-  if ! select_python_with_numpy 2>/dev/null; then
-    echo "Error: --check-upscale requires Python with numpy. Install numpy or set PYTHON_BIN." >&2
-    exit 2
-  fi
-  echo "Running spectral analysis to detect upscaling..."
-  _excerpt_wav="$_TMPDIR/check_upscale_excerpt.wav"
-  _src_dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WORK_SOURCE" </dev/null 2>/dev/null || true)"
-  _src_dur="${_src_dur%%,*}"
-  _excerpt_start="$(awk -v d="${_src_dur:-0}" 'BEGIN{s=(d+0>60)?(d/2 - 30):0; if(s<0)s=0; printf "%.3f", s}')"
-  ffmpeg -hide_banner -loglevel error -nostdin -y \
-    -ss "$_excerpt_start" -t 60 \
-    -i "$WORK_SOURCE" \
-    -ac 1 -ar "$TARGET_SR_HZ" -c:a pcm_s24le \
-    "$_excerpt_wav" </dev/null
-
-  _dsd_hint=0
-  [[ "$AUDIO_EXT_LC" == "dsf" || "$AUDIO_EXT_LC" == "dff" ]] && _dsd_hint=1
-
-  _eval_out="$("$PYTHON_BIN" "$PY_HELPER" "$_excerpt_wav" "$SRC_SR_HZ" "$_dsd_hint" </dev/null 2>/dev/null || true)"
-  rm -f "$_excerpt_wav"
-
-  _recommend="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^RECOMMEND=/{sub(/^RECOMMEND=/, ""); print; exit}')"
-  _fmax_khz="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^FMAX_KHZ=/{print $2; exit}')"
-  _upsample="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^UPSAMPLE_LIKE=/{print $2; exit}')"
-  _confidence="$(printf '%s\n' "$_eval_out" | awk -F'=' '/^CONFIDENCE=/{print $2; exit}')"
-
-  # Parse "Store as <sr>/<bits>" from the RECOMMEND string
-  _rec_profile=""
-  if [[ "$_recommend" =~ Store\ as\ ([0-9]+(\.[0-9]+)?)/([0-9]{2}) ]]; then
-    _rec_sr_str="${BASH_REMATCH[1]}"
-    _rec_bits="${BASH_REMATCH[3]}"
-    _rec_sr_hz="$(awk -v s="$_rec_sr_str" 'BEGIN{printf "%.0f", s*1000.0}')"
-    _rec_profile="${_rec_sr_str}/${_rec_bits}"
-
-    # Cap to source (no upscale)
-    if ((_rec_sr_hz > SRC_SR_HZ)); then
-      _rec_sr_hz="$SRC_SR_HZ"
-      _rec_sr_str="$(awk -v s="$SRC_SR_HZ" 'BEGIN{printf "%.4g", s/1000.0}')"
-      _rec_profile="${_rec_sr_str}/${_rec_bits}"
-    fi
-    if ((_rec_bits > SRC_BITS)); then
-      _rec_bits="$SRC_BITS"
-      _rec_profile="${_rec_sr_str}/${_rec_bits}"
-    fi
-
-    TARGET_SR_HZ="$_rec_sr_hz"
-    TARGET_BITS="$_rec_bits"
-    TARGET_SR_KHZ="$(awk -v s="$TARGET_SR_HZ" 'BEGIN{printf "%.4g", s/1000.0}')"
-    TARGET_PROFILE_LABEL="${TARGET_SR_KHZ}/${TARGET_BITS}"
-  fi
-
-  UPSCALE_CHECK_LABEL="fmax≈${_fmax_khz}kHz, upsample=${_upsample}, conf=${_confidence} → ${_recommend:-unknown}"
-=======
   if [[ ! -x "$AUDLINT_ANALYZE_BIN" ]]; then
     echo "Error: --check-upscale requires audlint-analyze.sh alongside cue2flac.sh (not executable: $AUDLINT_ANALYZE_BIN)." >&2
     exit 2
@@ -572,16 +638,21 @@ if ((CHECK_UPSCALE == 1)); then
   echo "Running audlint-analyze spectral target detection..."
   _analyze_dir="$_TMPDIR/check_upscale_analyze"
   mkdir -p "$_analyze_dir"
-  _excerpt_wav="$_analyze_dir/excerpt.wav"
-  _src_dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WORK_SOURCE" </dev/null 2>/dev/null || true)"
-  _src_dur="${_src_dur%%,*}"
-  _excerpt_start="$(awk -v d="${_src_dur:-0}" 'BEGIN{s=(d+0>60)?(d/2 - 30):0; if(s<0)s=0; printf "%.3f", s}')"
-  _check_eval_sr=$(( SRC_SR_HZ > 192000 ? 192000 : SRC_SR_HZ ))
-  ffmpeg -hide_banner -loglevel error -nostdin -y \
-    -ss "$_excerpt_start" -t 60 \
-    -i "$WORK_SOURCE" \
-    -ac 1 -ar "$_check_eval_sr" -c:a pcm_s24le \
-    "$_excerpt_wav" </dev/null
+  _analyze_count=0
+  for _key in "${CUE_FILE_KEYS[@]}"; do
+    _an_src="${WORK_SOURCE_MAP[$_key]}"
+    [[ -n "$_an_src" && -e "$_an_src" ]] || continue
+    _an_stage="$(printf '%s/%02d_%s' "$_analyze_dir" "$((_analyze_count + 1))" "$(basename "$_an_src")")"
+    if ! ln -s "$_an_src" "$_an_stage" 2>/dev/null; then
+      echo "Error: failed to stage source for --check-upscale: $_an_src" >&2
+      exit 1
+    fi
+    _analyze_count=$((_analyze_count + 1))
+  done
+  if ((_analyze_count == 0)); then
+    echo "Error: no source files available for --check-upscale analysis." >&2
+    exit 1
+  fi
 
   _an_json="$("$AUDLINT_ANALYZE_BIN" --json "$_analyze_dir" </dev/null 2>/dev/null || true)"
   _an_lines="$(
@@ -595,8 +666,13 @@ album_sr = data.get("album_sr")
 album_bits = data.get("album_bits")
 tracks = data.get("tracks") or []
 cutoff_hz = None
-if tracks:
-    cutoff_hz = tracks[0].get("cutoff_hz")
+for track in tracks:
+    value = track.get("cutoff_hz")
+    if value is None:
+        continue
+    value = float(value)
+    if cutoff_hz is None or value > cutoff_hz:
+        cutoff_hz = value
 print("" if album_sr is None else int(album_sr))
 print("" if album_bits is None else int(album_bits))
 if cutoff_hz is None:
@@ -608,12 +684,12 @@ PY
   { IFS= read -r _an_sr_hz; IFS= read -r _an_bits; IFS= read -r _an_cutoff_khz; } <<< "$_an_lines"
 
   if [[ "$_an_sr_hz" =~ ^[0-9]+$ && "$_an_bits" =~ ^[0-9]+$ ]]; then
-    # Cap to source (no upscale)
-    if ((_an_sr_hz > SRC_SR_HZ)); then
-      _an_sr_hz="$SRC_SR_HZ"
+    # Cap to the lowest referenced source profile (no upscale).
+    if [[ "$CAP_SR_HZ" =~ ^[0-9]+$ ]] && ((CAP_SR_HZ > 0)) && ((_an_sr_hz > CAP_SR_HZ)); then
+      _an_sr_hz="$CAP_SR_HZ"
     fi
-    if ((_an_bits > SRC_BITS)); then
-      _an_bits="$SRC_BITS"
+    if [[ "$CAP_BITS" =~ ^[0-9]+$ ]] && ((CAP_BITS > 0)) && ((_an_bits > CAP_BITS)); then
+      _an_bits="$CAP_BITS"
     fi
     TARGET_SR_HZ="$_an_sr_hz"
     TARGET_BITS="$_an_bits"
@@ -621,11 +697,10 @@ PY
   fi
 
   if [[ "${_an_cutoff_khz:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    UPSCALE_CHECK_LABEL="audlint-analyze cutoff≈${_an_cutoff_khz}kHz → Store as ${TARGET_PROFILE_LABEL}"
+    UPSCALE_CHECK_LABEL="audlint-analyze max cutoff≈${_an_cutoff_khz}kHz → Store as ${TARGET_PROFILE_LABEL}"
   else
     UPSCALE_CHECK_LABEL="audlint-analyze resolved target → Store as ${TARGET_PROFILE_LABEL}"
   fi
->>>>>>> develop
 fi
 
 # === TRUE PEAK / BOOST ===
@@ -635,7 +710,7 @@ BOOST_GAIN_DB="0.000"
 APPLY_BOOST=0
 if audio_is_float_number "$TRUE_PEAK_DB"; then
   BOOST_GAIN_DB="$(awk -v m="$SAFETY_MARGIN_DB" -v p="$TRUE_PEAK_DB" 'BEGIN{printf "%.3f", m-p}')"
-  if audio_float_ge "$BOOST_GAIN_DB" "$MIN_APPLY_GAIN_DB"; then
+  if audio_float_abs_ge "$BOOST_GAIN_DB" "$MIN_APPLY_GAIN_DB"; then
     APPLY_BOOST=1
   fi
 fi
@@ -643,23 +718,30 @@ fi
 # === PRINT PLAN ===
 printf '\n'
 printf '%sCUE file  :%s %s\n' "$DIM" "$RESET" "$CUE_FILE"
-printf '%sSource    :%s %s (%s)\n' "$DIM" "$RESET" "$(basename "$AUDIO_SOURCE")" "$AUDIO_EXT_LC"
+printf '%sSource    :%s %s (%s)\n' "$DIM" "$RESET" "$(ui_input_path_text "$(basename "$AUDIO_SOURCE")")" "$(ui_value_text "$AUDIO_EXT_LC")"
 if ((${#CUE_FILE_KEYS[@]} > 1)); then
-  printf '%sFiles     :%s %s file(s) in CUE sheet\n' "$DIM" "$RESET" "${#CUE_FILE_KEYS[@]}"
+  printf '%sFiles     :%s %s file(s) in CUE sheet\n' "$DIM" "$RESET" "$(ui_value_text "${#CUE_FILE_KEYS[@]}")"
 fi
-printf '%sSource SR :%s %s Hz / %s-bit\n' "$DIM" "$RESET" "$SRC_SR_HZ" "$SRC_BITS"
-printf '%sTarget    :%s %s%s (FLAC compression level 8)%s\n' "$DIM" "$RESET" "$CYAN" "$TARGET_PROFILE_LABEL" "$RESET"
+printf '%sSource SR :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "${SRC_SR_HZ} Hz / ${SRC_BITS}-bit")"
+printf '%sTarget    :%s %s (FLAC compression level 8)\n' "$DIM" "$RESET" "$(ui_value_text "$TARGET_PROFILE_LABEL")"
 if ((CHECK_UPSCALE == 1)); then
-  printf '%sCheck     :%s %s\n' "$DIM" "$RESET" "$UPSCALE_CHECK_LABEL"
+  printf '%sCheck     :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$UPSCALE_CHECK_LABEL")"
 fi
-printf '%sEncoder   :%s %s%s%s\n' "$DIM" "$RESET" "$CYAN" "$(encoder_log_backend)" "$RESET"
+printf '%sEncoder   :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$(encoder_log_backend)")"
 if ((APPLY_BOOST == 1)); then
-  printf '%sBoost     :%s %s+%s dB (true peak: %s dBTP)%s\n' "$DIM" "$RESET" "$GREEN" "$BOOST_GAIN_DB" "$TRUE_PEAK_DB" "$RESET"
+  printf '%sBoost     :%s %s dB (true peak: %s)\n' \
+    "$DIM" "$RESET" \
+    "$(ui_gain_text "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)")" \
+    "$(ui_value_text "${TRUE_PEAK_DB} dBTP")"
 else
-  printf '%sBoost     :%s %sskipped (true peak: %s dBTP, gain %s dB < %s dB threshold)%s\n' \
-    "$DIM" "$RESET" "$YELLOW" "$TRUE_PEAK_DB" "$BOOST_GAIN_DB" "$MIN_APPLY_GAIN_DB" "$RESET"
+  printf '%sBoost     :%s %s (true peak: %s, gain %s dB, abs < %s dB threshold)\n' \
+    "$DIM" "$RESET" \
+    "$(ui_warn_text "skipped")" \
+    "$(ui_value_text "${TRUE_PEAK_DB} dBTP")" \
+    "$(ui_gain_text "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)")" \
+    "$(ui_value_text "$MIN_APPLY_GAIN_DB")"
 fi
-printf '%sOutput    :%s %s%s%s\n' "$DIM" "$RESET" "$BLUE" "$OUTPUT_DIR" "$RESET"
+printf '%sOutput    :%s %s\n' "$DIM" "$RESET" "$(ui_output_path_text "$OUTPUT_DIR")"
 printf '\n%sTrack list:%s\n' "$DIM" "$RESET"
 for t in $(seq 1 "$TOTAL_TRACKS"); do
   title="${TITLES[$t]:-Track $t}"
@@ -668,7 +750,7 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
   idx="${INDEXES[$t]:-00:00:00}"
   out_name="$(printf '%02d' "$t") $(sanitize_path_component "$title").flac"
   printf '  [%02d] %s — %s  %s(INDEX %s)%s\n' "$t" "$title" "$artist" "$DIM" "$idx" "$RESET"
-  printf '       %s-> %s%s\n' "$DIM" "$RESET" "$out_name"
+  printf '       %s %s\n' "$(ui_arrow_text)" "$(ui_output_path_text "$out_name")"
 done
 printf '\n'
 
@@ -685,19 +767,10 @@ if ((ASSUME_YES == 0)); then
   fi
   printf '%sProceed?%s [y/N] > ' "$YELLOW" "$RESET"
   confirm_choice=""
-<<<<<<< HEAD
-  if ! IFS= read -r confirm_choice </dev/tty; then
-    printf '\n'
-    echo "Cancelled." >&2
-    exit 1
-  fi
-  printf '\n'
-=======
   if ! tty_read_line confirm_choice; then
     echo "Cancelled." >&2
     exit 1
   fi
->>>>>>> develop
   if [[ "$confirm_choice" != "y" ]]; then
     echo "Cancelled."
     exit 1
@@ -720,6 +793,7 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
   artist="${PERFORMERS[$t]:-}"
   [[ -z "$artist" ]] && artist="${GLOBAL_ARTIST:-Unknown Artist}"
   start_sec="${TRACK_START_SEC[$t]}"
+  date_display="${DATE:-[not set in CUE]}"
   out_name="$(printf '%02d' "$t") $(sanitize_path_component "$title").flac"
   out_path="$OUTPUT_DIR/$out_name"
 
@@ -727,17 +801,17 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
   _track_key="${TRACK_FILE_KEY[$t]:-${CUE_FILE_KEYS[0]}}"
   _track_work_src="${WORK_SOURCE_MAP[$_track_key]}"
 
-  printf '\n%s▶ [%02d/%02d] ENCODING%s %s\n' "$GREEN" "$t" "$TOTAL_TRACKS" "$RESET" "$out_name"
-  printf '     %sTitle    :%s %s\n' "$DIM" "$RESET" "$title"
-  printf '     %sArtist   :%s %s\n' "$DIM" "$RESET" "$artist"
-  printf '     %sAlbum    :%s %s\n' "$DIM" "$RESET" "${ALBUM:-}"
-  printf '     %sDate     :%s %s\n' "$DIM" "$RESET" "${DATE:-}"
-  printf '     %sTrack    :%s %s/%s\n' "$DIM" "$RESET" "$t" "$TOTAL_TRACKS"
-  printf '     %sStart    :%s %s sec\n' "$DIM" "$RESET" "$start_sec"
+  printf '\n%s▶ [%02d/%02d] ENCODING%s %s\n' "$GREEN" "$t" "$TOTAL_TRACKS" "$RESET" "$(ui_output_path_text "$out_name")"
+  printf '     %sTitle    :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$title")"
+  printf '     %sArtist   :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$artist")"
+  printf '     %sAlbum    :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "${ALBUM:-}")"
+  printf '     %sDate     :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$date_display")"
+  printf '     %sTrack    :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$t/$TOTAL_TRACKS")"
+  printf '     %sStart    :%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$start_sec sec")"
   if ((APPLY_BOOST == 1)); then
-    printf '     %sBoost    :%s %s+%s dB%s\n' "$DIM" "$RESET" "$GREEN" "$BOOST_GAIN_DB" "$RESET"
+    printf '     %sBoost    :%s %s dB\n' "$DIM" "$RESET" "$(ui_gain_text "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)")"
   else
-    printf '     %sBoost    :%s %sskipped%s\n' "$DIM" "$RESET" "$YELLOW" "$RESET"
+    printf '     %sBoost    :%s %s\n' "$DIM" "$RESET" "$(ui_warn_text "skipped")"
   fi
 
   # Duration: distance to next track within the same file, or EOF for the last track in the file.
@@ -783,7 +857,7 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
   enc_args+=(--tags "TRACKTOTAL=$TOTAL_TRACKS")
 
   if encoder_to_flac "${enc_args[@]}"; then
-    printf '%s✅ Saved: %s%s\n' "$GREEN" "$out_path" "$RESET"
+    printf '%s✅ Saved:%s %s\n' "$GREEN" "$RESET" "$(ui_output_path_text "$out_path")"
     ((ok_count += 1))
   else
     printf '%s❌ Encode failed: %s%s\n' "$RED" "$out_name" "$RESET" >&2
@@ -794,8 +868,9 @@ for t in $(seq 1 "$TOTAL_TRACKS"); do
 done
 
 printf '\n'
-printf '%sDone:%s %s track(s) encoded, %s failed.\n' "$DIM" "$RESET" "$ok_count" "$fail_count"
-printf '%sOutput:%s %s%s%s\n' "$DIM" "$RESET" "$BLUE" "$OUTPUT_DIR" "$RESET"
+printf '%sDone:%s %s track(s) encoded, %s failed.\n' "$DIM" "$RESET" "$(ui_value_text "$ok_count")" "$(ui_value_text "$fail_count")"
+printf '%sOutput:%s %s\n' "$DIM" "$RESET" "$(ui_output_path_text "$OUTPUT_DIR")"
+printf '%sProfile:%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$TARGET_PROFILE_LABEL")"
 
 if ((fail_count > 0)); then
   exit 1

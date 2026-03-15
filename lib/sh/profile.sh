@@ -122,3 +122,37 @@ Canonical internal format:
   SR_HZ/BITS  (example: 44100/16)
 EOF_HELP
 }
+
+profile_cache_file_path() {
+  local target="${1:-}"
+  if [[ -d "$target" ]]; then
+    printf '%s/.sox_album_profile\n' "$target"
+  else
+    printf '%s\n' "$target"
+  fi
+}
+
+profile_cache_get() {
+  local target="$1"
+  local key="$2"
+  local profile_file value
+  profile_file="$(profile_cache_file_path "$target")"
+  [[ -f "$profile_file" ]] || {
+    printf ''
+    return 0
+  }
+  value="$(awk -F= -v wanted="$key" '$1 == wanted {print substr($0, index($0, "=") + 1); exit}' "$profile_file" 2>/dev/null || true)"
+  _profile_trim "$value"
+}
+
+profile_cache_target_profile() {
+  local target="$1"
+  local target_sr target_bits normalized
+  target_sr="$(profile_cache_get "$target" "TARGET_SR")"
+  target_bits="$(profile_cache_get "$target" "TARGET_BITS")"
+  [[ "$target_sr" =~ ^[0-9]+$ ]] || return 1
+  [[ "$target_bits" =~ ^([0-9]+|32f|64f)$ ]] || return 1
+  normalized="$(profile_normalize "${target_sr}/${target_bits}" || true)"
+  [[ -n "$normalized" ]] || return 1
+  printf '%s\n' "$normalized"
+}

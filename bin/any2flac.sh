@@ -29,15 +29,15 @@ source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
-<<<<<<< HEAD
-=======
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
 # shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
+# shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/secure_backup.sh"
->>>>>>> develop
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
+ui_init_colors
 require_bins ffprobe >/dev/null || exit 2
 if ! encoder_has_sox && ! has_bin ffmpeg; then
   printf 'Missing dependency: sox or ffmpeg (at least one encoder is required)\n' >&2
@@ -50,6 +50,7 @@ DRY_RUN=0
 ASSUME_YES=0
 PLAN_ONLY=0
 WITH_BOOST=0
+ALLOW_LOSSY_SOURCE=0
 
 TARGET_SR_HZ=0
 TARGET_SR_LABEL=""
@@ -57,14 +58,15 @@ TARGET_BITS=0
 TARGET_SAMPLE_FMT=""
 BOOST_GAIN_DB="0.000"
 APPLY_BOOST=0
-BOOST_SAFETY_MARGIN_DB="-1.0"
-BOOST_MIN_APPLY_DB="0.3"
+BOOST_SAFETY_MARGIN_DB="$(audio_auto_boost_target_true_peak_db)"
+BOOST_MIN_APPLY_DB="$(audio_auto_boost_min_apply_db)"
+AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$BOOTSTRAP_DIR/audlint-analyze.sh}"
 
 show_help() {
   cat <<'EOF_HELP'
 Usage:
-  any2flac.sh <profile> [directory]
-  any2flac.sh --profile <profile> [--dir <directory>] [--dry-run] [--yes] [--plan-only] [--with-boost]
+  any2flac.sh [<profile>|--profile=best] [directory]
+  any2flac.sh --profile <profile> [--dir <directory>] [--dry-run] [--yes] [--plan-only] [--with-boost] [--allow-lossy-source]
   any2flac.sh --help-profiles
 
 Profile format:
@@ -81,10 +83,12 @@ Examples:
 Behavior:
   - Converts all supported audio files in the target directory.
   - Replaces originals in-place with FLAC outputs.
+  - When profile is omitted or set to best, auto-resolves profile via audlint-analyze.
   - --plan-only prints per-file plan and exits without conversion.
   - --with-boost runs album true-peak analysis and applies one auto gain during encode.
   - Fails if target profile is above source profile (no upscale).
   - Fails if any source is lossy (no mp3/aac/... -> flac).
+  - --allow-lossy-source bypasses lossy-source guard (for DTS container migration workflows).
   - Fails when no audio files are found.
   - Normalized internal format is SR_HZ/BITS (e.g. 44100/16).
 EOF_HELP
@@ -124,65 +128,20 @@ show_help_profiles() {
 }
 
 probe_codec_name() {
-  local in="$1"
-  local codec
-  codec="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  codec="${codec%%,*}"
-  codec="$(printf '%s' "$codec" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  printf '%s' "$codec"
+  audio_codec_name "$1"
 }
 
 probe_bit_depth() {
   local in="$1"
-  local bps sfmt
-  bps="$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  bps="${bps%%,*}"
-  bps="$(printf '%s' "$bps" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  if [[ "$bps" =~ ^[0-9]+$ ]] && ((bps > 0)); then
-    printf '%s' "$bps"
-    return 0
-  fi
-
-  sfmt="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_fmt -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  sfmt="${sfmt%%,*}"
-  sfmt="$(printf '%s' "$sfmt" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  case "$sfmt" in
-  s16 | s16p) printf '16' ;;
-  s24 | s24p) printf '24' ;;
-  s32 | s32p | flt | fltp) printf '32' ;;
-  dbl | dblp) printf '64' ;;
-  *) printf '0' ;;
-  esac
+  local codec="${2:-}"
+  audio_probe_bit_depth_bits "$in" "$codec"
 }
 
 # Alias — canonical implementation lives in lib/sh/audio.sh.
 is_lossy_codec() { audio_is_lossy_codec "$@"; }
 
-is_dsd_codec() {
-  local codec="$1"
-  case "$codec" in
-  dsd*) return 0 ;;
-  *) return 1 ;;
-  esac
-}
-
 normalize_source_bit_depth() {
-  local codec="$1"
-  local bit_depth="$2"
-
-  if is_dsd_codec "$codec"; then
-    # DSD can probe as 1-bit; treat as 24-bit ceiling for PCM target validation.
-    if [[ ! "$bit_depth" =~ ^[0-9]+$ ]] || ((bit_depth < 24)); then
-      printf '24'
-      return 0
-    fi
-  fi
-
-  if [[ "$bit_depth" =~ ^[0-9]+$ ]] && ((bit_depth > 0)); then
-    printf '%s' "$bit_depth"
-  else
-    printf '0'
-  fi
+  audio_normalize_source_bit_depth "$1" "$2"
 }
 
 profile_label_from_source() {
@@ -213,17 +172,9 @@ probe_bitrate_label() {
 file_size_bytes() {
   local path="$1"
   local out=""
-  if out="$(stat -f '%z' "$path" 2>/dev/null)"; then
-    [[ "$out" =~ ^[0-9]+$ ]] && {
-      printf '%s' "$out"
-      return 0
-    }
-  fi
-  if out="$(stat -c '%s' "$path" 2>/dev/null)"; then
-    [[ "$out" =~ ^[0-9]+$ ]] && {
-      printf '%s' "$out"
-      return 0
-    }
+  if out="$(stat_size_bytes "$path" 2>/dev/null)"; then
+    printf '%s' "$out"
+    return 0
   fi
   printf '?'
 }
@@ -241,7 +192,13 @@ print_plan_rows() {
     src_name="$(basename "$src")"
     printf '  %s\t%s\t%s\t%s\t%s\t%s\n' "$src_name" "$src_size" "$src_codec" "$src_profile" "$src_bitrate" "$TARGET_SR_LABEL"
     # Keep summary checkpoint lines for concise progress logs.
-    printf '  - [%s | %s] %s -> %s | target=%s\n' "$src_codec" "$src_profile" "$src" "$target" "$TARGET_SR_LABEL"
+    printf '  - [%s | %s] %s %s %s | target=%s\n' \
+      "$(ui_value_text "$src_codec")" \
+      "$(ui_value_text "$src_profile")" \
+      "$(ui_input_path_text "$src")" \
+      "$(ui_arrow_text)" \
+      "$(ui_output_path_text "$target")" \
+      "$(ui_value_text "$TARGET_SR_LABEL")"
   done
 }
 
@@ -379,7 +336,7 @@ run_boost_analysis_if_enabled() {
   fi
 
   BOOST_GAIN_DB="$(awk -v m="$BOOST_SAFETY_MARGIN_DB" -v p="$max_true_peak_db" 'BEGIN{printf "%.3f", m-p}')"
-  if audio_float_ge "$BOOST_GAIN_DB" "$BOOST_MIN_APPLY_DB"; then
+  if audio_float_abs_ge "$BOOST_GAIN_DB" "$BOOST_MIN_APPLY_DB"; then
     APPLY_BOOST=1
   else
     APPLY_BOOST=0
@@ -388,10 +345,29 @@ run_boost_analysis_if_enabled() {
   printf 'Boost true peak: %s dBTP\n' "$max_true_peak_db"
   printf 'Boost cache usage: hits=%s misses=%s\n' "$cache_hits" "$cache_misses"
   if ((APPLY_BOOST == 1)); then
-    printf 'Boost auto gain: +%s dB (enabled)\n' "$BOOST_GAIN_DB"
+    printf 'Boost auto gain: %s dB (enabled)\n' "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)"
   else
-    printf 'Boost auto gain: +%s dB (skipped: < %s dB)\n' "$BOOST_GAIN_DB" "$BOOST_MIN_APPLY_DB"
+    printf 'Boost auto gain: %s dB (skipped: abs < %s dB)\n' "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)" "$BOOST_MIN_APPLY_DB"
   fi
+}
+
+resolve_auto_target_profile() {
+  local recode_raw normalized profile_file target_sr target_bits
+  if [[ ! -x "$AUDLINT_ANALYZE_BIN" ]]; then
+    printf 'Error: auto profile mode requires audlint-analyze.sh (not executable: %s)\n' "$AUDLINT_ANALYZE_BIN" >&2
+    return 1
+  fi
+  recode_raw="$("$AUDLINT_ANALYZE_BIN" "$WORK_DIR" 2>/dev/null || true)"
+  recode_raw="$(printf '%s\n' "$recode_raw" | head -n1 | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ "$recode_raw" == "Re-encoding not needed" ]]; then
+    recode_raw="$(profile_cache_target_profile "$WORK_DIR" || true)"
+  fi
+  normalized="$(profile_normalize "$recode_raw" || true)"
+  if [[ -z "$normalized" ]]; then
+    printf "Error: auto profile mode failed; audlint-analyze returned '%s'\n" "$recode_raw" >&2
+    return 1
+  fi
+  TARGET_PROFILE="$normalized"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -407,6 +383,13 @@ while [[ $# -gt 0 ]]; do
   --profile)
     shift
     TARGET_PROFILE="${1:-}"
+    [[ -n "$TARGET_PROFILE" ]] || {
+      echo "Error: --profile requires a value." >&2
+      exit 2
+    }
+    ;;
+  --profile=*)
+    TARGET_PROFILE="${1#*=}"
     [[ -n "$TARGET_PROFILE" ]] || {
       echo "Error: --profile requires a value." >&2
       exit 2
@@ -428,6 +411,9 @@ while [[ $# -gt 0 ]]; do
     ;;
   --with-boost)
     WITH_BOOST=1
+    ;;
+  --allow-lossy-source)
+    ALLOW_LOSSY_SOURCE=1
     ;;
   --yes)
     ASSUME_YES=1
@@ -456,19 +442,26 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if [[ -z "$TARGET_PROFILE" ]]; then
-  echo "Error: profile is required." >&2
-  show_help >&2
-  exit 2
-fi
-
-if ! parse_target_profile "$TARGET_PROFILE"; then
-  echo "Error: invalid profile '$TARGET_PROFILE' (run --help-profiles for accepted forms)." >&2
-  exit 2
+if [[ -n "$TARGET_PROFILE" && "$WORK_DIR" == "." && "${TARGET_PROFILE,,}" != "best" && -d "$TARGET_PROFILE" ]]; then
+  WORK_DIR="$TARGET_PROFILE"
+  TARGET_PROFILE=""
 fi
 
 if [[ ! -d "$WORK_DIR" ]]; then
   echo "Error: directory not found: $WORK_DIR" >&2
+  exit 2
+fi
+
+AUTO_PROFILE_MODE=0
+if [[ -z "$TARGET_PROFILE" || "${TARGET_PROFILE,,}" == "best" ]]; then
+  AUTO_PROFILE_MODE=1
+  if ! resolve_auto_target_profile; then
+    exit 1
+  fi
+fi
+
+if ! parse_target_profile "$TARGET_PROFILE"; then
+  echo "Error: invalid profile '$TARGET_PROFILE' (run --help-profiles for accepted forms)." >&2
   exit 2
 fi
 
@@ -499,9 +492,12 @@ for src in "${audio_files[@]}"; do
 
   codec="$(probe_codec_name "$src")"
   sr_hz="$(audio_probe_sample_rate_hz "$src")"
-  bit_depth="$(probe_bit_depth "$src")"
+  bit_depth="$(probe_bit_depth "$src" "$codec")"
   eff_bit_depth="$(normalize_source_bit_depth "$codec" "$bit_depth")"
-  src_profile="$(profile_label_from_source "$sr_hz" "$eff_bit_depth")"
+  src_profile="$(audio_source_quality_label "$src" || true)"
+  if [[ -z "$src_profile" || "$src_profile" == "?/??" ]]; then
+    src_profile="$(profile_label_from_source "$sr_hz" "$eff_bit_depth")"
+  fi
   source_profile_for_source["$src"]="$src_profile"
   source_codec_for_source["$src"]="$codec"
   source_bitrate_for_source["$src"]="$(probe_bitrate_label "$src")"
@@ -511,8 +507,12 @@ for src in "${audio_files[@]}"; do
     continue
   fi
   if is_lossy_codec "$codec"; then
-    preflight_errors+=("$src: lossy source codec '$codec' is not allowed for FLAC replace workflow")
-    continue
+    if ((ALLOW_LOSSY_SOURCE == 1)); then
+      :
+    else
+      preflight_errors+=("$src: lossy source codec '$codec' is not allowed for FLAC replace workflow")
+      continue
+    fi
   fi
   if [[ ! "$sr_hz" =~ ^[0-9]+$ ]] || ((sr_hz <= 0)); then
     preflight_errors+=("$src: unable to detect sample rate")
@@ -538,24 +538,30 @@ if ! run_boost_analysis_if_enabled; then
   exit 1
 fi
 
-printf 'Target profile: %s (FLAC compression level 8)\n' "$TARGET_SR_LABEL"
-printf 'Encoder: %s\n' "$(encoder_log_backend)"
-printf 'Files to convert: %s\n' "${#audio_files[@]}"
+printf 'Target profile: %s (FLAC compression level 8)\n' "$(ui_value_text "$TARGET_SR_LABEL")"
+if ((AUTO_PROFILE_MODE == 1)); then
+  printf 'Auto profile: %s (audlint-analyze)\n' "$(ui_value_text "$TARGET_SR_LABEL")"
+fi
+printf 'Encoder: %s\n' "$(ui_value_text "$(encoder_log_backend)")"
+printf 'Files to convert: %s\n' "$(ui_value_text "${#audio_files[@]}")"
 if ((DRY_RUN == 1)); then
-  printf 'Dry run: yes\n'
+  printf 'Dry run: %s\n' "$(ui_warn_text "yes")"
 fi
 if ((WITH_BOOST == 1)); then
   if ((APPLY_BOOST == 1)); then
-    printf 'Boost mode: enabled (+%s dB)\n' "$BOOST_GAIN_DB"
+    printf 'Boost mode: enabled (%s dB)\n' "$(ui_gain_text "$(audio_db_gain_label "$BOOST_GAIN_DB" 3)")"
   else
-    printf 'Boost mode: enabled (gain skipped)\n'
+    printf 'Boost mode: enabled (%s)\n' "$(ui_warn_text "gain skipped")"
   fi
+fi
+if ((ALLOW_LOSSY_SOURCE == 1)); then
+  printf 'Lossy source policy: %s\n' "$(ui_warn_text "bypass enabled (--allow-lossy-source)")"
 fi
 printf '%s\n' 'Summary checkpoint:'
 print_plan_rows
 
 if ((PLAN_ONLY == 1)); then
-  printf 'Plan-only mode completed: %s file(s) validated.\n' "${#audio_files[@]}"
+  printf 'Plan-only mode completed: %s file(s) validated.\n' "$(ui_value_text "${#audio_files[@]}")"
   exit 0
 fi
 
@@ -585,7 +591,7 @@ converted=0
 for src in "${audio_files[@]}"; do
   target="${target_for_source["$src"]}"
   tmp_out="${target}.any2flac.tmp.$$.flac"
-  printf 'Converting: %s -> %s\n' "$src" "$target"
+  printf 'Converting: %s %s %s\n' "$(ui_input_path_text "$src")" "$(ui_arrow_text)" "$(ui_output_path_text "$target")"
 
   if ((DRY_RUN == 1)); then
     continue
@@ -601,10 +607,7 @@ for src in "${audio_files[@]}"; do
   [[ "$src_codec" == "flac" ]] || encode_src_is_flac=0
 
   encode_args=(--in "$src" --out "$tmp_out" --sr "$TARGET_SR_HZ" --bits "$TARGET_BITS" --src-is-flac "$encode_src_is_flac")
-<<<<<<< HEAD
-=======
   [[ -n "$src_codec" ]] && encode_args+=(--src-codec "$src_codec")
->>>>>>> develop
   [[ -n "$encode_gain_db" ]] && encode_args+=(--gain "$encode_gain_db")
 
   if ! encoder_to_flac "${encode_args[@]}"; then
@@ -625,7 +628,7 @@ for src in "${audio_files[@]}"; do
 done
 
 if ((DRY_RUN == 1)); then
-  printf 'Dry run completed: %s file(s) validated for conversion.\n' "${#audio_files[@]}"
+  printf 'Dry run completed: %s file(s) validated for conversion.\n' "$(ui_value_text "${#audio_files[@]}")"
 else
-  printf 'Completed: %s file(s) converted to %s.\n' "$converted" "$TARGET_SR_LABEL"
+  printf 'Completed: %s file(s) converted to %s.\n' "$(ui_value_text "$converted")" "$(ui_value_text "$TARGET_SR_LABEL")"
 fi

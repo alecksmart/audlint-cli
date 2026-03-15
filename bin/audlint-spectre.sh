@@ -28,7 +28,7 @@ bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${AUDL_PYTHON_BIN:-python3}"
 PY_HELPER="$REPO_ROOT/lib/py/spectre_image.py"
 
 print_optional_install_guidance() {
@@ -42,7 +42,7 @@ print_optional_install_guidance() {
   else
     printf '  Install tesseract with your package manager.\n' >&2
   fi
-  printf '  %s -m pip install opencv-python numpy pytesseract\n' "$PYTHON_BIN" >&2
+  printf '  %s -m pip install opencv-python numpy\n' "$PYTHON_BIN" >&2
 }
 
 check_optional_deps() {
@@ -62,7 +62,7 @@ check_optional_deps() {
   fi
 
   if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    for mod in cv2 numpy pytesseract; do
+    for mod in cv2 numpy; do
       if ! "$PYTHON_BIN" -c "import $mod" >/dev/null 2>&1; then
         missing_py+=("$mod")
         ok=0
@@ -95,6 +95,8 @@ Usage:
 Read an exported spectrogram image and estimate the high-frequency cutoff.
 OCR is applied to the stats region (top-left by default) to extract labels such
 as Peak Amplitude and Dynamic Range. Default output is compact JSON.
+Use `audlint-analyze.sh` / `auv` when you need exact recode authority; image
+analysis is best at recovering the sample-rate family from the export.
 
 Options:
   --check-deps                   Check optional spectre dependencies and exit.
@@ -115,7 +117,7 @@ Options:
   -h, --help                     Show this help.
 
 Dependencies:
-  - python3 with: opencv-python (cv2), numpy, pytesseract
+  - python3 with: opencv-python (cv2), numpy
   - tesseract binary on PATH
   - jq (optional; prettifies default compact JSON output)
 

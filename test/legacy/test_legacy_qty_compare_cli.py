@@ -63,8 +63,7 @@ cat
         self.env["NO_COLOR"] = "1"
         self.env["HOME"] = str(self.tmpdir)
         self.env["RICH_TABLE_CMD"] = str(self.table_stub)
-        self.env["PYTHON_BIN"] = "python3"
-        self.env["TABLE_PYTHON_BIN"] = "python3"
+        self.env["AUDL_PYTHON_BIN"] = "python3"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -127,31 +126,6 @@ mkdir -p "$(dirname "$out")"
 printf 'x' >"$out"
 """,
         )
-
-        audlint_analyze_stub = self.bin_dir / "audlint-analyze.sh"
-        _write_exec(
-            audlint_analyze_stub,
-            """#!/bin/bash
-target="${STUB_SPEC_REC:-Store as 96000/24}"
-profile="$(printf '%s\\n' "$target" | grep -Eio '[0-9]+([.][0-9]+)?(k(hz)?)?[/:-][0-9]{1,3}f?' | head -n1)"
-if [[ -z "$profile" ]]; then
-  profile="96000/24"
-fi
-sr="${profile%%/*}"
-bits="${profile##*/}"
-if [[ "$1" == "--json" ]]; then
-  album="${2:-.}"
-  track="$(find "$album" -maxdepth 1 -type f | sort | head -n1)"
-  [[ -z "$track" ]] && track="$album/track.flac"
-  cat <<EOF
-{"album_sr": $sr, "album_bits": $bits, "tracks": [{"file": "$track", "sr_in": ${STUB_SR:-96000}, "bits_in": ${STUB_BPS:-24}, "cutoff_hz": 48000.0, "tgt_sr": $sr}]}
-EOF
-  exit 0
-fi
-printf '%s\\n' "$profile"
-""",
-        )
-        self.env["AUDLINT_ANALYZE_BIN"] = str(audlint_analyze_stub)
 
         python_stub_script = """#!/bin/bash
 if [[ "${1:-}" == "-" ]]; then
@@ -220,14 +194,14 @@ exec "__REAL_PYTHON__" "$@"
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertIn(f"Album 1: {album1}", proc.stdout)
         self.assertIn(f"Album 2: {album2}", proc.stdout)
-        self.assertIn("Album1,Codec,Profile,Grade,Spec Rec,Album2,Codec,Profile,Grade,Spec Rec", proc.stdout)
-        self.assertIn("Album,Codec,Profile,Grade,DR,Spectral Rec", proc.stdout)
+        self.assertIn("Album1,Codec,Profile,Grade,Album2,Codec,Profile,Grade", proc.stdout)
+        self.assertIn("Album,Codec,Profile,Grade,DR", proc.stdout)
+        self.assertNotIn("Spec Rec", proc.stdout)
+        self.assertNotIn("Spectral Rec", proc.stdout)
 
-    def test_suppresses_noop_spectral_recommendation_when_profile_matches_target(self) -> None:
+    def test_runs_without_audlint_analyze_dependency(self) -> None:
         self._install_analysis_stubs()
-        self.env["STUB_SR"] = "44100"
-        self.env["STUB_BPS"] = "24"
-        self.env["STUB_SPEC_REC"] = "Upsample detected -> Standard Definition -> Store as 44100/24"
+        self.env["AUDLINT_ANALYZE_BIN"] = str(self.bin_dir / "missing-audlint-analyze.sh")
 
         album1 = self.tmpdir / "album1"
         album2 = self.tmpdir / "album2"
@@ -238,9 +212,7 @@ exec "__REAL_PYTHON__" "$@"
 
         proc = self._run(str(album1), str(album2))
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
-        self.assertIn("44100/24", proc.stdout)
-        self.assertIn("Keep as-is", proc.stdout)
-        self.assertNotIn("Upsample detected -> Standard Definition -> Store as 44100/24", proc.stdout)
+        self.assertNotIn("Missing executable", proc.stderr)
 
 
 if __name__ == "__main__":

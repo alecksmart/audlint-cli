@@ -30,6 +30,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/sqlite.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/lyrics.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 ui_init_colors
@@ -48,14 +50,14 @@ Options:
   -y, --yes
        Auto-confirm prompts.
   -B, --backup-maintenance-only
-       Normalize/repair backup bundles for LIBRARY_DB and exit.
+       Normalize/repair backup bundles for AUDL_DB_PATH and exit.
   -h, --help
        Show this help message.
 
 Behavior:
   - Scans audio files in the current directory.
   - Fetches synced lyrics and embeds them in supported formats.
-  - Caches fetch outcomes in lyrics_cache table inside LIBRARY_DB.
+  - Caches fetch outcomes in lyrics_cache table inside AUDL_DB_PATH.
 EOF
 }
 
@@ -103,12 +105,12 @@ fi
 env_load_files ".env" "$SCRIPT_DIR/../.env" || true
 
 LIBRARY_DB_DEFAULT=""
-if [ -n "${SRC:-}" ]; then
-  LIBRARY_DB_DEFAULT="$SRC/library.sqlite"
+if [ -n "${AUDL_PATH:-}" ]; then
+  LIBRARY_DB_DEFAULT="$AUDL_PATH/library.sqlite"
 else
   LIBRARY_DB_DEFAULT="$PWD/.lyrics_cache.sqlite"
 fi
-LIBRARY_DB="${LIBRARY_DB:-$LIBRARY_DB_DEFAULT}"
+LIBRARY_DB="${AUDL_DB_PATH:-$LIBRARY_DB_DEFAULT}"
 LYRICS_RETRY_SECONDS=$((60 * 60 * 24 * 30 * 6))
 
 LYRICS_LIST=".lyrics_files.tmp"
@@ -128,74 +130,6 @@ norm_tag() {
 
 url_encode() {
   printf "%s" "$1" | jq -sRr @uri
-}
-
-
-lyrics_db_init() {
-  local db="$1"
-  local db_dir
-  db_dir=$(dirname "$db")
-  mkdir -p "$db_dir"
-  sqlite3 "$db" <<'SQL'
-CREATE TABLE IF NOT EXISTS lyrics_cache (
-  id INTEGER PRIMARY KEY,
-  artist_lc TEXT NOT NULL,
-  title_lc TEXT NOT NULL,
-  album_lc TEXT NOT NULL,
-  duration_int INTEGER NOT NULL,
-  path TEXT,
-  status TEXT NOT NULL,
-  lyrics TEXT,
-  source TEXT,
-  attempted_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_lyrics_lookup
-  ON lyrics_cache(artist_lc, title_lc, album_lc, duration_int);
-SQL
-}
-
-lyrics_cache_lookup() {
-  local db="$1"
-  local artist_lc="$2"
-  local title_lc="$3"
-  local album_lc="$4"
-  local duration_int="$5"
-  local a_sql t_sql al_sql
-  a_sql=$(sql_escape "$artist_lc")
-  t_sql=$(sql_escape "$title_lc")
-  al_sql=$(sql_escape "$album_lc")
-
-  # Duration tolerance keeps cache hits stable across container/probe variance.
-  sqlite3 -separator "|" "$db" \
-    "SELECT status, attempted_at FROM lyrics_cache WHERE artist_lc='${a_sql}' AND title_lc='${t_sql}' AND album_lc='${al_sql}' AND abs(duration_int - ${duration_int}) <= 2 ORDER BY updated_at DESC LIMIT 1;"
-}
-
-lyrics_cache_upsert() {
-  local db="$1"
-  local artist_lc="$2"
-  local title_lc="$3"
-  local album_lc="$4"
-  local duration_int="$5"
-  local path="$6"
-  local status="$7"
-  local lyrics="$8"
-  local source="$9"
-  local attempted_at="${10}"
-  local updated_at="${11}"
-
-  local a_sql t_sql al_sql p_sql s_sql l_sql src_sql
-  a_sql=$(sql_escape "$artist_lc")
-  t_sql=$(sql_escape "$title_lc")
-  al_sql=$(sql_escape "$album_lc")
-  p_sql=$(sql_escape "$path")
-  s_sql=$(sql_escape "$status")
-  l_sql=$(sql_escape "$lyrics")
-  src_sql=$(sql_escape "$source")
-
-  sqlite3 "$db" \
-    "INSERT INTO lyrics_cache (artist_lc, title_lc, album_lc, duration_int, path, status, lyrics, source, attempted_at, updated_at)
-     VALUES ('${a_sql}', '${t_sql}', '${al_sql}', ${duration_int}, '${p_sql}', '${s_sql}', '${l_sql}', '${src_sql}', ${attempted_at}, ${updated_at});"
 }
 
 if [ "$BACKUP_MAINTENANCE_ONLY" = true ]; then
@@ -242,7 +176,8 @@ lyrics_db_init "$LIBRARY_DB"
 
 NOW_TS=$(date +%s)
 for f in "${FILES[@]}"; do
-  CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$f")
+  audio_ffprobe_meta_prime "$f"
+  CODEC="$(audio_codec_name "$f" || true)"
   EXT="${f##*.}"
 
   SUPPORT_LYRICS=false
@@ -256,11 +191,11 @@ for f in "${FILES[@]}"; do
     continue
   fi
 
-  ALBUM_ARTIST=$(ffprobe -v error -show_entries format_tags=album_artist -of default=noprint_wrappers=1:nokey=1 "$f")
-  ARTIST=$(ffprobe -v error -show_entries format_tags=artist -of default=noprint_wrappers=1:nokey=1 "$f")
-  TITLE=$(ffprobe -v error -show_entries format_tags=title -of default=noprint_wrappers=1:nokey=1 "$f")
-  ALBUM=$(ffprobe -v error -show_entries format_tags=album -of default=noprint_wrappers=1:nokey=1 "$f")
-  DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f")
+  ALBUM_ARTIST="$(audio_probe_tag_value "$f" "album_artist")"
+  ARTIST="$(audio_probe_tag_value "$f" "artist")"
+  TITLE="$(audio_probe_tag_value "$f" "title")"
+  ALBUM="$(audio_probe_tag_value "$f" "album")"
+  DURATION="$(audio_probe_duration_seconds "$f")"
 
   if [ -n "$ALBUM_ARTIST" ]; then
     ARTIST="$ALBUM_ARTIST"
@@ -287,8 +222,7 @@ for f in "${FILES[@]}"; do
       HAS_LYRICS_TAG=true
     fi
   else
-    if ffprobe -v error -show_entries format_tags -of default=noprint_wrappers=1:nokey=0 "$f" \
-      | grep -qi '^lyrics='; then
+    if [ -n "$(audio_probe_tag_value "$f" "lyrics")" ]; then
       HAS_LYRICS_TAG=true
     fi
   fi
@@ -309,7 +243,7 @@ for f in "${FILES[@]}"; do
   if [ "$CACHE_STATUS" = "not_found" ]; then
     if [ $((NOW_TS - CACHE_ATTEMPTED)) -lt "$LYRICS_RETRY_SECONDS" ]; then
       NEXT_RETRY=$((CACHE_ATTEMPTED + LYRICS_RETRY_SECONDS))
-      NEXT_DATE=$(date -r "$NEXT_RETRY" "+%Y-%m-%d" 2>/dev/null || echo "later")
+      NEXT_DATE=$(date_format_epoch "$NEXT_RETRY" "+%Y-%m-%d" 2>/dev/null || echo "later")
       echo "${BLUE}[LYRICS]${RESET} Cached not found; revisit ${NEXT_DATE}: $f"
       continue
     fi

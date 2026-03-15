@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # audlint-task.sh - Cron-oriented library quality scanner.
 # Scans albums via audlint-value (DR14 + spectral recode target) and upserts
-# album_quality rows in LIBRARY_DB.
+# album_quality rows in AUDL_DB_PATH.
 # GRADE is derived from DR14 dynamic range (dr_grade.py, genre-adaptive).
 # RECODE target is determined cascade-free by audlint-analyze (FFT on source files).
 
@@ -47,12 +47,13 @@ source "$BOOTSTRAP_DIR/../lib/sh/secure_backup.sh"
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
+AUDL_BIN_PATH="${AUDL_BIN_PATH:-$HOME/.local/bin}"
 
 AUDLINT_VALUE_BIN="${AUDLINT_VALUE_BIN:-$SCRIPT_DIR/audlint-value.sh}"
 AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$SCRIPT_DIR/audlint-analyze.sh}"
 GENRE_LOOKUP="${SCRIPT_DIR}/../lib/py/genre_lookup.py"
 TAG_WRITER="${SCRIPT_DIR}/tag_writer.sh"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${AUDL_PYTHON_BIN:-python3}"
 # shellcheck source=/dev/null
 [[ -f "$TAG_WRITER" ]] && source "$TAG_WRITER"
 NO_COLOR="${NO_COLOR:-}"
@@ -75,8 +76,8 @@ DRY_RUN=false
 FULL_DISCOVERY=false
 # Discovery timestamp cache: written after each successful discovery pass so the
 # next run can focus discovery on likely-changed albums (incremental walk).
-# Override path via AUDLINT_TASK_DISCOVERY_CACHE_FILE.
-DISCOVERY_CACHE_FILE="${AUDLINT_TASK_DISCOVERY_CACHE_FILE:-}"   # per-DB default resolved at runtime
+# Override path via AUDLINT_TASK_DISCOVERY_CACHE_FILE or AUDL_CACHE_PATH.
+DISCOVERY_CACHE_FILE="${AUDLINT_TASK_DISCOVERY_CACHE_FILE:-${AUDL_CACHE_PATH:-}}"   # per-DB default resolved at runtime
 # How many seconds to hold off re-queuing a scan_failed album (default 7 days).
 SCAN_FAIL_RETRY_SEC="${AUDLINT_TASK_SCAN_FAIL_RETRY_SEC:-$((7 * 86400))}"
 # Use a single global default lock path so cron and interactive runs share one lock.
@@ -97,6 +98,8 @@ declare -A AQ_SCAN_FAILED=()
 declare -A AQ_SOURCE_PATH_CHECKED=()  # source_path → last_checked_at; used for dir-mtime fast-path
 
 show_help() {
+  local bin_path_example
+  bin_path_example="$(env_expand_value "$AUDL_BIN_PATH")"
   cat <<EOF_HELP
 Quick use:
   $(basename "$0") --max-albums 50 --max-time 1200 /path/to/library
@@ -113,8 +116,10 @@ Mode:
     2) albums changed since album row last_checked_at
 
 Discovery:
-  By default, after the first run a timestamp cache file is written to
-  /tmp/audlint_task_last_discovery_<db-slug>. Subsequent runs use
+  By default, if AUDL_CACHE_PATH is set, that file is used as the discovery cache
+  (recommended: AUDL_CACHE_PATH="\$AUDL_PATH/library.cache"). If AUDL_CACHE_PATH is not
+  set, a per-DB cache file is written next to AUDL_DB_PATH as
+  .audlint_task_last_discovery_<db-filename>. Subsequent runs use
   'find -newer <cache>' on directories and audio files to prioritize only
   albums touched since the last discovery pass, reducing disk I/O.
   Use --full-discovery to force a complete walk (e.g. after adding
@@ -149,7 +154,7 @@ Performance (env):
   AUDLINT_TASK_DEADLINE_MARGIN_SEC=N          Extra deadline jitter cushion (default: 10).
 
 Cron example (20-minute window):
-  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; ~/bin/audlint-task.sh --max-albums 50 --max-time 1200 /path/to/library >> "\$HOME/audlint-task.log" 2>&1
+  PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin ; "$bin_path_example/audlint-task.sh" --max-albums 50 --max-time 1200 /path/to/library >> "\$HOME/audlint-task.log" 2>&1
 EOF_HELP
 }
 
@@ -175,11 +180,13 @@ if [[ "$USE_COLOR" == true ]]; then
   C_GREEN="${GREEN:-}"
   C_YELLOW="${YELLOW:-}"
   C_CYAN="${CYAN:-}"
+  C_DIM="${DIM:-}"
 else
   C_RESET=""
   C_GREEN=""
   C_YELLOW=""
   C_CYAN=""
+  C_DIM=""
 fi
 
 # classify_genre_tag is provided by lib/sh/audio.sh (audio_classify_genre_tag).
@@ -190,18 +197,47 @@ classify_genre_tag() { audio_classify_genre_tag "$@"; }
 is_lossy_codec()             { audio_is_lossy_codec "$@"; }
 source_quality_label()       { audio_source_quality_label "$@"; }
 
+task_value_text() {
+  local text="${1-}"
+  if [[ "$USE_COLOR" == true ]]; then
+    ui_value_text "$text"
+  else
+    printf '%s' "$text"
+  fi
+}
+
+task_arrow_hint_text() {
+  local text="${1-}"
+  [[ -n "$text" ]] || return 0
+  if [[ "$USE_COLOR" == true ]]; then
+    printf '  %s %s' "$(ui_arrow_text)" "$(task_value_text "$text")"
+  else
+    printf '  -> %s' "$text"
+  fi
+}
+
+task_album_info_text() {
+  local codec="${1-}"
+  local quality="${2-}"
+  local hint="${3-}"
+  printf '%s %s%s' "$(task_value_text "$codec")" "$(task_value_text "$quality")" "$hint"
+}
+
+task_elapsed_text() {
+  local elapsed="${1-}"
+  if [[ "$USE_COLOR" == true ]]; then
+    ui_wrap "$C_DIM" "${elapsed}s"
+  else
+    printf '%ss' "$elapsed"
+  fi
+}
+
 source_bitrate_kbps() {
   local in="$1"
   local raw
-  raw="$(ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  raw="${raw%%,*}"
-  raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" == "0" ]]; then
-    raw="$(ffprobe -v error -show_entries format=bit_rate -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-    raw="${raw%%,*}"
-    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  fi
-  if [[ "$raw" =~ ^[0-9]+$ && "$raw" != "0" ]]; then
+  audio_ffprobe_meta_prime "$in"
+  raw="$(audio_probe_bitrate_bps "$in" || true)"
+  if [[ "$raw" =~ ^[0-9]+$ ]] && ((raw > 0)); then
     printf '%s\n' "$(((raw + 500) / 1000))"
     return 0
   fi
@@ -210,54 +246,30 @@ source_bitrate_kbps() {
 
 album_bitrate_label() {
   local files_var="$1"
-  local -n files_ref="$files_var"
-  local f kbps total=0 count=0 avg=0
-  for f in "${files_ref[@]}"; do
-    kbps="$(source_bitrate_kbps "$f" || true)"
-    if [[ "$kbps" =~ ^[0-9]+$ && "$kbps" != "0" ]]; then
-      total=$((total + kbps))
-      count=$((count + 1))
-    fi
-  done
-  if ((count == 0)); then
-    printf ''
-    return 0
-  fi
-  avg=$(((total + (count / 2)) / count))
-  printf '%sk\n' "$avg"
+  local -A album_summary=()
+  audio_album_summary "$files_var" album_summary
+  printf '%s\n' "${album_summary[bitrate_label]:-}"
 }
 
-album_source_quality_label() { audio_album_source_quality_label "$@"; }
+album_source_quality_label() {
+  local files_var="$1"
+  local -A album_summary=()
+  audio_album_summary "$files_var" album_summary
+  printf '%s\n' "${album_summary[source_quality]:-?}"
+}
 
 album_codec_label() {
   local files_var="$1"
-  local -n files_ref="$files_var"
-  local first="" codec f
-  for f in "${files_ref[@]}"; do
-    codec="$(audio_codec_name "$f")"
-    [[ -n "$codec" ]] || codec="unknown"
-    if [[ -z "$first" ]]; then
-      first="$codec"
-    elif [[ "$codec" != "$first" ]]; then
-      printf 'mixed\n'
-      return 0
-    fi
-  done
-  [[ -n "$first" ]] || first="unknown"
-  printf '%s\n' "$first"
+  local -A album_summary=()
+  audio_album_summary "$files_var" album_summary
+  printf '%s\n' "${album_summary[codec_name]:-unknown}"
 }
 
 album_has_lossy_codec() {
   local files_var="$1"
-  local -n files_ref="$files_var"
-  local codec f
-  for f in "${files_ref[@]}"; do
-    codec="$(audio_codec_name "$f")"
-    if is_lossy_codec "$codec"; then
-      return 0
-    fi
-  done
-  return 1
+  local -A album_summary=()
+  audio_album_summary "$files_var" album_summary
+  [[ "${album_summary[has_lossy]:-0}" == "1" ]]
 }
 
 album_has_dsd_source_ext() {
@@ -336,9 +348,9 @@ source_policy_force_upscale() {
 }
 
 resolve_library_db_path() {
-  local raw="${LIBRARY_DB:-}"
-  if [[ -z "$raw" && -n "${SRC:-}" ]]; then
-    raw="$SRC/library.sqlite"
+  local raw="${AUDL_DB_PATH:-}"
+  if [[ -z "$raw" && -n "${AUDL_PATH:-}" ]]; then
+    raw="$AUDL_PATH/library.sqlite"
   fi
   [[ -n "$raw" ]] || return 1
   env_expand_value "$raw"
@@ -384,20 +396,6 @@ acquire_scan_lock_or_skip() {
 
 ffmpeg_concat_escape_path() {
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
-}
-
-stat_epoch_mtime() {
-  local path="$1"
-  local out=""
-  if out="$(stat -f '%m' "$path" 2>/dev/null)"; then
-    printf '%s\n' "$out"
-    return 0
-  fi
-  if out="$(stat -c '%Y' "$path" 2>/dev/null)"; then
-    printf '%s\n' "$out"
-    return 0
-  fi
-  return 1
 }
 
 collect_qty_audio_files() {
@@ -474,40 +472,22 @@ album_max_mtime_from_files() {
 }
 
 sample_fmt_to_bits() {
-  case "$1" in
-  s16 | s16p) printf '16' ;;
-  s24 | s24p) printf '24' ;;
-  s32 | s32p) printf '32' ;;
-  flt | fltp) printf '32' ;;
-  dbl | dblp) printf '64' ;;
-  *) printf '24' ;;
-  esac
+  local bits
+  bits="$(audio_sample_fmt_to_bits "$1")"
+  if [[ "$bits" =~ ^[0-9]+$ ]] && ((bits > 0)); then
+    printf '%s' "$bits"
+  else
+    printf '24'
+  fi
 }
 
 source_bit_depth_bits() {
-  local in="$1"
-  local bps sfmt
-  bps="$(ffprobe -v error -select_streams a:0 -show_entries stream=bits_per_raw_sample -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  bps="${bps%%,*}"
-  if [[ "$bps" =~ ^[0-9]+$ ]] && ((bps > 0)); then
-    printf '%s\n' "$bps"
-    return 0
-  fi
-  sfmt="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_fmt -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  sfmt="${sfmt%%,*}"
-  sample_fmt_to_bits "$sfmt"
+  audio_probe_bit_depth_bits "$1"
 }
 
 source_duration_seconds() {
-  local in="$1"
-  local dur
-  dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in" </dev/null 2>/dev/null || true)"
-  dur="${dur%%,*}"
-  if [[ "$dur" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    printf '%s\n' "$dur"
-  else
-    printf '0\n'
-  fi
+  audio_ffprobe_meta_prime "$1"
+  audio_probe_duration_seconds "$1"
 }
 
 estimate_merged_pcm_bytes() {
@@ -520,10 +500,9 @@ estimate_merged_pcm_bytes() {
 
   local first sr_hz ch bits total_sec est_bytes
   first="${files_ref[0]}"
-  sr_hz="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$first" </dev/null 2>/dev/null || true)"
-  sr_hz="${sr_hz%%,*}"
-  ch="$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$first" </dev/null 2>/dev/null || true)"
-  ch="${ch%%,*}"
+  audio_ffprobe_meta_prime "$first"
+  sr_hz="$(audio_probe_sample_rate_hz "$first")"
+  ch="$(audio_probe_channels "$first")"
   bits="$(source_bit_depth_bits "$first" || true)"
   [[ "$sr_hz" =~ ^[0-9]+$ ]] || sr_hz=0
   [[ "$ch" =~ ^[0-9]+$ ]] || ch=2
@@ -629,7 +608,8 @@ build_recode_fields() {
   local source_quality="$1"  # canonical form: "96000/24", "48000/32f", "44100/16"
   local recode_raw="$2"      # canonical Hz form from audlint-analyze: "48000/24"
   local force_recode_any_sr="${3:-0}"
-  local source_norm
+  local prior_source_quality="${4:-}"
+  local source_norm prior_source_norm
 
   local target_display
   target_display="$(audvalue_format_profile "$recode_raw")"
@@ -650,6 +630,15 @@ build_recode_fields() {
   local source_hz="${source_norm%%/*}"
   [[ "$source_hz" =~ ^[0-9]+$ ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
 
+  prior_source_norm="$(profile_normalize "$prior_source_quality" || true)"
+  local prior_source_hz="${prior_source_norm%%/*}"
+  if [[ "$prior_source_hz" =~ ^[0-9]+$ ]] \
+    && (( prior_source_hz > source_hz )) \
+    && (( target_hz < source_hz )); then
+    printf '%s\n%s\n' "Keep as-is" "0"
+    return
+  fi
+
   # needs_recode only when audlint-analyze recommends a lower SR than source.
   if (( target_hz < source_hz )); then
     printf '%s\n%s\n' "Recode to ${target_display}" "1"
@@ -660,19 +649,12 @@ build_recode_fields() {
 
 resolve_analyze_recode_target() {
   local album_dir="$1"
-  local recode_raw profile_file target_sr target_bits
+  local recode_raw
 
   [[ -x "$AUDLINT_ANALYZE_BIN" ]] || return 1
   recode_raw="$("$AUDLINT_ANALYZE_BIN" "$album_dir" 2>/dev/null || true)"
   if [[ ! "$recode_raw" =~ ^[0-9]+/[0-9]+$ ]]; then
-    profile_file="$album_dir/.sox_album_profile"
-    if [[ -f "$profile_file" ]]; then
-      target_sr="$(grep -E '^TARGET_SR=' "$profile_file" | head -n1 | cut -d= -f2- || true)"
-      target_bits="$(grep -E '^TARGET_BITS=' "$profile_file" | head -n1 | cut -d= -f2- || true)"
-      if [[ "$target_sr" =~ ^[0-9]+$ && "$target_bits" =~ ^[0-9]+$ ]]; then
-        recode_raw="${target_sr}/${target_bits}"
-      fi
-    fi
+    recode_raw="$(profile_cache_target_profile "$album_dir" || true)"
   fi
   [[ "$recode_raw" =~ ^[0-9]+/[0-9]+$ ]] || return 1
   printf '%s\n' "$recode_raw"
@@ -714,42 +696,10 @@ run_ffmpeg_concat_merge() {
   return 0
 }
 
-<<<<<<< HEAD:bin/qty_seek.sh
-merged_spectral_recommendation() {
-  local merged_file="$1"
-  local tmpdir="$2"
-
-  local sr dur start_sec excerpt eval_out rec
-  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate \
-        -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
-  dur="$(ffprobe -v error -show_entries format=duration \
-         -of csv=p=0 "$merged_file" </dev/null 2>/dev/null || true)"
-  sr="${sr%%,*}"
-  dur="${dur%%,*}"
-  [[ "$sr" =~ ^[0-9]+$ ]] || return 1
-
-  start_sec="$(awk -v d="${dur:-0}" 'BEGIN{s=(d>60)?(d/2 - 30):0; printf "%.3f", s}')"
-
-  # ── Pass 1: analyse at min(source_sr, 192 kHz) ───────────────────────────
-  local eval_sr_1
-  eval_sr_1=$(( sr > 192000 ? 192000 : sr ))
-  excerpt="$tmpdir/merged-excerpt-p1.wav"
-  ffmpeg -y -hide_banner -loglevel error -nostdin \
-    -ss "$start_sec" -t 60 -i "$merged_file" \
-    -ac 1 -ar "$eval_sr_1" -c:a pcm_s24le "$excerpt" </dev/null || return 1
-
-  eval_out="$("$PYTHON_BIN" "$PY_HELPER" "$excerpt" "$sr" "0" </dev/null 2>/dev/null || true)"
-  rec="$(kv_get "RECOMMEND" "$eval_out")"
-  [[ -n "$rec" ]] || return 1
-
-  printf '%s\n' "$rec"
-}
-
-=======
->>>>>>> develop:bin/audlint-task.sh
 scan_album_dir_merged() {
   local dir="$1"
   local genre_profile="${2:-standard}"
+  local prior_recode_source_profile="${3:-}"
   SCAN_LAST_OUT=""
 
   local files=()
@@ -757,16 +707,18 @@ scan_album_dir_merged() {
   [[ ${#files[@]} -gt 0 ]] || return 2
 
   local source_quality bitrate_label codec_name has_lossy
-  source_quality="$(album_source_quality_label files || true)"
-  bitrate_label="$(album_bitrate_label files || true)"
-  codec_name="$(album_codec_label files || true)"
-  has_lossy=0
-  if album_has_lossy_codec files; then
-    has_lossy=1
-  fi
+  local -A album_summary=()
+  audio_album_summary files album_summary
+  source_quality="${album_summary[source_quality]:-?}"
+  bitrate_label="${album_summary[bitrate_label]:-}"
+  codec_name="${album_summary[codec_name]:-unknown}"
+  has_lossy="${album_summary[has_lossy]:-0}"
   [[ -n "$source_quality" ]] || source_quality="?"
   [[ -n "$bitrate_label" ]] || bitrate_label="?"
   [[ -n "$codec_name" ]] || codec_name="unknown"
+
+  local prior_source_quality=""
+  prior_source_quality="$(profile_normalize "$prior_recode_source_profile" || true)"
 
   # ── audlint-value: DR14 + spectral recode target ─────────────────────────
   local audvalue_failed=0
@@ -795,16 +747,8 @@ scan_album_dir_merged() {
 
   local grade="$AUDVALUE_GRADE"
   local dr="$AUDVALUE_DR"
-  # DR14 score: map grade to a numeric score (1-10) for DB storage.
+  # quality_score is legacy; keep fresh writes empty and rely on dynamic_range_score.
   local score=""
-  case "$grade" in
-  S) score=10 ;;
-  A) score=8  ;;
-  B) score=6  ;;
-  C) score=4  ;;
-  F) score=1  ;;
-  *) score="" ;;
-  esac
 
   # ── RECODE determination ──────────────────────────────────────────────────
   local recode_rec needs_recode
@@ -813,7 +757,7 @@ scan_album_dir_merged() {
   if album_has_force_recode_source_ext files; then
     force_recode_any_sr=1
   fi
-  recode_fields="$(build_recode_fields "$source_quality" "$AUDVALUE_RECODE_TO" "$force_recode_any_sr")"
+  recode_fields="$(build_recode_fields "$source_quality" "$AUDVALUE_RECODE_TO" "$force_recode_any_sr" "$prior_source_quality")"
   recode_rec="$(printf '%s\n' "$recode_fields" | head -n1)"
   needs_recode="$(printf '%s\n' "$recode_fields" | tail -n1)"
   [[ "$needs_recode" =~ ^[01]$ ]] || needs_recode=0
@@ -848,9 +792,54 @@ scan_album_dir_merged() {
     "CODEC=$codec_name" \
     "RECODE=$recode_rec" \
     "NEEDS_RECODE=$needs_recode" \
-    "GENRE_PROFILE=$genre_profile"
+    "GENRE_PROFILE=$genre_profile" \
+    "RECODE_SOURCE_PROFILE=$prior_source_quality"
 
   return 0
+}
+
+lookup_album_quality_recode_context() {
+  local source_path="$1"
+  local artist="$2"
+  local album="$3"
+  local year="$4"
+  local row=""
+  local row_sep=$'\x1f'
+
+  if [[ -n "$source_path" ]]; then
+    row="$(
+      sqlite3 -separator "$row_sep" -noheader "$DB_PATH" \
+        "SELECT
+           COALESCE(current_quality,''),
+           COALESCE(recode_source_profile,''),
+           COALESCE(last_recoded_at,0)
+         FROM album_quality
+         WHERE source_path='$(sql_escape "$source_path")'
+         LIMIT 1;" 2>/dev/null || true
+    )"
+  fi
+
+  if [[ -z "$row" ]]; then
+    local artist_lc album_lc
+    artist_lc="$(norm_lc "$artist")"
+    album_lc="$(norm_lc "$album")"
+    [[ "$year" =~ ^[0-9]{4}$ ]] || year=0
+    row="$(
+      sqlite3 -separator "$row_sep" -noheader "$DB_PATH" \
+        "SELECT
+           COALESCE(current_quality,''),
+           COALESCE(recode_source_profile,''),
+           COALESCE(last_recoded_at,0)
+         FROM album_quality
+         WHERE artist_lc='$(sql_escape "$artist_lc")'
+           AND album_lc='$(sql_escape "$album_lc")'
+           AND year_int=$year
+         LIMIT 1;" 2>/dev/null || true
+    )"
+  fi
+
+  [[ -n "$row" ]] || return 1
+  printf '%s\n' "$row"
 }
 
 run_purge_missing() {
@@ -919,6 +908,30 @@ run_purge_missing() {
     || { printf 'Error: sqlite3 DELETE failed.\n' >&2; return 1; }
 
   printf 'Deleted %d rows.\n' "$total_missing"
+}
+
+scan_roadmap_next_item() {
+  local row=""
+
+  row="$(
+    sqlite3 -separator $'\t' -noheader "$DB_PATH" \
+      "SELECT id, artist, year_int, album, source_path, scan_kind
+         FROM scan_roadmap
+        WHERE scan_kind='new'
+        ORDER BY enqueued_at ASC, id ASC
+        LIMIT 1;" 2>/dev/null || true
+  )"
+  if [[ -n "$row" ]]; then
+    printf '%s\n' "$row"
+    return 0
+  fi
+
+  sqlite3 -separator $'\t' -noheader "$DB_PATH" \
+    "SELECT id, artist, year_int, album, source_path, scan_kind
+       FROM scan_roadmap
+      WHERE scan_kind='changed'
+      ORDER BY enqueued_at ASC, id ASC
+      LIMIT 1;" 2>/dev/null || true
 }
 
 record_scan_failure() {
@@ -1060,6 +1073,35 @@ scan_roadmap_enqueue() {
        enqueued_at=excluded.enqueued_at;" >/dev/null 2>&1
 }
 
+prune_stale_source_path_keys() {
+  local source_path="$1"
+  local artist="$2"
+  local album="$3"
+  local year="$4"
+  [[ -n "$source_path" ]] || return 0
+
+  local artist_lc album_lc source_path_sql artist_lc_sql album_lc_sql
+  artist_lc="$(norm_lc "$artist")"
+  album_lc="$(norm_lc "$album")"
+  [[ "$year" =~ ^[0-9]{4}$ ]] || year=0
+  source_path_sql="$(sql_escape "$source_path")"
+  artist_lc_sql="$(sql_escape "$artist_lc")"
+  album_lc_sql="$(sql_escape "$album_lc")"
+
+  # If metadata/tag year changed for the same folder, remove stale rows keyed
+  # under the old triplet so one source_path resolves to one canonical album key.
+  sqlite3 "$DB_PATH" \
+    "DELETE FROM album_quality
+      WHERE source_path='${source_path_sql}'
+        AND (artist_lc!='${artist_lc_sql}' OR album_lc!='${album_lc_sql}' OR year_int!=$year);" >/dev/null 2>&1 || true
+
+  # Drain all pending queue rows for this folder now; this item is the canonical
+  # in-flight scan for the source_path and prevents duplicate same-folder scans.
+  sqlite3 "$DB_PATH" \
+    "DELETE FROM scan_roadmap
+      WHERE source_path='${source_path_sql}';" >/dev/null 2>&1 || true
+}
+
 mark_scan_kind_done() {
   local scan_kind="$1"
   if [[ "$scan_kind" == "new" ]]; then
@@ -1072,17 +1114,18 @@ mark_scan_kind_done() {
 discover_scan_roadmap_item() {
   local dir="$1"
   ALBUMS_SCANNED=$((ALBUMS_SCANNED + 1))
+  local dir_mtime=0
+  dir_mtime="$(stat_epoch_mtime "$dir" || echo 0)"
+  [[ "$dir_mtime" =~ ^[0-9]+$ ]] || dir_mtime=0
 
   # Fast-path: if this directory's mtime hasn't advanced past its last_checked_at
   # timestamp we know no file inside it changed.  Skip ffprobe and file globbing
   # entirely — one stat(2) on the directory inode is all we need.
   if [[ -n "${AQ_SOURCE_PATH_CHECKED["$dir"]+x}" ]]; then
-    local _dir_mtime _dir_last_checked
-    _dir_mtime="$(stat_epoch_mtime "$dir" || echo 0)"
-    [[ "$_dir_mtime" =~ ^[0-9]+$ ]] || _dir_mtime=0
+    local _dir_last_checked
     _dir_last_checked="${AQ_SOURCE_PATH_CHECKED["$dir"]}"
     [[ "$_dir_last_checked" =~ ^[0-9]+$ ]] || _dir_last_checked=0
-    if ((_dir_mtime > 0 && _dir_last_checked > 0 && _dir_mtime <= _dir_last_checked)); then
+    if ((dir_mtime > 0 && _dir_last_checked > 0 && dir_mtime <= _dir_last_checked)); then
       ALBUMS_SKIPPED_UNCHANGED=$((ALBUMS_SKIPPED_UNCHANGED + 1))
       return 0
     fi
@@ -1106,6 +1149,10 @@ discover_scan_roadmap_item() {
   local album_mtime
   album_mtime="$(album_max_mtime_from_files files || echo 0)"
   [[ "$album_mtime" =~ ^[0-9]+$ ]] || album_mtime=0
+  local content_mtime="$album_mtime"
+  if ((dir_mtime > content_mtime)); then
+    content_mtime="$dir_mtime"
+  fi
 
   local artist_lc album_lc
   artist_lc="$(norm_lc "$artist")"
@@ -1124,21 +1171,25 @@ discover_scan_roadmap_item() {
   [[ "$row_failed" =~ ^[0-9]+$ ]] || row_failed=0
 
   if ((in_db == 1 && row_failed == 1)); then
+    if ((row_checked > 0 && content_mtime > row_checked)); then
+      :
+    else
     # Re-queue failed albums only after SCAN_FAIL_RETRY_SEC seconds have elapsed
     # since last_checked_at, to avoid hammering chronic failures every run.
-    local _now _retry_eligible=0
-    _now="$(date +%s)"
-    [[ "$_now" =~ ^[0-9]+$ ]] || _now=0
-    if ((_now > 0 && row_checked > 0 && (_now - row_checked) >= SCAN_FAIL_RETRY_SEC)); then
-      _retry_eligible=1
+      local _now _retry_eligible=0
+      _now="$(date +%s)"
+      [[ "$_now" =~ ^[0-9]+$ ]] || _now=0
+      if ((_now > 0 && row_checked > 0 && (_now - row_checked) >= SCAN_FAIL_RETRY_SEC)); then
+        _retry_eligible=1
+      fi
+      if ((_retry_eligible == 0)); then
+        ALBUMS_SKIPPED_FAIL_HOLD=$((ALBUMS_SKIPPED_FAIL_HOLD + 1))
+        return 0
+      fi
+      # Retry window has elapsed — fall through to re-queue as "changed".
     fi
-    if ((_retry_eligible == 0)); then
-      ALBUMS_SKIPPED_FAIL_HOLD=$((ALBUMS_SKIPPED_FAIL_HOLD + 1))
-      return 0
-    fi
-    # Retry window has elapsed — fall through to re-queue as "changed".
   fi
-  if ((in_db == 1 && row_checked > 0 && album_mtime <= row_checked)); then
+  if ((in_db == 1 && row_checked > 0 && content_mtime <= row_checked)); then
     ALBUMS_SKIPPED_UNCHANGED=$((ALBUMS_SKIPPED_UNCHANGED + 1))
     return 0
   fi
@@ -1148,7 +1199,7 @@ discover_scan_roadmap_item() {
     scan_kind="changed"
   fi
 
-  scan_roadmap_enqueue "$artist" "$artist_lc" "$album" "$album_lc" "$year" "$dir" "$album_mtime" "$scan_kind" || return 1
+  scan_roadmap_enqueue "$artist" "$artist_lc" "$album" "$album_lc" "$year" "$dir" "$content_mtime" "$scan_kind" || return 1
   if [[ "$scan_kind" == "new" ]]; then
     ROADMAP_ENQUEUED_NEW=$((ROADMAP_ENQUEUED_NEW + 1))
   else
@@ -1189,7 +1240,7 @@ discover_scan_roadmap() {
       *) return "$cb_status" ;;
       esac
     done 3< <(find "$ROOT" \
-      -type d \( -name ".__audlint_task_no_prune__" -prune \) \
+      -type d \( -name "before-recode" -prune \) \
       -o \( -type d -newer "$DISCOVERY_CACHE_FILE" -print0 \) \
       -o \( -type f \( "${audio_find_pred[@]}" \) -newer "$DISCOVERY_CACHE_FILE" -print0 \))
   else
@@ -1198,7 +1249,7 @@ discover_scan_roadmap() {
     else
       log "Discovery: full (no cache file yet)"
     fi
-    seek_walk_dirs "$ROOT" discover_scan_roadmap_item ".__audlint_task_no_prune__"
+    seek_walk_dirs "$ROOT" discover_scan_roadmap_item "before-recode"
   fi
 
   # Write/update the discovery cache timestamp so the next run can go incremental.
@@ -1217,12 +1268,13 @@ process_scan_roadmap_item() {
   local album="$3"
   local source_path="$4"
   local scan_kind="$5"
-  local display_name
+  local display_name source_path_sql
   display_name="$artist - $album"
+  source_path_sql="$(sql_escape "$source_path")"
 
   if [[ ! -d "$source_path" || ! -r "$source_path" ]]; then
     log "Purge missing: $display_name -> $source_path"
-    sqlite3 "$DB_PATH" "DELETE FROM album_quality WHERE source_path='${source_path//\'/\'\'}';" >/dev/null 2>&1 || true
+    sqlite3 "$DB_PATH" "DELETE FROM album_quality WHERE source_path='${source_path_sql}';" >/dev/null 2>&1 || true
     return 0
   fi
 
@@ -1230,8 +1282,31 @@ process_scan_roadmap_item() {
   collect_qty_audio_files "$source_path" files
   if [[ ${#files[@]} -eq 0 ]]; then
     log "Purge missing (no audio): $display_name -> $source_path"
-    sqlite3 "$DB_PATH" "DELETE FROM album_quality WHERE source_path='${source_path//\'/\'\'}';" >/dev/null 2>&1 || true
+    sqlite3 "$DB_PATH" "DELETE FROM album_quality WHERE source_path='${source_path_sql}';" >/dev/null 2>&1 || true
     return 0
+  fi
+
+  local probe_payload probe_artist probe_album probe_year
+  probe_payload="$(ffprobe_album_key "${files[0]}" 2>/dev/null || true)"
+  probe_artist="$(kv_get "ARTIST" "$probe_payload")"
+  probe_album="$(kv_get "ALBUM" "$probe_payload")"
+  probe_year="$(kv_get "YEAR" "$probe_payload")"
+  if [[ -n "$probe_artist" && -n "$probe_album" ]]; then
+    artist="$probe_artist"
+    album="$probe_album"
+  fi
+  if [[ "$probe_year" =~ ^[0-9]{4}$ ]]; then
+    year="$probe_year"
+  elif [[ ! "$year" =~ ^[0-9]{4}$ ]]; then
+    year=0
+  fi
+  display_name="$artist - $album"
+  prune_stale_source_path_keys "$source_path" "$artist" "$album" "$year"
+
+  local prev_recode_source_profile="" recode_context=""
+  recode_context="$(lookup_album_quality_recode_context "$source_path" "$artist" "$album" "$year" || true)"
+  if [[ -n "$recode_context" ]]; then
+    IFS=$'\x1f' read -r _prev_current_quality prev_recode_source_profile _prev_last_recoded <<< "$recode_context"
   fi
 
   ALBUMS_ANALYZED=$((ALBUMS_ANALYZED + 1))
@@ -1241,9 +1316,11 @@ process_scan_roadmap_item() {
   LAST_ANALYZED_ELAPSED_SEC=0
 
   local q_curr_profile q_bitrate_profile q_codec_profile
-  q_curr_profile="$(album_source_quality_label files || true)"
-  q_bitrate_profile="$(album_bitrate_label files || true)"
-  q_codec_profile="$(album_codec_label files || true)"
+  local -A q_album_summary=()
+  audio_album_summary files q_album_summary
+  q_curr_profile="${q_album_summary[source_quality]:-}"
+  q_bitrate_profile="${q_album_summary[bitrate_label]:-}"
+  q_codec_profile="${q_album_summary[codec_name]:-}"
   [[ -n "$q_curr_profile" ]] || q_curr_profile="?"
   [[ -n "$q_bitrate_profile" ]] || q_bitrate_profile="?"
   [[ -n "$q_codec_profile" ]] || q_codec_profile="unknown"
@@ -1256,13 +1333,14 @@ process_scan_roadmap_item() {
     ALBUMS_HIT=$((ALBUMS_HIT + 1))
     ROWS_UPSERTED=$((ROWS_UPSERTED + 1))
     mark_scan_kind_done "$scan_kind"
-    local mixed_info="${q_codec_profile} ${q_curr_profile}"
+    local mixed_info
+    mixed_info="$(task_album_info_text "$q_codec_profile" "$q_curr_profile")"
     local mixed_elapsed
     mixed_elapsed="$(( $(date +%s) - item_start ))"
     LAST_ANALYZED_ELAPSED_SEC="$mixed_elapsed"
-    printf '%s[%s] [%02d] %-55s  %s  [%sFail%s]%s  %ds\n' \
-      "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" "$mixed_info" "$C_YELLOW" "$C_RESET" "$C_RESET" \
-      "$mixed_elapsed"
+    printf '%s[%s]%s [%02d] %-55s  %s  [%sFail%s]  %s\n' \
+      "$C_CYAN" "$(date +%H:%M:%S)" "$C_RESET" "$ALBUMS_ANALYZED" "$display_name" "$mixed_info" "$C_YELLOW" "$C_RESET" \
+      "$(task_elapsed_text "$mixed_elapsed")"
     return 0
   fi
 
@@ -1272,7 +1350,7 @@ process_scan_roadmap_item() {
   # don't need a network call.
   local q_genre_profile="standard"
   local embedded_genre
-  embedded_genre="$(kv_get "GENRE" "$(ffprobe_album_key "${files[0]}" 2>/dev/null || true)")"
+  embedded_genre="$(kv_get "GENRE" "$probe_payload")"
   if [[ -n "$embedded_genre" ]]; then
     q_genre_profile="$(classify_genre_tag "$embedded_genre")"
   elif [[ -f "$GENRE_LOOKUP" ]]; then
@@ -1294,12 +1372,14 @@ process_scan_roadmap_item() {
         ROWS_UPSERTED=$((ROWS_UPSERTED + 1))
         mark_scan_kind_done "$scan_kind"
         local backup_elapsed
+        local backup_info
         backup_elapsed="$(( $(date +%s) - item_start ))"
+        backup_info="$(task_album_info_text "$q_codec_profile" "$q_curr_profile")"
         LAST_ANALYZED_ELAPSED_SEC="$backup_elapsed"
-        printf '%s[%s] [%02d] %-55s  %s %s  [%sFail%s]%s  %ds\n' \
-          "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
-          "$q_codec_profile" "$q_curr_profile" "$C_YELLOW" "$C_RESET" "$C_RESET" \
-          "$backup_elapsed"
+        printf '%s[%s]%s [%02d] %-55s  %s  [%sFail%s]  %s\n' \
+          "$C_CYAN" "$(date +%H:%M:%S)" "$C_RESET" "$ALBUMS_ANALYZED" "$display_name" \
+          "$backup_info" "$C_YELLOW" "$C_RESET" \
+          "$(task_elapsed_text "$backup_elapsed")"
         printf '%s          reason: %s%s\n' "$C_YELLOW" "$backup_reason" "$C_RESET"
         return 0
       fi
@@ -1312,7 +1392,7 @@ process_scan_roadmap_item() {
   fi
 
   local scan_out
-  if ! scan_album_dir_merged "$source_path" "$q_genre_profile" 2>/dev/null; then
+  if ! scan_album_dir_merged "$source_path" "$q_genre_profile" "$prev_recode_source_profile" 2>/dev/null; then
     local failure_reason="$MERGE_LAST_ERROR"
     [[ -n "$failure_reason" ]] || failure_reason="quality scan failed"
     record_scan_failure "$artist" "$year" "$album" "$source_path" "$checked_at" "$failure_reason"
@@ -1320,18 +1400,20 @@ process_scan_roadmap_item() {
     ROWS_UPSERTED=$((ROWS_UPSERTED + 1))
     mark_scan_kind_done "$scan_kind"
     local failure_elapsed
+    local failure_info
     failure_elapsed="$(( $(date +%s) - item_start ))"
+    failure_info="$(task_album_info_text "$q_codec_profile" "$q_curr_profile")"
     LAST_ANALYZED_ELAPSED_SEC="$failure_elapsed"
-    printf '%s[%s] [%02d] %-55s  %s %s  [%sFail%s]%s  %ds\n' \
-      "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
-      "$q_codec_profile" "$q_curr_profile" "$C_YELLOW" "$C_RESET" "$C_RESET" \
-      "$failure_elapsed"
+    printf '%s[%s]%s [%02d] %-55s  %s  [%sFail%s]  %s\n' \
+      "$C_CYAN" "$(date +%H:%M:%S)" "$C_RESET" "$ALBUMS_ANALYZED" "$display_name" \
+      "$failure_info" "$C_YELLOW" "$C_RESET" \
+      "$(task_elapsed_text "$failure_elapsed")"
     printf '%s          reason: %s%s\n' "$C_YELLOW" "$failure_reason" "$C_RESET"
     return 0
   fi
   scan_out="$SCAN_LAST_OUT"
 
-  local hit q_grade q_score q_dyn q_ups q_rec q_curr q_bitrate q_codec q_recode q_needs_recode q_genre needs_replace
+  local hit q_grade q_score q_dyn q_ups q_rec q_curr q_bitrate q_codec q_recode q_needs_recode q_genre q_recode_source_profile needs_replace
   hit="$(kv_get "HIT" "$scan_out")"
   q_grade="$(kv_get "GRADE" "$scan_out")"
   q_score="$(kv_get "SCORE" "$scan_out")"
@@ -1344,6 +1426,7 @@ process_scan_roadmap_item() {
   q_recode="$(kv_get "RECODE" "$scan_out")"
   q_needs_recode="$(kv_get "NEEDS_RECODE" "$scan_out")"
   q_genre="$(kv_get "GENRE_PROFILE" "$scan_out")"
+  q_recode_source_profile="$(kv_get "RECODE_SOURCE_PROFILE" "$scan_out")"
   [[ "$q_needs_recode" =~ ^[01]$ ]] || q_needs_recode=0
   [[ "$q_genre" =~ ^(audiophile|high_energy|standard)$ ]] || q_genre="$q_genre_profile"
 
@@ -1351,6 +1434,11 @@ process_scan_roadmap_item() {
   if source_policy_force_upscale files "$q_curr"; then
     q_ups="1"
   fi
+
+  # Stamp last_checked_at after the full scan path completes so discovery does
+  # not immediately re-queue the same album when scan-side writes bump the
+  # directory mtime during the run.
+  checked_at="$(date +%s)"
 
   needs_replace=0
   if [[ "$hit" == "1" ]]; then
@@ -1378,32 +1466,32 @@ process_scan_roadmap_item() {
     "$q_recode" \
     "$q_needs_recode" \
     "$q_genre" \
-    ""
+    "$q_recode_source_profile"
 
   ROWS_UPSERTED=$((ROWS_UPSERTED + 1))
   mark_scan_kind_done "$scan_kind"
   # Build a concise hint for the recode/action field (trim to keep lines readable).
   local _hint=""
   if [[ -n "$q_recode" && "$q_recode" != "Keep as-is" && "$q_recode" != "Keep"* ]]; then
-    _hint="  → ${q_recode}"
+    _hint="$(task_arrow_hint_text "$q_recode")"
   elif [[ -n "$q_rec" && "$q_rec" != "Keep"* ]]; then
-    _hint="  → ${q_rec}"
+    _hint="$(task_arrow_hint_text "$q_rec")"
   fi
 
   local _elapsed=$(( $(date +%s) - item_start ))
+  local _info
+  _info="$(task_album_info_text "$q_codec" "$q_curr" "$_hint")"
   LAST_ANALYZED_ELAPSED_SEC="$_elapsed"
   if [[ "$needs_replace" == "1" ]]; then
     ALBUMS_HIT=$((ALBUMS_HIT + 1))
-    printf '%s[%s] [%02d] %-55s  %s %s%s  [%s%s%s]  %ds\n' \
-      "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
-      "$q_codec" "$q_curr" "$_hint" \
-      "$C_YELLOW" "$q_grade" "$C_RESET" "$_elapsed"
+    printf '%s[%s]%s [%02d] %-55s  %s  [%s%s%s]  %s\n' \
+      "$C_CYAN" "$(date +%H:%M:%S)" "$C_RESET" "$ALBUMS_ANALYZED" "$display_name" \
+      "$_info" "$C_YELLOW" "$q_grade" "$C_RESET" "$(task_elapsed_text "$_elapsed")"
   else
     ALBUMS_OK=$((ALBUMS_OK + 1))
-    printf '%s[%s] [%02d] %-55s  %s %s  [%s%s%s]  %ds\n' \
-      "$C_CYAN" "$(date +%H:%M:%S)" "$ALBUMS_ANALYZED" "$display_name" \
-      "$q_codec" "$q_curr" \
-      "$C_GREEN" "$q_grade" "$C_RESET" "$_elapsed"
+    printf '%s[%s]%s [%02d] %-55s  %s  [%s%s%s]  %s\n' \
+      "$C_CYAN" "$(date +%H:%M:%S)" "$C_RESET" "$ALBUMS_ANALYZED" "$display_name" \
+      "$_info" "$C_GREEN" "$q_grade" "$C_RESET" "$(task_elapsed_text "$_elapsed")"
   fi
 }
 
@@ -1484,13 +1572,7 @@ process_scan_roadmap_batch() {
       break
     fi
 
-    row="$(
-      sqlite3 -separator $'\t' -noheader "$DB_PATH" \
-        "SELECT id, artist, year_int, album, source_path, scan_kind
-         FROM scan_roadmap
-         ORDER BY CASE scan_kind WHEN 'new' THEN 0 ELSE 1 END ASC, enqueued_at ASC, id ASC
-         LIMIT 1;" 2>/dev/null || true
-    )"
+    row="$(scan_roadmap_next_item)"
     [[ -n "$row" ]] || break
 
     IFS=$'\t' read -r roadmap_id artist year album source_path scan_kind <<< "$row"
@@ -1587,7 +1669,7 @@ normalize_nonneg_int DEADLINE_MARGIN_SEC 10
 
 DB_PATH="$(resolve_library_db_path || true)"
 if [[ -z "$DB_PATH" ]]; then
-  echo "Error: LIBRARY_DB is not set. Example: LIBRARY_DB='\$SRC/library.sqlite'" >&2
+  echo "Error: AUDL_DB_PATH is not set. Example: AUDL_DB_PATH='\$AUDL_PATH/library.sqlite'" >&2
   exit 2
 fi
 
@@ -1634,12 +1716,16 @@ album_quality_db_backup "$DB_PATH" "${ALBUM_QUALITY_DB_SCHEMA_CHANGED:-0}" || {
   exit 1
 }
 
-# Derive a stable per-DB discovery cache path so multiple libraries on the
-# same machine don't share a single timestamp file (unless overridden by env).
+# Expand configured cache path (if provided) and otherwise derive a stable
+# per-DB cache path next to the DB so it survives reboot/temp cleanup.
+if [[ -n "$DISCOVERY_CACHE_FILE" ]]; then
+  DISCOVERY_CACHE_FILE="$(env_expand_value "$DISCOVERY_CACHE_FILE")"
+fi
 if [[ -z "$DISCOVERY_CACHE_FILE" ]]; then
-  _db_slug="$(printf '%s' "$DB_PATH" | tr -cs 'A-Za-z0-9_-' '_')"
-  DISCOVERY_CACHE_FILE="${TMPDIR:-/tmp}/audlint_task_last_discovery_${_db_slug}"
-  unset _db_slug
+  _db_cache_dir="$(dirname "$DB_PATH")"
+  _db_cache_base="$(basename "$DB_PATH")"
+  DISCOVERY_CACHE_FILE="${_db_cache_dir}/.audlint_task_last_discovery_${_db_cache_base}"
+  unset _db_cache_dir _db_cache_base
 fi
 
 if [[ "$PURGE_MISSING" == true ]]; then
@@ -1672,7 +1758,7 @@ case "${FFT_FAST_MODE,,}" in
 esac
 
 T_START="$(date +%s)"
-log "Start. root=$(realpath "$ROOT") db=$DB_PATH max_albums=$MAX_ALBUMS max_time=${MAX_TIME}s"
+log "Start. root=$(path_resolve "$ROOT" 2>/dev/null || printf '%s' "$ROOT") db=$DB_PATH max_albums=$MAX_ALBUMS max_time=${MAX_TIME}s"
 if ((MAX_TIME > 0)); then
   log "Deadline pacing: finish_buffer=${DEADLINE_FINISH_BUFFER_SEC}s next_album_budget=${DEADLINE_NEXT_ALBUM_BUDGET_SEC}s margin=${DEADLINE_MARGIN_SEC}s"
 fi
@@ -1732,7 +1818,7 @@ else
 
   pending_after_discovery="$(scan_roadmap_count)"
   [[ "$pending_after_discovery" =~ ^[0-9]+$ ]] || pending_after_discovery=0
-  log "Phase 2/3: discovery done. queued=$pending_after_discovery new_enqueued=$ROADMAP_ENQUEUED_NEW changed_enqueued=$ROADMAP_ENQUEUED_CHANGED skipped_unchanged=$ALBUMS_SKIPPED_UNCHANGED elapsed=$(elapsed_s)s phase_elapsed=$(( $(date +%s) - T_DISCOVERY_START ))s"
+  log "Phase 2/3: discovery done. roadmap_pending=$pending_after_discovery new_enqueued=$ROADMAP_ENQUEUED_NEW changed_enqueued=$ROADMAP_ENQUEUED_CHANGED skipped_unchanged=$ALBUMS_SKIPPED_UNCHANGED elapsed=$(elapsed_s)s phase_elapsed=$(( $(date +%s) - T_DISCOVERY_START ))s"
 fi
 
 T_BATCH2_START="$(date +%s)"

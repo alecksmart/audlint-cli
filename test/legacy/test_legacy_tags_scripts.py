@@ -43,6 +43,8 @@ def _create_schema(db_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_lyrics_lookup
               ON lyrics_cache(artist_lc, title_lc, album_lc, duration_int);
+            CREATE INDEX IF NOT EXISTS idx_lyrics_lookup_recent
+              ON lyrics_cache(artist_lc, title_lc, album_lc, duration_int, updated_at DESC);
             """
         )
         conn.commit()
@@ -82,40 +84,80 @@ class TagsScriptsTests(unittest.TestCase):
                 """\
                 #!/bin/bash
                 args="$*"
+                if [ -n "${FFPROBE_LOG:-}" ]; then
+                  printf "%s\\n" "$args" >> "${FFPROBE_LOG}"
+                fi
                 file="${@: -1}"
                 base="$(basename "$file")"
                 ext="${base##*.}"
                 ext_lc="$(printf "%s" "$ext" | tr '[:upper:]' '[:lower:]')"
+                codec="${FFPROBE_CODEC:-}"
+                if [ -z "$codec" ]; then
+                  if [ "$ext_lc" = "mp3" ]; then
+                    codec="mp3"
+                  else
+                    codec="flac"
+                  fi
+                fi
+                bitrate="${FFPROBE_BITRATE:-2116000}"
+                duration="${FFPROBE_DURATION:-123.0}"
+                artist="${FFPROBE_ARTIST:-Test Artist}"
+                title="${FFPROBE_TITLE:-Test Song}"
+                album="${FFPROBE_ALBUM:-Test Album}"
+                album_artist="${FFPROBE_ALBUM_ARTIST:-}"
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<EOF
+[STREAM]
+index=0
+codec_name=$codec
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=96000
+bits_per_raw_sample=24
+bits_per_sample=0
+sample_fmt=s32
+bit_rate=$bitrate
+channels=2
+[/STREAM]
+[FORMAT]
+duration=$duration
+bit_rate=$bitrate
+TAG:album_artist=$album_artist
+TAG:artist=$artist
+TAG:title=$title
+TAG:album=$album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
 
                 if [[ "$args" == *"stream=codec_name"* ]]; then
-                  if [ -n "${FFPROBE_CODEC:-}" ]; then
-                    echo "${FFPROBE_CODEC}"
-                  elif [ "$ext_lc" = "mp3" ]; then
-                    echo "mp3"
-                  else
-                    echo "flac"
-                  fi
+                  echo "$codec"
                   exit 0
                 fi
 
                 if [[ "$args" == *"format_tags=album_artist"* ]]; then
-                  printf "%s" "${FFPROBE_ALBUM_ARTIST:-}"
+                  printf "%s" "$album_artist"
                   exit 0
                 fi
                 if [[ "$args" == *"format_tags=artist"* ]]; then
-                  printf "%s" "${FFPROBE_ARTIST:-Test Artist}"
+                  printf "%s" "$artist"
                   exit 0
                 fi
                 if [[ "$args" == *"format_tags=title"* ]]; then
-                  printf "%s" "${FFPROBE_TITLE:-Test Song}"
+                  printf "%s" "$title"
                   exit 0
                 fi
                 if [[ "$args" == *"format_tags=album"* ]]; then
-                  printf "%s" "${FFPROBE_ALBUM:-Test Album}"
+                  printf "%s" "$album"
                   exit 0
                 fi
                 if [[ "$args" == *"format=duration"* ]]; then
-                  printf "%s" "${FFPROBE_DURATION:-123.0}"
+                  printf "%s" "$duration"
                   exit 0
                 fi
 
@@ -230,7 +272,7 @@ class TagsScriptsTests(unittest.TestCase):
         env = self.env_base.copy()
         env.update(
             {
-                "LIBRARY_DB": str(db_path),
+                "AUDL_DB_PATH": str(db_path),
                 "CURL_OUTPUT": '[{"syncedLyrics":"[00:00.00]Hello world"}]',
                 "CURL_LOG": str(curl_log),
                 "METAFLAC_LOG": str(metaflac_log),
@@ -254,6 +296,29 @@ class TagsScriptsTests(unittest.TestCase):
 
         self.assertTrue(curl_log.exists())
         self.assertTrue(metaflac_log.exists())
+
+    def test_lyrics_album_uses_single_ffprobe_probe_per_file(self) -> None:
+        album = self.tmpdir / "album"
+        album.mkdir()
+        (album / ".env").write_text("", encoding="utf-8")
+        (album / "01 - Song.flac").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+
+        env = self.env_base.copy()
+        env.update(
+            {
+                "AUDL_DB_PATH": str(db_path),
+                "CURL_OUTPUT": '[{"syncedLyrics":"[00:00.00]Hello world"}]',
+                "FFPROBE_LOG": str(ffprobe_log),
+            }
+        )
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album, env=env)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue(ffprobe_log.exists())
+        self.assertEqual(len(ffprobe_log.read_text(encoding="utf-8").splitlines()), 1)
 
     def test_lyrics_album_backup_bundles_use_daily_weekly_monthly_and_clean_legacy(self) -> None:
         album = self.tmpdir / "album"
@@ -282,7 +347,7 @@ class TagsScriptsTests(unittest.TestCase):
         env = self.env_base.copy()
         env.update(
             {
-                "LIBRARY_DB": str(db_path),
+                "AUDL_DB_PATH": str(db_path),
                 "CURL_OUTPUT": '[{"syncedLyrics":"[00:00.00]Hello world"}]',
             }
         )
@@ -318,7 +383,7 @@ class TagsScriptsTests(unittest.TestCase):
         Path(f"{db_path}.daily.bak.stamp").write_text("legacy-stamp", encoding="utf-8")
 
         env = self.env_base.copy()
-        env.update({"LIBRARY_DB": str(db_path)})
+        env.update({"AUDL_DB_PATH": str(db_path)})
 
         proc = self._run(LYRICS_ALBUM, ["--backup-maintenance-only"], cwd=work, env=env)
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
@@ -365,12 +430,73 @@ class TagsScriptsTests(unittest.TestCase):
 
         curl_log = self.tmpdir / "curl.log"
         env = self.env_base.copy()
-        env.update({"LIBRARY_DB": str(db_path), "CURL_LOG": str(curl_log)})
+        env.update({"AUDL_DB_PATH": str(db_path), "CURL_LOG": str(curl_log)})
 
         proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album, env=env)
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Cached not found; revisit", proc.stdout)
         self.assertFalse(curl_log.exists(), "network fetch should be skipped during backoff")
+
+    def test_lyrics_album_replaces_existing_window_rows_instead_of_appending(self) -> None:
+        album = self.tmpdir / "album"
+        album.mkdir()
+        (album / ".env").write_text("", encoding="utf-8")
+        track = album / "01 - Song.flac"
+        track.write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        _create_schema(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO lyrics_cache (
+                  artist_lc, title_lc, album_lc, duration_int, path, status, lyrics, source, attempted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "test artist",
+                    "test song",
+                    "test album",
+                    121,
+                    str(track),
+                    "not_found",
+                    "",
+                    "lrclib",
+                    10,
+                    10,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        env = self.env_base.copy()
+        env.update(
+            {
+                "AUDL_DB_PATH": str(db_path),
+                "CURL_OUTPUT": '[{"syncedLyrics":"[00:00.00]Hello world"}]',
+            }
+        )
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album, env=env)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*), status, duration_int
+                FROM lyrics_cache
+                WHERE artist_lc='test artist' AND title_lc='test song' AND album_lc='test album'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], "found")
+        self.assertEqual(row[2], 123)
 
     def test_lyrics_album_skips_when_tag_already_exists(self) -> None:
         album = self.tmpdir / "album"
@@ -383,7 +509,7 @@ class TagsScriptsTests(unittest.TestCase):
         env = self.env_base.copy()
         env.update(
             {
-                "LIBRARY_DB": str(db_path),
+                "AUDL_DB_PATH": str(db_path),
                 "METAFLAC_HAS_LYRICS": "1",
                 "CURL_LOG": str(curl_log),
             }
@@ -441,7 +567,7 @@ class TagsScriptsTests(unittest.TestCase):
         env = self.env_base.copy()
         env.update(
             {
-                "LIBRARY_DB": str(db_path),
+                "AUDL_DB_PATH": str(db_path),
                 "FFPROBE_ARTIST": "Test Artist",
                 "FFPROBE_TITLE": "Test Song",
                 "FFPROBE_ALBUM": "Test Album",
@@ -454,6 +580,68 @@ class TagsScriptsTests(unittest.TestCase):
         self.assertIn("Done.", proc.stdout)
         self.assertFalse((album / "01 - Song.lrc").exists())
         self.assertFalse((album / "01 - Song.txt").exists())
+
+        conn = sqlite3.connect(db_path)
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM lyrics_cache").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 0)
+
+    def test_clear_tags_uses_single_ffprobe_probe_per_file(self) -> None:
+        album = self.tmpdir / "album"
+        album.mkdir()
+        (album / ".env").write_text("", encoding="utf-8")
+        (album / "01 - Song.flac").write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        _create_schema(db_path)
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+
+        env = self.env_base.copy()
+        env.update(
+            {
+                "AUDL_DB_PATH": str(db_path),
+                "FFPROBE_LOG": str(ffprobe_log),
+            }
+        )
+
+        proc = self._run(CLEAR_TAGS, ["."], cwd=album, env=env)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue(ffprobe_log.exists())
+        self.assertEqual(len(ffprobe_log.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_clear_tags_removes_windowed_duration_matches(self) -> None:
+        album = self.tmpdir / "album"
+        album.mkdir()
+        (album / ".env").write_text("", encoding="utf-8")
+        track = album / "01 - Song.flac"
+        track.write_text("", encoding="utf-8")
+
+        db_path = self.tmpdir / "library.sqlite"
+        _create_schema(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executemany(
+                """
+                INSERT INTO lyrics_cache (
+                  artist_lc, title_lc, album_lc, duration_int, path, status, lyrics, source, attempted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("test artist", "test song", "test album", 121, str(track), "found", "x", "lrclib", 1, 1),
+                    ("test artist", "test song", "test album", 125, str(track), "found", "x", "lrclib", 2, 2),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        env = self.env_base.copy()
+        env.update({"AUDL_DB_PATH": str(db_path)})
+
+        proc = self._run(CLEAR_TAGS, ["."], cwd=album, env=env)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:

@@ -245,29 +245,13 @@ EOF
         self.assertIn("Auto profile: 48000/24", proc.stdout)
         self.assertIn("Boost mode: enabled", proc.stdout)
 
-    def test_auto_profile_exact_passes_exact_flag_to_analyzer(self) -> None:
-        src = self.album_dir / "01-hr.wav"
-        src.write_text("", encoding="utf-8")
-        analyze_log = self.tmpdir / "audlint-analyze.log"
-
-        proc = self._run(
-            ["--exact"],
-            extra_env={"STUB_AUDLINT_ANALYZE_LOG": str(analyze_log)},
-        )
-        self.assertNotEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("confirmation required", proc.stderr)
-
-        analyze_args = analyze_log.read_text(encoding="utf-8")
-        self.assertIn("--exact", analyze_args)
-        self.assertIn(".", analyze_args)
-
-    def test_exact_requires_auto_profile_mode(self) -> None:
+    def test_exact_is_not_supported_in_any2flac(self) -> None:
         src = self.album_dir / "01-hr.wav"
         src.write_text("", encoding="utf-8")
 
-        proc = self._run(["48/24", "--exact"])
+        proc = self._run(["--exact"])
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("only supported when auto profile mode is active", proc.stderr)
+        self.assertIn("unknown option: --exact", proc.stderr)
 
     def test_auto_profile_uses_cached_target_when_analyzer_reports_no_reencode(self) -> None:
         src = self.album_dir / "01-hr.wav"

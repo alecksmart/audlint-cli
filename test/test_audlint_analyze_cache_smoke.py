@@ -170,6 +170,11 @@ EOF
         self.assertTrue(done_path.exists())
 
         profile_text = profile_path.read_text(encoding="utf-8")
+        self.assertIn("RULESET=v6-auto", profile_text)
+        self.assertIn("REQUESTED_ANALYSIS_MODE=auto", profile_text)
+        self.assertIn("ANALYSIS_MODE=exact", profile_text)
+        self.assertIn("AUTO_EXACT_FALLBACK=1", profile_text)
+        self.assertIn("ALBUM_CONFIDENCE=low", profile_text)
         self.assertIn("SOURCE_FINGERPRINT=", profile_text)
         self.assertIn("CONFIG_FINGERPRINT=", profile_text)
         self.assertIn("FINGERPRINT_MODE=meta+headtail-v1", profile_text)
@@ -220,6 +225,19 @@ EOF
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertEqual(proc.stdout.strip(), "44100/16")
 
+    def test_auto_json_falls_back_to_exact_on_low_confidence(self) -> None:
+        proc = self._run("--json")
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["requested_analysis_mode"], "auto")
+        self.assertEqual(payload["analysis_mode"], "exact")
+        self.assertTrue(payload["auto_exact_fallback"])
+        self.assertEqual(payload["album_confidence"], "low")
+        self.assertEqual(payload["tracks"][0]["requested_analysis_mode"], "auto")
+        self.assertEqual(payload["tracks"][0]["analysis_mode"], "exact")
+        self.assertTrue(payload["tracks"][0]["auto_exact_fallback"])
+
     def test_exact_mode_uses_separate_profile_cache_ruleset(self) -> None:
         first = self._run()
         self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)
@@ -230,17 +248,23 @@ EOF
         self.assertEqual(second.stdout.strip(), "44100/16")
 
         profile_text = (self.album_dir / ".sox_album_profile").read_text(encoding="utf-8")
-        self.assertIn("RULESET=v5-exact", profile_text)
+        self.assertIn("RULESET=v6-exact", profile_text)
+        self.assertIn("REQUESTED_ANALYSIS_MODE=exact", profile_text)
         self.assertIn("ANALYSIS_MODE=exact", profile_text)
+        self.assertIn("AUTO_EXACT_FALLBACK=0", profile_text)
 
     def test_exact_json_reports_mode_and_confidence(self) -> None:
         proc = self._run("--exact", "--json")
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
         payload = json.loads(proc.stdout)
+        self.assertEqual(payload["requested_analysis_mode"], "exact")
         self.assertEqual(payload["analysis_mode"], "exact")
+        self.assertFalse(payload["auto_exact_fallback"])
         self.assertEqual(payload["album_confidence"], "low")
+        self.assertEqual(payload["tracks"][0]["requested_analysis_mode"], "exact")
         self.assertEqual(payload["tracks"][0]["analysis_mode"], "exact")
+        self.assertFalse(payload["tracks"][0]["auto_exact_fallback"])
         self.assertEqual(payload["tracks"][0]["analysis_confidence"], "low")
         self.assertEqual(payload["tracks"][0]["selected_channel"], "mono")
 
@@ -436,6 +460,7 @@ EOF
                 "-55",
                 "8",
                 "1",
+                "fast",
                 str(self.album_dir / "01-track.wav"),
             ],
             cwd=str(self.album_dir),

@@ -71,17 +71,12 @@ PYTHON_BIN="${AUDL_PYTHON_BIN:-python3}"
 AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$SCRIPT_DIR/audlint-analyze.sh}"
 DR14METER_BIN="${DR14METER_BIN:-dr14meter}"
 DR_GRADE_PY="${DR_GRADE_PY:-$SCRIPT_DIR/../lib/py/dr_grade.py}"
-EXACT_ANALYSIS=0
 
 show_help() {
   cat <<'EOF'
-Usage: audlint-value [--exact] ALBUM_DIR
+Usage: audlint-value ALBUM_DIR
 
 Print DR14 dynamic range + recode target analysis as JSON.
-
-Options:
-  --exact            Run the slower, deeper audlint-analyze mode before
-                     combining the spectral result with DR14 output.
 
 Output fields:
   recodeTo          — target profile from spectral analysis e.g. "48000/24"
@@ -144,10 +139,6 @@ while [[ $# -gt 0 ]]; do
     show_help
     exit 0
     ;;
-  --exact)
-    EXACT_ANALYSIS=1
-    shift
-    ;;
   -*)
     show_help >&2
     exit 2
@@ -175,9 +166,6 @@ have "$PYTHON_BIN" || { echo "Missing dependency: python3" >&2; exit 1; }
 
 # ── Step 1: spectral recode target ─────────────────────────────────────────
 analyze_cmd=("$AUDLINT_ANALYZE_BIN")
-if ((EXACT_ANALYSIS == 1)); then
-  analyze_cmd+=(--exact)
-fi
 analyze_cmd+=("$ALBUM_DIR")
 recode_to="$("${analyze_cmd[@]}")"
 if [[ ! "$recode_to" =~ ^[0-9]+/[0-9]+$ ]]; then

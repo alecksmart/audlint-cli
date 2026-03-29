@@ -86,9 +86,9 @@ EOF
             check=False,
         )
 
-    def test_exact_passes_flag_to_analyzer_and_preserves_json_contract(self) -> None:
+    def test_value_uses_analyzer_auto_mode_and_preserves_json_contract(self) -> None:
         analyze_log = self.tmpdir / "audlint-analyze.log"
-        proc = self._run(["--exact", str(self.album_dir)], extra_env={"STUB_AUDLINT_ANALYZE_LOG": str(analyze_log)})
+        proc = self._run([str(self.album_dir)], extra_env={"STUB_AUDLINT_ANALYZE_LOG": str(analyze_log)})
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
         payload = json.loads(proc.stdout)
@@ -103,8 +103,8 @@ EOF
         self.assertEqual(payload["tracks"]["01 Track.flac"], 9)
 
         analyze_args = analyze_log.read_text(encoding="utf-8")
-        self.assertIn("--exact", analyze_args)
         self.assertIn(str(self.album_dir), analyze_args)
+        self.assertNotIn("--exact", analyze_args)
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 
-SCRIPT_RULESET_BASE="v5"
+SCRIPT_RULESET_BASE="v6"
 HEADROOM_HZ="${AUDLINT_ANALYZE_HEADROOM_HZ:-500}"
 THRESH_REL_DB="${AUDLINT_ANALYZE_THRESH_REL_DB:--55}"
 WINDOW_SEC="${AUDLINT_ANALYZE_WINDOW_SEC:-8}"
@@ -78,10 +78,14 @@ Determine the ideal recode target profile (SR/bits) for an album directory by:
 
 Options:
   --exact:
-    run a slower, deeper analysis pass with more windows and per-channel
-    verification before choosing the target profile
+    force a slower, deeper analysis pass with more windows and per-channel
+    verification instead of using the default auto mode
   --json:
     emit JSON payload instead of SR/bits text
+
+Default mode:
+  audlint-analyze first runs the fast pass. If album confidence is low, it
+  automatically reruns exact analysis and returns that result.
 
 Output:
   default:
@@ -120,7 +124,7 @@ if [[ $# -eq 1 && ("${1:-}" == "-h" || "${1:-}" == "--help") ]]; then
 fi
 
 OUTPUT_MODE="profile"
-ANALYSIS_MODE="fast"
+REQUESTED_ANALYSIS_MODE="auto"
 while [[ $# -gt 0 ]]; do
   case "${1:-}" in
   --json)
@@ -128,7 +132,7 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --exact)
-    ANALYSIS_MODE="exact"
+    REQUESTED_ANALYSIS_MODE="exact"
     shift
     ;;
   *)
@@ -138,7 +142,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $# -eq 1 ]] || { show_help >&2; exit 2; }
-SCRIPT_RULESET="${SCRIPT_RULESET_BASE}-${ANALYSIS_MODE}"
+SCRIPT_RULESET="${SCRIPT_RULESET_BASE}-${REQUESTED_ANALYSIS_MODE}"
 
 if ! have "$PYTHON_BIN"; then
   echo "Missing dep: python3" >&2
@@ -226,7 +230,7 @@ fi
 # Analyse all tracks → choose album target.
 tmpjson="$(mktemp -t sox_analyze.XXXXXX)"
 
-if ! "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" analyze "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "$ANALYSIS_MODE" "${FILES[@]}" >"$tmpjson"; then
+if ! "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" analyze "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "$REQUESTED_ANALYSIS_MODE" "${FILES[@]}" >"$tmpjson"; then
   echo "Analysis failed." >&2
   rm -f "$tmpjson"
   exit 1
@@ -245,6 +249,10 @@ import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 family = payload.get("album_family_sr")
+print(payload.get("requested_analysis_mode", "auto"))
+print(payload.get("analysis_mode", "fast"))
+print("1" if payload.get("auto_exact_fallback") else "0")
+print(payload.get("album_confidence", "low"))
 print("1" if payload.get("album_fake_upscale") else "0")
 print("1" if payload.get("album_has_fake_upscale_tracks") else "0")
 print("" if family is None else str(family))
@@ -252,6 +260,10 @@ print(payload.get("album_decision", "keep_source"))
 PY
 )"
 {
+  IFS= read -r REQUESTED_ANALYSIS_MODE_EFFECTIVE
+  IFS= read -r ANALYSIS_MODE
+  IFS= read -r AUTO_EXACT_FALLBACK
+  IFS= read -r ALBUM_CONFIDENCE
   IFS= read -r ALBUM_FAKE_UPSCALE
   IFS= read -r ALBUM_HAS_FAKE_UPSCALE_TRACKS
   IFS= read -r ALBUM_FAMILY_SR
@@ -260,7 +272,10 @@ PY
 
 cat >"$PROFILE_FILE" <<EOF
 RULESET=$SCRIPT_RULESET
+REQUESTED_ANALYSIS_MODE=$REQUESTED_ANALYSIS_MODE_EFFECTIVE
 ANALYSIS_MODE=$ANALYSIS_MODE
+AUTO_EXACT_FALLBACK=$AUTO_EXACT_FALLBACK
+ALBUM_CONFIDENCE=$ALBUM_CONFIDENCE
 TARGET_SR=$TARGET_SR
 TARGET_BITS=$TARGET_BITS
 ALBUM_FAKE_UPSCALE=$ALBUM_FAKE_UPSCALE

@@ -2,7 +2,7 @@
 # cue2flac.sh — Split a high-resolution audio file into per-track FLACs using a .cue sheet.
 #
 # Usage:
-#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--help-profiles] [--check-upscale] [--exact] [--out <output_root>] [--dry-run] [--yes]
+#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--help-profiles] [--check-upscale] [--out <output_root>] [--dry-run] [--yes]
 #
 # Input:  directory containing source audio + .cue, OR direct path to a .cue file.
 # Output: AUDL_CUE2FLAC_OUTPUT_DIR/<Artist>/<Year> - <Album>/NN Track Title.flac
@@ -17,7 +17,6 @@
 # Multi-file:    CUE sheets with multiple FILE directives (e.g. vinyl Side A / Side B) are supported.
 # --check-upscale: spectral target analysis via audlint-analyze.sh;
 #                  auto-selects the recommended encode profile instead of defaulting to 192000/24.
-# --exact:         use the slower, deeper analyzer mode together with --check-upscale.
 
 set -Eeuo pipefail
 
@@ -66,7 +65,6 @@ INPUT_ARG="."
 DEFAULT_PROFILE="192000/24"
 TARGET_PROFILE=""
 CHECK_UPSCALE=0
-EXACT_ANALYSIS=0
 OUTPUT_ROOT_ARG=""
 DRY_RUN=0
 ASSUME_YES=0
@@ -82,7 +80,6 @@ Options:
   --profile <sr/bits>    Target encode profile (default: 192000/24). No upscale. Mutually exclusive with --check-upscale.
   --help-profiles        Show accepted profile input forms and common targets.
   --check-upscale        Run audlint-analyze spectral target detection and auto-select the best encode profile.
-  --exact                Use the slower, deeper audlint-analyze mode. Requires --check-upscale.
   --out <path>           Override AUDL_CUE2FLAC_OUTPUT_DIR from .env.
   --dry-run              Print plan and track list; no files written.
   --yes                  Skip confirmation prompt.
@@ -200,9 +197,6 @@ while [[ $# -gt 0 ]]; do
   --check-upscale)
     CHECK_UPSCALE=1
     ;;
-  --exact)
-    EXACT_ANALYSIS=1
-    ;;
   --out)
     shift
     OUTPUT_ROOT_ARG="${1:-}"
@@ -233,10 +227,6 @@ done
 # Mutual exclusion: --check-upscale and --profile cannot be used together
 if ((CHECK_UPSCALE == 1)) && [[ -n "$TARGET_PROFILE" ]]; then
   echo "Error: --check-upscale and --profile are mutually exclusive." >&2
-  exit 2
-fi
-if ((EXACT_ANALYSIS == 1 && CHECK_UPSCALE == 0)); then
-  echo "Error: --exact requires --check-upscale." >&2
   exit 2
 fi
 
@@ -460,12 +450,7 @@ run_check_upscale_analysis() {
     exit 2
   }
 
-  if ((EXACT_ANALYSIS == 1)); then
-    _analyze_cmd+=(--exact)
-    echo "Running audlint-analyze spectral target detection (--exact)..."
-  else
-    echo "Running audlint-analyze spectral target detection..."
-  fi
+  echo "Running audlint-analyze spectral target detection..."
   _analyze_dir="$_TMPDIR/check_upscale_analyze"
   rm -rf "$_analyze_dir"
   mkdir -p "$_analyze_dir"

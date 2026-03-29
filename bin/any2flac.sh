@@ -51,7 +51,6 @@ ASSUME_YES=0
 PLAN_ONLY=0
 WITH_BOOST=0
 ALLOW_LOSSY_SOURCE=0
-EXACT_ANALYSIS=0
 
 TARGET_SR_HZ=0
 TARGET_SR_LABEL=""
@@ -67,7 +66,6 @@ show_help() {
   cat <<'EOF_HELP'
 Usage:
   any2flac.sh [<profile>|--profile=best] [directory]
-  any2flac.sh [--exact] [--profile=best] [directory]
   any2flac.sh --profile <profile> [--dir <directory>] [--dry-run] [--yes] [--plan-only] [--with-boost] [--allow-lossy-source]
   any2flac.sh --help-profiles
 
@@ -86,7 +84,6 @@ Behavior:
   - Converts all supported audio files in the target directory.
   - Replaces originals in-place with FLAC outputs.
   - When profile is omitted or set to best, auto-resolves profile via audlint-analyze.
-  - --exact runs the slower, deeper audlint-analyze mode in auto-profile workflows.
   - --plan-only prints per-file plan and exits without conversion.
   - --with-boost runs album true-peak analysis and applies one auto gain during encode.
   - Fails if target profile is above source profile (no upscale).
@@ -361,9 +358,6 @@ resolve_auto_target_profile() {
     printf 'Error: auto profile mode requires audlint-analyze.sh (not executable: %s)\n' "$AUDLINT_ANALYZE_BIN" >&2
     return 1
   fi
-  if ((EXACT_ANALYSIS == 1)); then
-    analyze_cmd+=(--exact)
-  fi
   analyze_cmd+=("$WORK_DIR")
   recode_raw="$("${analyze_cmd[@]}" 2>/dev/null || true)"
   recode_raw="$(printf '%s\n' "$recode_raw" | head -n1 | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -420,9 +414,6 @@ while [[ $# -gt 0 ]]; do
   --with-boost)
     WITH_BOOST=1
     ;;
-  --exact)
-    EXACT_ANALYSIS=1
-    ;;
   --allow-lossy-source)
     ALLOW_LOSSY_SOURCE=1
     ;;
@@ -466,11 +457,6 @@ fi
 AUTO_PROFILE_MODE=0
 if [[ -z "$TARGET_PROFILE" || "${TARGET_PROFILE,,}" == "best" ]]; then
   AUTO_PROFILE_MODE=1
-fi
-
-if ((EXACT_ANALYSIS == 1 && AUTO_PROFILE_MODE == 0)); then
-  echo "Error: --exact is only supported when auto profile mode is active (omit profile or use --profile=best)." >&2
-  exit 2
 fi
 
 if ((AUTO_PROFILE_MODE == 1)); then

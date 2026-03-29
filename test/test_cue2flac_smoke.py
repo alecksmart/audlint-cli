@@ -743,37 +743,10 @@ JSON
         self.assertNotIn("Target    : 44100/24", proc.stdout)
         self.assertNotIn("Target    : 48000/24", proc.stdout)
 
-    def test_check_upscale_exact_passes_exact_flag_to_analyzer(self) -> None:
-        analyze_log = self.tmpdir / "audlint-analyze.log"
-        analyze_stub = textwrap.dedent(
-            f"""\
-            #!/usr/bin/env bash
-            printf '%s\\n' "$*" >> "{analyze_log}"
-            if [[ "$*" == *"--json"* ]]; then
-              cat <<'JSON'
-{{"album_sr": 96000, "album_bits": 24, "tracks": [{{"cutoff_hz": 43000.0}}]}}
-JSON
-              exit 0
-            fi
-            printf '96000/24\n'
-            """
-        )
-        helper = self.script_dir / "audlint-analyze.sh"
-        helper.write_text(analyze_stub, encoding="utf-8")
-        helper.chmod(helper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-        proc = self._run(["--check-upscale", "--exact", "--dry-run"])
-        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Running audlint-analyze spectral target detection (--exact)...", proc.stdout)
-
-        analyze_args = analyze_log.read_text(encoding="utf-8")
-        self.assertIn("--exact", analyze_args)
-        self.assertIn("--json", analyze_args)
-
-    def test_exact_requires_check_upscale(self) -> None:
+    def test_exact_is_not_supported_in_cue2flac(self) -> None:
         proc = self._run(["--exact", "--dry-run"])
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("--exact requires --check-upscale", proc.stderr)
+        self.assertIn("unknown option: --exact", proc.stderr)
 
     def test_check_upscale_analyzes_all_referenced_sources_for_multi_file_cue(self) -> None:
         cue_dir = self.tmpdir / "multi_file_check_upscale"

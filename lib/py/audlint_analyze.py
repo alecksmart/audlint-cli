@@ -16,7 +16,8 @@ import sys
 HAS_FFPROBE = shutil.which("ffprobe") is not None
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 DEFAULT_DECODE_TIMEOUT_SEC = 20.0
-DEFAULT_ANALYSIS_MODE = "fast"
+AUTO_ANALYSIS_MODE = "auto"
+FAST_ANALYSIS_MODE = "fast"
 EXACT_ANALYSIS_MODE = "exact"
 CD_FAMILY_SR_HZ = 44100
 STUDIO_48_FAMILY_SR_HZ = 48000
@@ -43,7 +44,7 @@ def usage() -> str:
         "Usage:\n"
         "  audlint_analyze.py source-fingerprint <album_dir> <sample_bytes> <file...>\n"
         "  audlint_analyze.py config-fingerprint <ruleset> <headroom_hz> <thresh_rel_db> <window_sec> <max_windows> <fp_sample_bytes> <fp_mode>\n"
-        "  audlint_analyze.py analyze <headroom_hz> <thresh_rel_db> <window_sec> <max_windows> [fast|exact] <file...>"
+        "  audlint_analyze.py analyze <headroom_hz> <thresh_rel_db> <window_sec> <max_windows> [auto|fast|exact] <file...>"
     )
 
 
@@ -333,7 +334,12 @@ def run_decode_command(cmd: list[str], timeout_sec: float) -> bytes:
 
 
 def normalize_analysis_mode(raw_mode: str | None) -> str:
-    return EXACT_ANALYSIS_MODE if (raw_mode or "").strip().lower() == EXACT_ANALYSIS_MODE else DEFAULT_ANALYSIS_MODE
+    mode = (raw_mode or "").strip().lower()
+    if mode == EXACT_ANALYSIS_MODE:
+        return EXACT_ANALYSIS_MODE
+    if mode == FAST_ANALYSIS_MODE:
+        return FAST_ANALYSIS_MODE
+    return AUTO_ANALYSIS_MODE
 
 
 def effective_max_windows(max_windows: int, analysis_mode: str) -> int:
@@ -524,7 +530,7 @@ def select_track_analysis(
     max_windows: int,
     thresh_rel_db: float,
     track_meta: TrackMeta | None = None,
-    analysis_mode: str = DEFAULT_ANALYSIS_MODE,
+    analysis_mode: str = FAST_ANALYSIS_MODE,
 ) -> dict[str, object]:
     track_meta = track_meta or audio_meta(path)
     analysis_mode = normalize_analysis_mode(analysis_mode)
@@ -681,28 +687,65 @@ def cmd_analyze(argv: list[str]) -> int:
     thresh_rel_db = float(argv[1])
     window_sec = float(argv[2])
     max_windows = int(argv[3])
-    analysis_mode = DEFAULT_ANALYSIS_MODE
+    analysis_mode = AUTO_ANALYSIS_MODE
     files = argv[4:]
-    if files and files[0] in {DEFAULT_ANALYSIS_MODE, EXACT_ANALYSIS_MODE}:
+    if files and files[0] in {AUTO_ANALYSIS_MODE, FAST_ANALYSIS_MODE, EXACT_ANALYSIS_MODE}:
         analysis_mode = normalize_analysis_mode(files[0])
         files = files[1:]
     if not files:
         print(usage(), file=sys.stderr)
         return 2
 
+    requested_analysis_mode = analysis_mode
+    effective_analysis_mode = analysis_mode
+    track_analyses: list[tuple[str, TrackMeta, dict[str, object]]] = []
+    if requested_analysis_mode == AUTO_ANALYSIS_MODE:
+        for path in files:
+            track_meta = audio_meta(path)
+            track_analysis = select_track_analysis(
+                path,
+                window_sec,
+                max_windows,
+                thresh_rel_db,
+                track_meta,
+                analysis_mode=FAST_ANALYSIS_MODE,
+            )
+            track_analyses.append((path, track_meta, track_analysis))
+        if any(track_analysis["analysis_confidence"] == "low" for _path, _meta, track_analysis in track_analyses):
+            effective_analysis_mode = EXACT_ANALYSIS_MODE
+            track_analyses = []
+            for path in files:
+                track_meta = audio_meta(path)
+                track_analysis = select_track_analysis(
+                    path,
+                    window_sec,
+                    max_windows,
+                    thresh_rel_db,
+                    track_meta,
+                    analysis_mode=EXACT_ANALYSIS_MODE,
+                )
+                track_analyses.append((path, track_meta, track_analysis))
+        else:
+            effective_analysis_mode = FAST_ANALYSIS_MODE
+    else:
+        effective_analysis_mode = requested_analysis_mode
+        for path in files:
+            track_meta = audio_meta(path)
+            track_analysis = select_track_analysis(
+                path,
+                window_sec,
+                max_windows,
+                thresh_rel_db,
+                track_meta,
+                analysis_mode=effective_analysis_mode,
+            )
+            track_analyses.append((path, track_meta, track_analysis))
+
     tracks = []
-    for path in files:
-        track_meta = audio_meta(path)
+    auto_exact_fallback = requested_analysis_mode == AUTO_ANALYSIS_MODE and effective_analysis_mode == EXACT_ANALYSIS_MODE
+    for path, track_meta, track_analysis in track_analyses:
         sr_in = track_meta.sr
         bits_in = track_meta.bits
-        track_analysis = select_track_analysis(
-            path,
-            window_sec,
-            max_windows,
-            thresh_rel_db,
-            track_meta,
-            analysis_mode=analysis_mode,
-        )
         sr = track_analysis["sr"]
         cutoff = track_analysis["cutoff_hz"]
         if sr is None:
@@ -714,7 +757,9 @@ def cmd_analyze(argv: list[str]) -> int:
                 "sr_in": int(sr_in) if sr_in else None,
                 "bits_in": int(bits_in) if bits_in else None,
                 "channels_in": int(track_meta.channels) if track_meta.channels else None,
-                "analysis_mode": analysis_mode,
+                "requested_analysis_mode": requested_analysis_mode,
+                "analysis_mode": effective_analysis_mode,
+                "auto_exact_fallback": auto_exact_fallback,
                 "analysis_confidence": track_analysis["analysis_confidence"],
                 "selected_channel": track_analysis["selected_channel"],
                 "windows_requested": int(track_analysis["windows_requested"]),
@@ -764,7 +809,9 @@ def cmd_analyze(argv: list[str]) -> int:
     print(
         json.dumps(
             {
-                "analysis_mode": analysis_mode,
+                "requested_analysis_mode": requested_analysis_mode,
+                "analysis_mode": effective_analysis_mode,
+                "auto_exact_fallback": auto_exact_fallback,
                 "album_confidence": album_confidence,
                 "album_sr": int(album_sr),
                 "album_bits": int(album_bits),

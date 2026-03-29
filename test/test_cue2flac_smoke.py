@@ -151,6 +151,10 @@ EOF
                   echo "$bitrate"
                   exit 0
                 fi
+                if [[ "$args" == *"format=duration"* ]]; then
+                  echo "120"
+                  exit 0
+                fi
                 exit 0
                 """
             ),
@@ -739,6 +743,38 @@ JSON
         self.assertNotIn("Target    : 44100/24", proc.stdout)
         self.assertNotIn("Target    : 48000/24", proc.stdout)
 
+    def test_check_upscale_exact_passes_exact_flag_to_analyzer(self) -> None:
+        analyze_log = self.tmpdir / "audlint-analyze.log"
+        analyze_stub = textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "{analyze_log}"
+            if [[ "$*" == *"--json"* ]]; then
+              cat <<'JSON'
+{{"album_sr": 96000, "album_bits": 24, "tracks": [{{"cutoff_hz": 43000.0}}]}}
+JSON
+              exit 0
+            fi
+            printf '96000/24\n'
+            """
+        )
+        helper = self.script_dir / "audlint-analyze.sh"
+        helper.write_text(analyze_stub, encoding="utf-8")
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        proc = self._run(["--check-upscale", "--exact", "--dry-run"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Running audlint-analyze spectral target detection (--exact)...", proc.stdout)
+
+        analyze_args = analyze_log.read_text(encoding="utf-8")
+        self.assertIn("--exact", analyze_args)
+        self.assertIn("--json", analyze_args)
+
+    def test_exact_requires_check_upscale(self) -> None:
+        proc = self._run(["--exact", "--dry-run"])
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--exact requires --check-upscale", proc.stderr)
+
     def test_check_upscale_analyzes_all_referenced_sources_for_multi_file_cue(self) -> None:
         cue_dir = self.tmpdir / "multi_file_check_upscale"
         cue_dir.mkdir(parents=True, exist_ok=True)
@@ -802,7 +838,7 @@ PY
         self.assertIn("Target    : 44100/24", proc.stdout)
         self.assertNotIn("Target    : 48000/24", proc.stdout)
 
-    def test_check_upscale_multi_file_wv_uses_all_preconverted_sources(self) -> None:
+    def test_check_upscale_multi_file_wv_uses_all_raw_sources(self) -> None:
         cue_dir = self.tmpdir / "multi_file_wv_check_upscale"
         cue_dir.mkdir(parents=True, exist_ok=True)
         (cue_dir / "source_a.wv").write_text("", encoding="utf-8")
@@ -841,7 +877,7 @@ import sys
 target = sys.argv[1]
 count = 0
 for name in os.listdir(target):
-    if name.lower().endswith(".wav"):
+    if name.lower().endswith(".wv"):
         count += 1
 
 if count >= 2:
@@ -867,6 +903,128 @@ PY
         self.assertIn("source_a.wv", ffmpeg_log)
         self.assertIn("source_b.wv", ffmpeg_log)
         self.assertNotIn("check_upscale_analyze/excerpt.wav", ffmpeg_log)
+
+    def test_check_upscale_dff_preconvert_uses_analyzer_target(self) -> None:
+        cue_dir = self.tmpdir / "dff_check_upscale"
+        cue_dir.mkdir(parents=True, exist_ok=True)
+        (cue_dir / "source_48fam.dff").write_text("", encoding="utf-8")
+        (cue_dir / "album.cue").write_text(
+            textwrap.dedent(
+                """\
+                PERFORMER "Test Artist"
+                TITLE "DSD Album"
+                REM DATE "2024"
+                FILE "source_48fam.dff" WAVE
+                  TRACK 01 AUDIO
+                    TITLE "Only Track"
+                    PERFORMER "Test Artist"
+                    INDEX 01 00:00:00
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                args="$*"
+                input="${@: -1}"
+                base="$(basename "$input")"
+
+                sr="96000"
+                bps="24"
+                codec="flac"
+                sample_fmt="s32"
+                bitrate="4608000"
+
+                case "$base" in
+                  *source_48fam.dff ) sr="3072000"; bps="1"; codec="dsd_lsbf"; sample_fmt="s32" ;;
+                esac
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<EOF
+[STREAM]
+index=0
+codec_name=$codec
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=$sr
+bits_per_raw_sample=$bps
+bits_per_sample=0
+sample_fmt=$sample_fmt
+bit_rate=$bitrate
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=$bitrate
+TAG:album_artist=
+TAG:artist=Stub Artist
+TAG:title=Stub Title
+TAG:album=Stub Album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"stream=sample_rate"* ]]; then
+                  echo "$sr"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* ]]; then
+                  echo "$bps"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "$codec"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=sample_fmt"* ]]; then
+                  echo "$sample_fmt"
+                  exit 0
+                fi
+                if [[ "$args" == *"format=bit_rate"* ]]; then
+                  echo "$bitrate"
+                  exit 0
+                fi
+                if [[ "$args" == *"format=duration"* ]]; then
+                  echo "120"
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+
+        analyze_stub = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            if [[ "${1:-}" == "--json" ]]; then
+              cat <<'JSON'
+{"album_sr": 96000, "album_bits": 24, "tracks": [{"cutoff_hz": 43000.0}]}
+JSON
+              exit 0
+            fi
+            printf '96000/24\n'
+            """
+        )
+        helper = self.script_dir / "audlint-analyze.sh"
+        helper.write_text(analyze_stub, encoding="utf-8")
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        proc = self._run([str(cue_dir), "--check-upscale", "--dry-run"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Target    : 96000/24", proc.stdout)
+
+        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
+        self.assertIn("source_48fam.dff", ffmpeg_log)
+        self.assertIn("-ar 96000", ffmpeg_log)
+        self.assertNotIn("-ar 192000", ffmpeg_log)
 
     def test_check_upscale_caps_to_lowest_referenced_source_profile(self) -> None:
         cue_dir = self.tmpdir / "multi_file_cap_album"

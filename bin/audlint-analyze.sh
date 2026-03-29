@@ -13,10 +13,12 @@
 #
 # Algorithm:
 #   For each track, samples up to MAX_WINDOWS windows of WINDOW_SEC seconds,
-#   computes FFT magnitude spectrum, finds the highest frequency bin above
-#   THRESH_REL_DB dB relative to the spectral peak, applies HEADROOM_HZ
-#   headroom, and maps to the nearest standard SR tier (44100, 48000, 96000,
-#   192000) without ever upsampling above the source SR.
+#   computes FFT magnitude spectrum, and checks whether the source is a fake
+#   upscale or simply above the project PCM ceiling. If either is true, the
+#   analyzer resolves the underlying standard family (44100 or 48000) and
+#   chooses the leanest lossless downgrade target within that family
+#   (44.1/88.2/176.4 or 48/96/192) that preserves the detected music
+#   bandwidth, capped at 176.4/24 or 192/24 by family.
 #   Album target SR = max of per-track targets. Album bits = min(24, max_src_bits).
 #
 # Dependencies: sox (sox_ng recommended), soxi, python3 (with numpy)
@@ -52,7 +54,7 @@ bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 
-SCRIPT_RULESET="v2"
+SCRIPT_RULESET_BASE="v5"
 HEADROOM_HZ="${AUDLINT_ANALYZE_HEADROOM_HZ:-500}"
 THRESH_REL_DB="${AUDLINT_ANALYZE_THRESH_REL_DB:--55}"
 WINDOW_SEC="${AUDLINT_ANALYZE_WINDOW_SEC:-8}"
@@ -66,16 +68,28 @@ AUDLINT_ANALYZE_PY="${AUDLINT_ANALYZE_PY:-$SCRIPT_DIR/../lib/py/audlint_analyze.
 show_help() {
   cat <<'EOF'
 Usage: audlint-analyze [--json] FILE_OR_ALBUM_DIR
+       audlint-analyze [--exact] [--json] FILE_OR_ALBUM_DIR
 
-Determine the ideal recode target profile (SR/bits) for an album directory
-by inspecting actual source files via FFT-based spectral cutoff detection.
+Determine the ideal recode target profile (SR/bits) for an album directory by:
+  1. checking for fake upscale or a source above the family PCM ceiling,
+  2. resolving the underlying 44.1k / 48k family when a downgrade is needed,
+  3. choosing the best downgrade target that preserves available music data,
+     capped at 176.4/24 or 192/24 by family for higher-resolution sources.
+
+Options:
+  --exact:
+    run a slower, deeper analysis pass with more windows and per-channel
+    verification before choosing the target profile
+  --json:
+    emit JSON payload instead of SR/bits text
 
 Output:
   default:
     SR/bits e.g. "48000/24"               — recode target
     "Re-encoding not needed"              — all files already match target
   --json:
-    JSON payload with album target + per-track spectral cutoff details
+    JSON payload with album target, fake-upscale verdict, family, and
+    per-track spectral cutoff details
 
 Cache files written into the album directory:
   .sox_album_profile   — RULESET/TARGET_SR/TARGET_BITS + fingerprint hashes
@@ -106,12 +120,25 @@ if [[ $# -eq 1 && ("${1:-}" == "-h" || "${1:-}" == "--help") ]]; then
 fi
 
 OUTPUT_MODE="profile"
-if [[ "${1:-}" == "--json" ]]; then
-  OUTPUT_MODE="json"
-  shift
-fi
+ANALYSIS_MODE="fast"
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+  --json)
+    OUTPUT_MODE="json"
+    shift
+    ;;
+  --exact)
+    ANALYSIS_MODE="exact"
+    shift
+    ;;
+  *)
+    break
+    ;;
+  esac
+done
 
 [[ $# -eq 1 ]] || { show_help >&2; exit 2; }
+SCRIPT_RULESET="${SCRIPT_RULESET_BASE}-${ANALYSIS_MODE}"
 
 if ! have "$PYTHON_BIN"; then
   echo "Missing dep: python3" >&2
@@ -199,7 +226,7 @@ fi
 # Analyse all tracks → choose album target.
 tmpjson="$(mktemp -t sox_analyze.XXXXXX)"
 
-if ! "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" analyze "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "${FILES[@]}" >"$tmpjson"; then
+if ! "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" analyze "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "$ANALYSIS_MODE" "${FILES[@]}" >"$tmpjson"; then
   echo "Analysis failed." >&2
   rm -f "$tmpjson"
   exit 1
@@ -213,11 +240,33 @@ fi
 
 TARGET_SR="$("$PYTHON_BIN" -c 'import json;print(json.load(open("'"$tmpjson"'"))["album_sr"])')"
 TARGET_BITS="$("$PYTHON_BIN" -c 'import json;print(json.load(open("'"$tmpjson"'"))["album_bits"])')"
+ANALYZE_SUMMARY="$("$PYTHON_BIN" - "$tmpjson" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+family = payload.get("album_family_sr")
+print("1" if payload.get("album_fake_upscale") else "0")
+print("1" if payload.get("album_has_fake_upscale_tracks") else "0")
+print("" if family is None else str(family))
+print(payload.get("album_decision", "keep_source"))
+PY
+)"
+{
+  IFS= read -r ALBUM_FAKE_UPSCALE
+  IFS= read -r ALBUM_HAS_FAKE_UPSCALE_TRACKS
+  IFS= read -r ALBUM_FAMILY_SR
+  IFS= read -r ALBUM_DECISION
+} <<< "$ANALYZE_SUMMARY"
 
 cat >"$PROFILE_FILE" <<EOF
 RULESET=$SCRIPT_RULESET
+ANALYSIS_MODE=$ANALYSIS_MODE
 TARGET_SR=$TARGET_SR
 TARGET_BITS=$TARGET_BITS
+ALBUM_FAKE_UPSCALE=$ALBUM_FAKE_UPSCALE
+ALBUM_HAS_FAKE_UPSCALE_TRACKS=$ALBUM_HAS_FAKE_UPSCALE_TRACKS
+ALBUM_FAMILY_SR=$ALBUM_FAMILY_SR
+ALBUM_DECISION=$ALBUM_DECISION
 SOURCE_FINGERPRINT=$CURRENT_SOURCE_FINGERPRINT
 CONFIG_FINGERPRINT=$CURRENT_CONFIG_FINGERPRINT
 FINGERPRINT_MODE=$FINGERPRINT_MODE

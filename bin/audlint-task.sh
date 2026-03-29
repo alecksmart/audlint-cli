@@ -272,20 +272,6 @@ album_has_lossy_codec() {
   [[ "${album_summary[has_lossy]:-0}" == "1" ]]
 }
 
-album_has_dsd_source_ext() {
-  local files_var="$1"
-  local -n files_ref="$files_var"
-  local f ext
-  for f in "${files_ref[@]}"; do
-    ext="${f##*.}"
-    ext="${ext,,}"
-    case "$ext" in
-    dsf | dff) return 0 ;;
-    esac
-  done
-  return 1
-}
-
 album_has_force_recode_source_ext() {
   local files_var="$1"
   local -n files_ref="$files_var"
@@ -297,53 +283,6 @@ album_has_force_recode_source_ext() {
     wav | aiff | aif | aifc | dsf | dff) return 0 ;;
     esac
   done
-  return 1
-}
-
-profile_triggers_forced_upscale() {
-  local profile="$1"
-  local sr_label sr_hz bit_label bit_norm
-  if [[ "$profile" != */* ]]; then
-    return 1
-  fi
-
-  sr_label="${profile%%/*}"
-  sr_hz="$(profile_sr_hz_normalize "$sr_label" || true)"
-  [[ "$sr_hz" =~ ^[0-9]+$ ]] || sr_hz=0
-  bit_label="${profile##*/}"
-  sr_label="$(printf '%s' "$sr_label" | tr -d '[:space:]')"
-  bit_label="$(printf '%s' "$bit_label" | tr -d '[:space:]')"
-  bit_norm="${bit_label,,}"
-
-  # 32f (float FLAC) is a lossless container semantically equivalent to 24-bit;
-  # it is commonly produced by DAW exports and does not indicate upsampling.
-  case "$bit_norm" in
-  32f | 64f) return 1 ;;
-  esac
-  if [[ "$bit_norm" =~ ^[0-9]+$ ]] && ((bit_norm > 24)); then
-    return 0
-  fi
-
-  # Hi-res sample rate with 16-bit depth is almost certainly an upsampled CD.
-  if [[ "$bit_norm" == "16" ]]; then
-    if ((sr_hz >= 88200)); then
-      return 0
-    fi
-  fi
-
-  ((sr_hz > 192000))
-}
-
-source_policy_force_upscale() {
-  local files_var="$1"
-  local source_profile="$2"
-
-  if album_has_dsd_source_ext "$files_var"; then
-    return 0
-  fi
-  if profile_triggers_forced_upscale "$source_profile"; then
-    return 0
-  fi
   return 1
 }
 
@@ -610,13 +549,16 @@ build_recode_fields() {
   local force_recode_any_sr="${3:-0}"
   local prior_source_quality="${4:-}"
   local source_norm prior_source_norm
+  local target_bits source_bits source_bits_compare target_bits_compare source_is_float
 
   local target_display
   target_display="$(audvalue_format_profile "$recode_raw")"
 
-  # Extract target SR in Hz from recode_raw ("48000/24" -> 48000).
+  # Extract target SR/bits from recode_raw ("48000/24" -> 48000 + 24).
   local target_hz="${recode_raw%%/*}"
+  target_bits="${recode_raw##*/}"
   [[ "$target_hz" =~ ^[0-9]+$ ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
+  [[ "$target_bits" =~ ^([0-9]+|32f|64f)$ ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
 
   # Edge containers should always get a recode action using the computed
   # best-fit profile, even when the SR matches.
@@ -628,7 +570,24 @@ build_recode_fields() {
   source_norm="$(profile_normalize "$source_quality" || true)"
   [[ -n "$source_norm" ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
   local source_hz="${source_norm%%/*}"
+  source_bits="${source_norm##*/}"
   [[ "$source_hz" =~ ^[0-9]+$ ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
+  [[ "$source_bits" =~ ^([0-9]+|32f|64f)$ ]] || { printf '%s\n%s\n' "Keep as-is" "0"; return; }
+
+  source_is_float=0
+  case "$source_bits" in
+  32f | 64f)
+    source_bits_compare=24
+    source_is_float=1
+    ;;
+  *)
+    source_bits_compare="$source_bits"
+    ;;
+  esac
+  case "$target_bits" in
+  32f | 64f) target_bits_compare=24 ;;
+  *) target_bits_compare="$target_bits" ;;
+  esac
 
   prior_source_norm="$(profile_normalize "$prior_source_quality" || true)"
   local prior_source_hz="${prior_source_norm%%/*}"
@@ -639,8 +598,11 @@ build_recode_fields() {
     return
   fi
 
-  # needs_recode only when audlint-analyze recommends a lower SR than source.
+  # needs_recode when audlint-analyze recommends a lower SR than source, or a
+  # lower integer bit depth than the current source at the same SR.
   if (( target_hz < source_hz )); then
+    printf '%s\n%s\n' "Recode to ${target_display}" "1"
+  elif (( target_hz == source_hz )) && (( source_is_float == 0 )) && [[ "$source_bits_compare" =~ ^[0-9]+$ ]] && [[ "$target_bits_compare" =~ ^[0-9]+$ ]] && (( target_bits_compare < source_bits_compare )); then
     printf '%s\n%s\n' "Recode to ${target_display}" "1"
   else
     printf '%s\n%s\n' "Keep as-is" "0"
@@ -747,6 +709,7 @@ scan_album_dir_merged() {
 
   local grade="$AUDVALUE_GRADE"
   local dr="$AUDVALUE_DR"
+  local fake_upscale="${AUDVALUE_FAKE_UPSCALE:-0}"
   # quality_score is legacy; keep fresh writes empty and rely on dynamic_range_score.
   local score=""
 
@@ -785,7 +748,7 @@ scan_album_dir_merged() {
     "GRADE=$grade" \
     "SCORE=$score" \
     "DYN=$dr" \
-    "UPS=0" \
+    "UPS=$fake_upscale" \
     "REC=$rec" \
     "CURR=$source_quality" \
     "BITRATE=$bitrate_label" \
@@ -1429,11 +1392,6 @@ process_scan_roadmap_item() {
   q_recode_source_profile="$(kv_get "RECODE_SOURCE_PROFILE" "$scan_out")"
   [[ "$q_needs_recode" =~ ^[01]$ ]] || q_needs_recode=0
   [[ "$q_genre" =~ ^(audiophile|high_energy|standard)$ ]] || q_genre="$q_genre_profile"
-
-  # DSD/ultra-hires source policy: flag as upscaled if DSD or >192k profile.
-  if source_policy_force_upscale files "$q_curr"; then
-    q_ups="1"
-  fi
 
   # Stamp last_checked_at after the full scan path completes so discovery does
   # not immediately re-queue the same album when scan-side writes bump the

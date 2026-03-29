@@ -797,6 +797,10 @@ audio_save_true_peak_cache() {
 #
 # Calls audlint-value on ALBUM_DIR and populates the following globals:
 #   AUDVALUE_RECODE_TO   — raw SR/bits e.g. "48000/24"
+#   AUDVALUE_FAKE_UPSCALE — 1 when audlint-analyze marked fake upscale, else 0
+#   AUDVALUE_HAS_FAKE_TRACKS — 1 when any track looked fake-upscaled, else 0
+#   AUDVALUE_FAMILY_SR_HZ — resolved 44.1k / 48k family when fake (or "")
+#   AUDVALUE_ANALYZE_DECISION — audlint-analyze decision summary
 #   AUDVALUE_DR          — DR14 integer
 #   AUDVALUE_GRADE       — mastering grade S/A/B/C/F
 #   AUDVALUE_GENRE       — genre profile used (audiophile|high_energy|standard)
@@ -816,6 +820,10 @@ audvalue_scan_album() {
   local genre_profile="${2:-standard}"
 
   AUDVALUE_RECODE_TO=""
+  AUDVALUE_FAKE_UPSCALE="0"
+  AUDVALUE_HAS_FAKE_TRACKS="0"
+  AUDVALUE_FAMILY_SR_HZ=""
+  AUDVALUE_ANALYZE_DECISION=""
   AUDVALUE_DR=""
   AUDVALUE_GRADE=""
   AUDVALUE_GENRE="$genre_profile"
@@ -846,6 +854,10 @@ import json, sys
 data = json.loads(sys.argv[1])
 def s(v): return str(v) if v is not None else ""
 print(data.get("recodeTo",""))
+print("1" if data.get("fakeUpscale") else "0")
+print("1" if data.get("hasFakeUpscaleTracks") else "0")
+print(s(data.get("familySampleRateHz","")))
+print(s(data.get("analyzeDecision","")))
 print(s(data.get("drTotal","")))
 print(data.get("grade",""))
 print(data.get("genreProfile","standard"))
@@ -857,6 +869,10 @@ PY
 
   {
     IFS= read -r AUDVALUE_RECODE_TO
+    IFS= read -r AUDVALUE_FAKE_UPSCALE
+    IFS= read -r AUDVALUE_HAS_FAKE_TRACKS
+    IFS= read -r AUDVALUE_FAMILY_SR_HZ
+    IFS= read -r AUDVALUE_ANALYZE_DECISION
     IFS= read -r AUDVALUE_DR
     IFS= read -r AUDVALUE_GRADE
     IFS= read -r AUDVALUE_GENRE
@@ -865,6 +881,8 @@ PY
     IFS= read -r AUDVALUE_BITS
   } <<< "$parsed"
 
+  [[ "$AUDVALUE_FAKE_UPSCALE" =~ ^[01]$ ]] || AUDVALUE_FAKE_UPSCALE="0"
+  [[ "$AUDVALUE_HAS_FAKE_TRACKS" =~ ^[01]$ ]] || AUDVALUE_HAS_FAKE_TRACKS="0"
   [[ -n "$AUDVALUE_RECODE_TO" && -n "$AUDVALUE_DR" && -n "$AUDVALUE_GRADE" ]] || return 1
   return 0
 }

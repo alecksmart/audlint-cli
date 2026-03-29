@@ -307,9 +307,17 @@ OUT
                 grade="${STUB_AUDVALUE_GRADE:-A}"
                 dr="${STUB_AUDVALUE_DR:-9}"
                 recode_to="${STUB_AUDVALUE_RECODE_TO:-96000/24}"
+                fake_upscale="${STUB_AUDVALUE_FAKE_UPSCALE:-0}"
+                has_fake_tracks="${STUB_AUDVALUE_HAS_FAKE_TRACKS:-$fake_upscale}"
+                family_sr="${STUB_AUDVALUE_FAMILY_SR:-}"
+                analyze_decision="${STUB_AUDVALUE_ANALYZE_DECISION:-keep_source}"
                 cat <<JSON
                 {
                   "recodeTo": "${recode_to}",
+                  "fakeUpscale": ${fake_upscale},
+                  "hasFakeUpscaleTracks": ${has_fake_tracks},
+                  "familySampleRateHz": ${family_sr:-null},
+                  "analyzeDecision": "${analyze_decision}",
                   "drTotal": ${dr},
                   "grade": "${grade}",
                   "genreProfile": "standard",
@@ -1160,7 +1168,7 @@ OUT
         finally:
             conn.close()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0], 1)
+        self.assertEqual(row[0], 0)
         self.assertIn("96000/24", row[1] or "")
         self.assertEqual(row[2], 1)
 
@@ -1197,12 +1205,16 @@ OUT
 
         conn = sqlite3.connect(db_path)
         try:
-            row = conn.execute("SELECT is_upscaled, current_quality FROM album_quality LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT is_upscaled, current_quality, recode_recommendation, needs_recode FROM album_quality LIMIT 1"
+            ).fetchone()
         finally:
             conn.close()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0], 1)
+        self.assertEqual(row[0], 0)
         self.assertEqual(row[1], "96000/32")
+        self.assertIn("96000/24", row[2] or "")
+        self.assertEqual(row[3], 1)
 
     def test_scan_mode_does_not_mark_32f_profiles_as_upscaled(self) -> None:
         """32-bit float FLAC (flt/fltp sample format) is a lossless container
@@ -1235,17 +1247,26 @@ OUT
         (album / "01-source-ultra.flac").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
-        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        proc = self._run(
+            ["--max-albums", "15", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={"STUB_AUDVALUE_RECODE_TO": "176400/24"},
+        )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
-            row = conn.execute("SELECT is_upscaled, current_quality FROM album_quality LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT is_upscaled, current_quality, recode_recommendation, needs_recode FROM album_quality LIMIT 1"
+            ).fetchone()
         finally:
             conn.close()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0], 1)
+        self.assertEqual(row[0], 0)
         self.assertEqual(row[1], "352800/24")
+        self.assertIn("176400/24", row[2] or "")
+        self.assertEqual(row[3], 1)
 
     def test_scan_mode_marks_hires_16bit_as_upscaled(self) -> None:
         root = self.tmpdir / "library"
@@ -1254,17 +1275,31 @@ OUT
         (album / "01-source-hires16.flac").write_text("", encoding="utf-8")
 
         db_path = self.tmpdir / "library.sqlite"
-        proc = self._run(["--max-albums", "15", str(root)], cwd=self.tmpdir, db_path=db_path)
+        proc = self._run(
+            ["--max-albums", "15", str(root)],
+            cwd=self.tmpdir,
+            db_path=db_path,
+            extra_env={
+                "STUB_AUDVALUE_RECODE_TO": "44100/16",
+                "STUB_AUDVALUE_FAKE_UPSCALE": "1",
+                "STUB_AUDVALUE_HAS_FAKE_TRACKS": "1",
+                "STUB_AUDVALUE_FAMILY_SR": "44100",
+                "STUB_AUDVALUE_ANALYZE_DECISION": "downgrade_fake_upscale",
+            },
+        )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
         conn = sqlite3.connect(db_path)
         try:
-            row = conn.execute("SELECT is_upscaled, current_quality FROM album_quality LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT is_upscaled, current_quality, recode_recommendation FROM album_quality LIMIT 1"
+            ).fetchone()
         finally:
             conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 1, "192kHz/16-bit should be flagged as upscaled")
         self.assertEqual(row[1], "192000/16")
+        self.assertIn("44100/16", row[2] or "")
 
     def test_scan_mode_suppresses_noop_recode_for_keep(self) -> None:
         root = self.tmpdir / "library"

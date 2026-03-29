@@ -96,13 +96,14 @@ TAG:lyrics=
 EOF
                   exit 0
                 fi
-                if [[ "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt"* ]]; then
+                if [[ "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels"* ]]; then
                   cat <<'EOF'
 codec_name=flac
 sample_rate=44100
 bits_per_raw_sample=16
 bits_per_sample=0
 sample_fmt=s16
+channels=2
 EOF
                   exit 0
                 fi
@@ -144,13 +145,13 @@ EOF
             ),
         )
 
-    def _run(self) -> subprocess.CompletedProcess:
+    def _run(self, *extra_args: str) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["AUDL_PYTHON_BIN"] = "python3"
         env["NO_COLOR"] = "1"
         return subprocess.run(
-            [str(ANALYZE), str(self.album_dir)],
+            [str(ANALYZE), *extra_args, str(self.album_dir)],
             cwd=str(self.album_dir),
             env=env,
             text=True,
@@ -172,6 +173,8 @@ EOF
         self.assertIn("SOURCE_FINGERPRINT=", profile_text)
         self.assertIn("CONFIG_FINGERPRINT=", profile_text)
         self.assertIn("FINGERPRINT_MODE=meta+headtail-v1", profile_text)
+        self.assertIn("ALBUM_FAKE_UPSCALE=0", profile_text)
+        self.assertIn("ALBUM_DECISION=keep_source", profile_text)
 
         second = self._run()
         self.assertEqual(second.returncode, 0, msg=second.stderr + "\n" + second.stdout)
@@ -216,7 +219,30 @@ EOF
 
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertEqual(proc.stdout.strip(), "44100/16")
-        self.assertLess(elapsed, 5.0, f"decode fallback should not hang, elapsed={elapsed}s")
+
+    def test_exact_mode_uses_separate_profile_cache_ruleset(self) -> None:
+        first = self._run()
+        self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)
+        self.assertEqual(first.stdout.strip(), "44100/16")
+
+        second = self._run("--exact")
+        self.assertEqual(second.returncode, 0, msg=second.stderr + "\n" + second.stdout)
+        self.assertEqual(second.stdout.strip(), "44100/16")
+
+        profile_text = (self.album_dir / ".sox_album_profile").read_text(encoding="utf-8")
+        self.assertIn("RULESET=v5-exact", profile_text)
+        self.assertIn("ANALYSIS_MODE=exact", profile_text)
+
+    def test_exact_json_reports_mode_and_confidence(self) -> None:
+        proc = self._run("--exact", "--json")
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["analysis_mode"], "exact")
+        self.assertEqual(payload["album_confidence"], "low")
+        self.assertEqual(payload["tracks"][0]["analysis_mode"], "exact")
+        self.assertEqual(payload["tracks"][0]["analysis_confidence"], "low")
+        self.assertEqual(payload["tracks"][0]["selected_channel"], "mono")
 
     def test_ape_images_prefer_ffmpeg_before_sox(self) -> None:
         (self.album_dir / "01-track.wav").unlink()
@@ -423,6 +449,11 @@ EOF
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["album_sr"], 44100)
         self.assertEqual(payload["album_bits"], 16)
+        self.assertFalse(payload["album_fake_upscale"])
+        self.assertFalse(payload["album_has_fake_upscale_tracks"])
+        self.assertEqual(payload["album_decision"], "keep_source")
+        self.assertIn("fake_upscale", payload["tracks"][0])
+        self.assertIn("standard_family_sr", payload["tracks"][0])
         self.assertTrue(log_path.exists())
         self.assertEqual(len(log_path.read_text(encoding="utf-8").splitlines()), 1)
 

@@ -40,6 +40,31 @@ class DffEncoderSmokeTests(unittest.TestCase):
         self.script.write_text(SRC_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
         self.script.chmod(self.script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
+        analyze_stub = self.script_dir / "audlint-analyze.sh"
+        _write_exec(
+            analyze_stub,
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                shopt -s nullglob nocaseglob
+                files=(./*.dff)
+                if ((${#files[@]} == 0)); then
+                  files=("$1"/*.dff)
+                fi
+                target="176400/24"
+                for file in "${files[@]}"; do
+                  base="$(basename "$file")"
+                  case "$base" in
+                    *48fam* ) target="192000/24" ;;
+                    *low48* ) target="96000/24" ;;
+                    *low44* ) target="88200/24" ;;
+                  esac
+                done
+                printf '%s\\n' "$target"
+                """
+            ),
+        )
+
         for helper in SRC_LIB_SH.glob("*.sh"):
             target = self.lib_sh_dir / helper.name
             target.write_text(helper.read_text(encoding="utf-8"), encoding="utf-8")
@@ -272,7 +297,7 @@ EOF
 
         proc = self._run([])
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("Inconsistent sources+details", proc.stdout)
+        self.assertIn("Inconsistent source family", proc.stdout)
 
     def test_dry_run_reuses_true_peak_cache(self) -> None:
         first = self._run(["--dry-run"])

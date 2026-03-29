@@ -9,6 +9,9 @@
 # Output (stdout): JSON
 #   {
 #     "recodeTo":          "48000/24",   raw SR/bits from audlint-analyze
+#     "fakeUpscale":       true,         audlint-analyze fake-upscale verdict
+#     "familySampleRateHz":48000,        resolved 44.1k/48k family when fake
+#     "analyzeDecision":   "downgrade_fake_upscale",
 #     "drTotal":           9,            DR14 album total
 #     "grade":             "B",          mastering grade (S/A/B/C/F)
 #     "genreProfile":      "standard",   scoring preset used for grading
@@ -77,6 +80,9 @@ Print DR14 dynamic range + recode target analysis as JSON.
 
 Output fields:
   recodeTo          — target profile from spectral analysis e.g. "48000/24"
+  fakeUpscale       — whether audlint-analyze marked the album as fake upscale
+  familySampleRateHz — resolved 44.1k / 48k family when fake (or null)
+  analyzeDecision   — audlint-analyze decision summary
   drTotal           — DR14 album total (integer)
   grade             — mastering grade: S / A / B / C / F
   genreProfile      — scoring preset used: audiophile | high_energy | standard
@@ -157,6 +163,13 @@ fi
   echo "Unable to resolve recode target from audlint-analyze output" >&2
   exit 1
 }
+fake_upscale_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_FAKE_UPSCALE" || true)"
+has_fake_tracks_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_HAS_FAKE_UPSCALE_TRACKS" || true)"
+family_sr_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_FAMILY_SR" || true)"
+analyze_decision_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_DECISION" || true)"
+[[ "$fake_upscale_raw" =~ ^(0|1)$ ]] || fake_upscale_raw="0"
+[[ "$has_fake_tracks_raw" =~ ^(0|1)$ ]] || has_fake_tracks_raw="0"
+[[ "$family_sr_raw" =~ ^[0-9]+$ ]] || family_sr_raw=""
 
 # ── Step 2: DR14 measurement ───────────────────────────────────────────────
 tmp_out="$(mktemp -t audvalue_dr14.XXXXXX)"
@@ -196,7 +209,7 @@ PY
 # Scoring preset: env var > standard (normalized in dr_grade.py)
 genre_profile="${GENRE_PROFILE:-standard}"
 
-"$PYTHON_BIN" - "$recode_to" "$report_file" "$ALBUM_DIR" "$genre_profile" "$DR_GRADE_PY" <<'PY'
+"$PYTHON_BIN" - "$recode_to" "$report_file" "$ALBUM_DIR" "$genre_profile" "$DR_GRADE_PY" "$fake_upscale_raw" "$family_sr_raw" "$analyze_decision_raw" "$has_fake_tracks_raw" <<'PY'
 import json, os, re, sys, importlib.util
 
 recode_to   = sys.argv[1]
@@ -204,6 +217,10 @@ report_path = sys.argv[2]
 album_dir   = sys.argv[3]
 genre_profile = sys.argv[4]
 dr_grade_py = sys.argv[5]
+fake_upscale_raw = sys.argv[6]
+family_sr_raw = sys.argv[7]
+analyze_decision_raw = sys.argv[8]
+has_fake_tracks_raw = sys.argv[9]
 
 # Load dr_grade module from lib/py/
 spec = importlib.util.spec_from_file_location("dr_grade", dr_grade_py)
@@ -291,9 +308,17 @@ if dr_total is None:
     raise SystemExit("Failed to parse total DR from dr14meter output")
 
 grade = dr_grade_mod.grade_from_dr(dr_total, genre_profile)
+fake_upscale = fake_upscale_raw == "1"
+has_fake_tracks = has_fake_tracks_raw == "1"
+family_sr = int(family_sr_raw) if family_sr_raw.isdigit() else None
+analyze_decision = analyze_decision_raw or None
 
 result = {
     "recodeTo":          recode_to,
+    "fakeUpscale":       fake_upscale,
+    "hasFakeUpscaleTracks": has_fake_tracks,
+    "familySampleRateHz": family_sr,
+    "analyzeDecision":   analyze_decision,
     "drTotal":           dr_total,
     "grade":             grade,
     "genreProfile":      genre_profile,

@@ -30,6 +30,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 ui_init_colors
 
+AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$BOOTSTRAP_DIR/audlint-analyze.sh}"
+
 require_bins ffmpeg ffprobe >/dev/null || exit 2
 
 show_help() {
@@ -48,14 +50,14 @@ Options:
 Behavior:
   - Reads .dff files from SOURCE_DIR (default: current directory).
   - Uses a sidecar .cue file when present for track titles/performers.
-  - Determines a single album-safe target profile from DSD source rate.
+  - Resolves a single album-safe target profile via audlint-analyze.
   - Computes true-peak across tracks and applies one album-level gain.
 
 Config (edit in script before run):
   SOURCE_DIR="."
   OUTPUT_DIR="./flac_out"
 
-Dependencies: ffmpeg (with DSDIFF/DFF support), ffprobe
+Dependencies: ffmpeg (with DSDIFF/DFF support), ffprobe, audlint-analyze
 EOF
 }
 
@@ -82,21 +84,51 @@ case "${1:-}" in
   ;;
 esac
 
+[[ -x "$AUDLINT_ANALYZE_BIN" ]] || {
+  printf 'Missing executable: %s\n' "$AUDLINT_ANALYZE_BIN" >&2
+  exit 2
+}
+
+source_family_label() {
+  local source_sr_hz="$1"
+  if [[ "$source_sr_hz" =~ ^[0-9]+$ ]] && ((source_sr_hz > 0)); then
+    if ((source_sr_hz % 48000 == 0)); then
+      printf '48k-family'
+      return 0
+    fi
+    if ((source_sr_hz % 44100 == 0)); then
+      printf '44.1k-family'
+      return 0
+    fi
+  fi
+  printf 'fallback'
+}
+
+resolve_album_target_profile() {
+  local album_dir="$1"
+  local recode_raw
+
+  recode_raw="$("$AUDLINT_ANALYZE_BIN" "$album_dir" 2>/dev/null || true)"
+  recode_raw="$(printf '%s\n' "$recode_raw" | head -n1 | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ "$recode_raw" == "Re-encoding not needed" ]]; then
+    recode_raw="$(profile_cache_target_profile "$album_dir" || true)"
+  fi
+  [[ "$recode_raw" =~ ^[0-9]+/[0-9]+$ ]] || return 1
+  printf '%s\n' "$recode_raw"
+}
+
 analyze_track_worker() {
   local track_no="$1"
   local dff_file="$2"
   local result_file="$3"
-  local source_sr_hz profile profile_tail target_sr_hz target_bits family_label policy_label
+  local source_sr_hz target_sr_hz target_bits family_label policy_label
   local stat_sig mtime size key true_peak_db cache_state
 
   source_sr_hz="$(audio_probe_sample_rate_hz "$dff_file")"
-  profile="$(audio_dsd_max_pcm_profile "$source_sr_hz")"
-  target_sr_hz="${profile%%|*}"
-  profile_tail="${profile#*|}"
-  target_bits="${profile_tail%%|*}"
-  profile_tail="${profile_tail#*|}"
-  family_label="${profile_tail%%|*}"
-  policy_label="${profile_tail#*|}"
+  target_sr_hz="$ALBUM_TARGET_SR_HZ"
+  target_bits="$ALBUM_TARGET_BITS"
+  family_label="$(source_family_label "$source_sr_hz")"
+  policy_label="$ALBUM_POLICY_LABEL"
 
   stat_sig="$(audio_probe_file_stat_signature "$dff_file" || true)"
   mtime=""
@@ -180,6 +212,16 @@ if ((${#dff_files[@]} == 0)); then
   exit 1
 fi
 
+ALBUM_TARGET_PROFILE="$(resolve_album_target_profile "$SOURCE_DIR" || true)"
+if [[ ! "$ALBUM_TARGET_PROFILE" =~ ^[0-9]+/[0-9]+$ ]]; then
+  echo "❌ Failed to resolve album target profile from audlint-analyze." >&2
+  exit 1
+fi
+ALBUM_TARGET_SR_HZ="${ALBUM_TARGET_PROFILE%%/*}"
+ALBUM_TARGET_BITS="${ALBUM_TARGET_PROFILE##*/}"
+ALBUM_POLICY_LABEL="$(profile_cache_get "$SOURCE_DIR" "ALBUM_DECISION" || true)"
+[[ -n "$ALBUM_POLICY_LABEL" ]] || ALBUM_POLICY_LABEL="audlint-analyze"
+
 SAFETY_MARGIN_DB="$(audio_auto_boost_target_true_peak_db)"
 MIN_APPLY_GAIN_DB="$(audio_auto_boost_min_apply_db)"
 MAX_TRUE_PEAK_DB="-1000.0"
@@ -226,7 +268,8 @@ if [[ -z "$analysis_tmp_dir" ]]; then
   exit 1
 fi
 
-echo "🔎 Analyzing sources for consistent encode profile + album headroom..."
+echo "🔎 Analyzing sources for consistent family + album headroom..."
+echo "   target=${ALBUM_TARGET_SR_HZ}/${ALBUM_TARGET_BITS} policy=${ALBUM_POLICY_LABEL}"
 echo "   tracks=${ANALYSIS_TOTAL_TRACKS} workers=${ANALYZE_JOBS} cache=$(basename "$TRUE_PEAK_CACHE_FILE")"
 jobs_running=0
 for idx in "${!dff_files[@]}"; do
@@ -290,7 +333,7 @@ for track_no in $(seq 1 "$ANALYSIS_TOTAL_TRACKS"); do
     ref_target_bits="$target_bits"
     ref_family="$family_label"
     ref_policy="$policy_label"
-  elif [[ "$source_sr_hz" != "$ref_source_sr" || "$target_sr_hz" != "$ref_target_sr" || "$target_bits" != "$ref_target_bits" || "$family_label" != "$ref_family" || "$policy_label" != "$ref_policy" ]]; then
+  elif [[ "$family_label" != "$ref_family" ]]; then
     consistency_errors+=("Track $track_no: $dff_file | source=${source_sr_hz}Hz target=${target_sr_hz}/${target_bits} family=${family_label} policy=${policy_label}")
   fi
 done
@@ -304,7 +347,7 @@ if ((${#analysis_errors[@]} > 0)); then
 fi
 
 if ((${#consistency_errors[@]} > 0)); then
-  echo "❌ Inconsistent sources+details"
+  echo "❌ Inconsistent source family"
   echo "   Reference: source=${ref_source_sr}Hz target=${ref_target_sr}/${ref_target_bits} family=${ref_family} policy=${ref_policy}"
   printf '  - %s\n' "${consistency_errors[@]}"
   exit 1
@@ -361,7 +404,7 @@ for idx in "${!dff_files[@]}"; do
     echo "     Boost    : $(ui_warn_text "skipped")"
   fi
   if [[ "$family_label" == "fallback" ]]; then
-    echo "⚠️  Could not infer source family from sample rate \"$source_sr_hz\"; using 176400/24 ceiling with no-upscale guard."
+    echo "⚠️  Could not infer source family from sample rate \"$source_sr_hz\"; audlint-analyze target was kept, but the family check fell back."
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then

@@ -2,7 +2,7 @@
 # cue2flac.sh — Split a high-resolution audio file into per-track FLACs using a .cue sheet.
 #
 # Usage:
-#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--help-profiles] [--check-upscale] [--out <output_root>] [--dry-run] [--yes]
+#   cue2flac.sh [<dir>|<file.cue>] [--profile <sr/bits>] [--help-profiles] [--check-upscale] [--exact] [--out <output_root>] [--dry-run] [--yes]
 #
 # Input:  directory containing source audio + .cue, OR direct path to a .cue file.
 # Output: AUDL_CUE2FLAC_OUTPUT_DIR/<Artist>/<Year> - <Album>/NN Track Title.flac
@@ -17,6 +17,7 @@
 # Multi-file:    CUE sheets with multiple FILE directives (e.g. vinyl Side A / Side B) are supported.
 # --check-upscale: spectral target analysis via audlint-analyze.sh;
 #                  auto-selects the recommended encode profile instead of defaulting to 192000/24.
+# --exact:         use the slower, deeper analyzer mode together with --check-upscale.
 
 set -Eeuo pipefail
 
@@ -65,6 +66,7 @@ INPUT_ARG="."
 DEFAULT_PROFILE="192000/24"
 TARGET_PROFILE=""
 CHECK_UPSCALE=0
+EXACT_ANALYSIS=0
 OUTPUT_ROOT_ARG=""
 DRY_RUN=0
 ASSUME_YES=0
@@ -80,6 +82,7 @@ Options:
   --profile <sr/bits>    Target encode profile (default: 192000/24). No upscale. Mutually exclusive with --check-upscale.
   --help-profiles        Show accepted profile input forms and common targets.
   --check-upscale        Run audlint-analyze spectral target detection and auto-select the best encode profile.
+  --exact                Use the slower, deeper audlint-analyze mode. Requires --check-upscale.
   --out <path>           Override AUDL_CUE2FLAC_OUTPUT_DIR from .env.
   --dry-run              Print plan and track list; no files written.
   --yes                  Skip confirmation prompt.
@@ -197,6 +200,9 @@ while [[ $# -gt 0 ]]; do
   --check-upscale)
     CHECK_UPSCALE=1
     ;;
+  --exact)
+    EXACT_ANALYSIS=1
+    ;;
   --out)
     shift
     OUTPUT_ROOT_ARG="${1:-}"
@@ -227,6 +233,10 @@ done
 # Mutual exclusion: --check-upscale and --profile cannot be used together
 if ((CHECK_UPSCALE == 1)) && [[ -n "$TARGET_PROFILE" ]]; then
   echo "Error: --check-upscale and --profile are mutually exclusive." >&2
+  exit 2
+fi
+if ((EXACT_ANALYSIS == 1 && CHECK_UPSCALE == 0)); then
+  echo "Error: --exact requires --check-upscale." >&2
   exit 2
 fi
 
@@ -437,6 +447,84 @@ if ((${#CUE_FILE_KEYS[@]} > 1)); then
   done
 fi
 
+CHECK_UPSCALE_TARGET_SR_HZ=""
+CHECK_UPSCALE_TARGET_BITS=""
+CHECK_UPSCALE_CUTOFF_KHZ=""
+
+run_check_upscale_analysis() {
+  local _analyze_dir _analyze_count _an_src _an_stage _an_json _an_lines _an_sr_hz _an_bits _an_cutoff_khz
+  local _analyze_cmd=("$AUDLINT_ANALYZE_BIN")
+
+  [[ -x "$AUDLINT_ANALYZE_BIN" ]] || {
+    echo "Error: --check-upscale requires audlint-analyze.sh alongside cue2flac.sh (not executable: $AUDLINT_ANALYZE_BIN)." >&2
+    exit 2
+  }
+
+  if ((EXACT_ANALYSIS == 1)); then
+    _analyze_cmd+=(--exact)
+    echo "Running audlint-analyze spectral target detection (--exact)..."
+  else
+    echo "Running audlint-analyze spectral target detection..."
+  fi
+  _analyze_dir="$_TMPDIR/check_upscale_analyze"
+  rm -rf "$_analyze_dir"
+  mkdir -p "$_analyze_dir"
+  _analyze_count=0
+  for _key in "${CUE_FILE_KEYS[@]}"; do
+    _an_src="${CUE_FILE_PATHS[$_key]}"
+    [[ -n "$_an_src" && -e "$_an_src" ]] || continue
+    _an_stage="$(printf '%s/%02d_%s' "$_analyze_dir" "$((_analyze_count + 1))" "$(basename "$_an_src")")"
+    if ! ln -s "$_an_src" "$_an_stage" 2>/dev/null; then
+      echo "Error: failed to stage source for --check-upscale: $_an_src" >&2
+      exit 1
+    fi
+    _analyze_count=$((_analyze_count + 1))
+  done
+  if ((_analyze_count == 0)); then
+    echo "Error: no source files available for --check-upscale analysis." >&2
+    exit 1
+  fi
+
+  _analyze_cmd+=(--json "$_analyze_dir")
+  _an_json="$("${_analyze_cmd[@]}" </dev/null 2>/dev/null || true)"
+  _an_lines="$(
+    python3 - "$_an_json" <<'PY' 2>/dev/null || true
+import json, sys
+raw = sys.argv[1].strip()
+if not raw:
+    raise SystemExit(0)
+data = json.loads(raw)
+album_sr = data.get("album_sr")
+album_bits = data.get("album_bits")
+tracks = data.get("tracks") or []
+cutoff_hz = None
+for track in tracks:
+    value = track.get("cutoff_hz")
+    if value is None:
+        continue
+    value = float(value)
+    if cutoff_hz is None or value > cutoff_hz:
+        cutoff_hz = value
+print("" if album_sr is None else int(album_sr))
+print("" if album_bits is None else int(album_bits))
+if cutoff_hz is None:
+    print("")
+else:
+    print(f"{float(cutoff_hz)/1000.0:.2f}")
+PY
+  )"
+  { IFS= read -r _an_sr_hz; IFS= read -r _an_bits; IFS= read -r _an_cutoff_khz; } <<< "$_an_lines"
+
+  if [[ ! "$_an_sr_hz" =~ ^[0-9]+$ || ! "$_an_bits" =~ ^[0-9]+$ ]]; then
+    echo "Error: audlint-analyze did not return a usable target profile for --check-upscale." >&2
+    exit 1
+  fi
+
+  CHECK_UPSCALE_TARGET_SR_HZ="$_an_sr_hz"
+  CHECK_UPSCALE_TARGET_BITS="$_an_bits"
+  CHECK_UPSCALE_CUTOFF_KHZ="$_an_cutoff_khz"
+}
+
 # === CUE INDEX → SECONDS ===
 cue_index_to_seconds() {
   local idx="$1"
@@ -526,6 +614,12 @@ fi
 TARGET_SR_HZ="$PARSED_SR_HZ"
 TARGET_BITS="$PARSED_BITS"
 
+if ((CHECK_UPSCALE == 1)); then
+  run_check_upscale_analysis
+  TARGET_SR_HZ="$CHECK_UPSCALE_TARGET_SR_HZ"
+  TARGET_BITS="$CHECK_UPSCALE_TARGET_BITS"
+fi
+
 # === PRE-CONVERT OPAQUE SOURCES ===
 # sox cannot read WV/APE/DSF/DFF — convert each unique source file to a temp WAV.
 # WORK_SOURCE_MAP: maps CUE FILE key → work path (original or converted WAV)
@@ -551,11 +645,16 @@ for _key in "${CUE_FILE_KEYS[@]}"; do
 
   if [[ "$AUDIO_EXT_LC" == "dsf" || "$AUDIO_EXT_LC" == "dff" ]]; then
     if ((_dsd_target_sr == 0)); then
-      _src_sr_hz="$(audio_probe_sample_rate_hz "$_src")"
-      _dsd_profile="$(audio_dsd_max_pcm_profile "$_src_sr_hz")"
-      _dsd_target_sr="${_dsd_profile%%|*}"
-      _dsd_target_bits_rest="${_dsd_profile#*|}"
-      _dsd_target_bits="${_dsd_target_bits_rest%%|*}"
+      if ((CHECK_UPSCALE == 1)) && [[ "$CHECK_UPSCALE_TARGET_SR_HZ" =~ ^[0-9]+$ && "$CHECK_UPSCALE_TARGET_BITS" =~ ^[0-9]+$ ]]; then
+        _dsd_target_sr="$CHECK_UPSCALE_TARGET_SR_HZ"
+        _dsd_target_bits="$CHECK_UPSCALE_TARGET_BITS"
+      else
+        _src_sr_hz="$(audio_probe_sample_rate_hz "$_src")"
+        _dsd_profile="$(audio_dsd_max_pcm_profile "$_src_sr_hz")"
+        _dsd_target_sr="${_dsd_profile%%|*}"
+        _dsd_target_bits_rest="${_dsd_profile#*|}"
+        _dsd_target_bits="${_dsd_target_bits_rest%%|*}"
+      fi
       if ((_dsd_target_sr < TARGET_SR_HZ)); then
         TARGET_SR_HZ="$_dsd_target_sr"
       fi
@@ -631,73 +730,22 @@ TARGET_PROFILE_LABEL="${TARGET_SR_HZ}/${TARGET_BITS}"
 # === SPECTRAL UPSCALE CHECK ===
 UPSCALE_CHECK_LABEL=""
 if ((CHECK_UPSCALE == 1)); then
-  if [[ ! -x "$AUDLINT_ANALYZE_BIN" ]]; then
-    echo "Error: --check-upscale requires audlint-analyze.sh alongside cue2flac.sh (not executable: $AUDLINT_ANALYZE_BIN)." >&2
-    exit 2
-  fi
-  echo "Running audlint-analyze spectral target detection..."
-  _analyze_dir="$_TMPDIR/check_upscale_analyze"
-  mkdir -p "$_analyze_dir"
-  _analyze_count=0
-  for _key in "${CUE_FILE_KEYS[@]}"; do
-    _an_src="${WORK_SOURCE_MAP[$_key]}"
-    [[ -n "$_an_src" && -e "$_an_src" ]] || continue
-    _an_stage="$(printf '%s/%02d_%s' "$_analyze_dir" "$((_analyze_count + 1))" "$(basename "$_an_src")")"
-    if ! ln -s "$_an_src" "$_an_stage" 2>/dev/null; then
-      echo "Error: failed to stage source for --check-upscale: $_an_src" >&2
-      exit 1
+  if [[ "$CHECK_UPSCALE_TARGET_SR_HZ" =~ ^[0-9]+$ && "$CHECK_UPSCALE_TARGET_BITS" =~ ^[0-9]+$ ]]; then
+    _check_sr="$CHECK_UPSCALE_TARGET_SR_HZ"
+    _check_bits="$CHECK_UPSCALE_TARGET_BITS"
+    if [[ "$CAP_SR_HZ" =~ ^[0-9]+$ ]] && ((CAP_SR_HZ > 0)) && ((_check_sr > CAP_SR_HZ)); then
+      _check_sr="$CAP_SR_HZ"
     fi
-    _analyze_count=$((_analyze_count + 1))
-  done
-  if ((_analyze_count == 0)); then
-    echo "Error: no source files available for --check-upscale analysis." >&2
-    exit 1
-  fi
-
-  _an_json="$("$AUDLINT_ANALYZE_BIN" --json "$_analyze_dir" </dev/null 2>/dev/null || true)"
-  _an_lines="$(
-    python3 - "$_an_json" <<'PY' 2>/dev/null || true
-import json, sys
-raw = sys.argv[1].strip()
-if not raw:
-    raise SystemExit(0)
-data = json.loads(raw)
-album_sr = data.get("album_sr")
-album_bits = data.get("album_bits")
-tracks = data.get("tracks") or []
-cutoff_hz = None
-for track in tracks:
-    value = track.get("cutoff_hz")
-    if value is None:
-        continue
-    value = float(value)
-    if cutoff_hz is None or value > cutoff_hz:
-        cutoff_hz = value
-print("" if album_sr is None else int(album_sr))
-print("" if album_bits is None else int(album_bits))
-if cutoff_hz is None:
-    print("")
-else:
-    print(f"{float(cutoff_hz)/1000.0:.2f}")
-PY
-  )"
-  { IFS= read -r _an_sr_hz; IFS= read -r _an_bits; IFS= read -r _an_cutoff_khz; } <<< "$_an_lines"
-
-  if [[ "$_an_sr_hz" =~ ^[0-9]+$ && "$_an_bits" =~ ^[0-9]+$ ]]; then
-    # Cap to the lowest referenced source profile (no upscale).
-    if [[ "$CAP_SR_HZ" =~ ^[0-9]+$ ]] && ((CAP_SR_HZ > 0)) && ((_an_sr_hz > CAP_SR_HZ)); then
-      _an_sr_hz="$CAP_SR_HZ"
+    if [[ "$CAP_BITS" =~ ^[0-9]+$ ]] && ((CAP_BITS > 0)) && ((_check_bits > CAP_BITS)); then
+      _check_bits="$CAP_BITS"
     fi
-    if [[ "$CAP_BITS" =~ ^[0-9]+$ ]] && ((CAP_BITS > 0)) && ((_an_bits > CAP_BITS)); then
-      _an_bits="$CAP_BITS"
-    fi
-    TARGET_SR_HZ="$_an_sr_hz"
-    TARGET_BITS="$_an_bits"
+    TARGET_SR_HZ="$_check_sr"
+    TARGET_BITS="$_check_bits"
     TARGET_PROFILE_LABEL="${TARGET_SR_HZ}/${TARGET_BITS}"
   fi
 
-  if [[ "${_an_cutoff_khz:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    UPSCALE_CHECK_LABEL="audlint-analyze max cutoff≈${_an_cutoff_khz}kHz → Store as ${TARGET_PROFILE_LABEL}"
+  if [[ "${CHECK_UPSCALE_CUTOFF_KHZ:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    UPSCALE_CHECK_LABEL="audlint-analyze max cutoff≈${CHECK_UPSCALE_CUTOFF_KHZ}kHz → Store as ${TARGET_PROFILE_LABEL}"
   else
     UPSCALE_CHECK_LABEL="audlint-analyze resolved target → Store as ${TARGET_PROFILE_LABEL}"
   fi

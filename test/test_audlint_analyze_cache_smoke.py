@@ -238,6 +238,12 @@ EOF
         self.assertEqual(payload["tracks"][0]["analysis_mode"], "exact")
         self.assertTrue(payload["tracks"][0]["auto_exact_fallback"])
 
+    def test_auto_mode_prints_exact_fallback_notice(self) -> None:
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertEqual(proc.stdout.strip(), "44100/16")
+        self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
+
     def test_exact_mode_uses_separate_profile_cache_ruleset(self) -> None:
         first = self._run()
         self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)

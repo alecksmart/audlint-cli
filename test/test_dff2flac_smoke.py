@@ -46,6 +46,9 @@ class DffEncoderSmokeTests(unittest.TestCase):
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
+                if [[ -n "${STUB_AUDLINT_ANALYZE_STDERR:-}" ]]; then
+                  printf '%s\n' "${STUB_AUDLINT_ANALYZE_STDERR}" >&2
+                fi
                 shopt -s nullglob nocaseglob
                 files=(./*.dff)
                 if ((${#files[@]} == 0)); then
@@ -255,6 +258,11 @@ EOF
 
         sox_log = (self.tmpdir / "sox.log").read_text(encoding="utf-8")
         self.assertIn("gain -1.600", sox_log)
+
+    def test_surfaces_exact_fallback_notice(self) -> None:
+        proc = self._run([], extra_env={"STUB_AUDLINT_ANALYZE_STDERR": "Got low confidence in fast test, running exact mode..."})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
 
     def test_48k_family_dff_uses_192k_target(self) -> None:
         (self.album_dir / "01 Song.dff").unlink()

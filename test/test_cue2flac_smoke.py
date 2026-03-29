@@ -743,6 +743,28 @@ JSON
         self.assertNotIn("Target    : 44100/24", proc.stdout)
         self.assertNotIn("Target    : 48000/24", proc.stdout)
 
+    def test_check_upscale_surfaces_exact_fallback_notice(self) -> None:
+        analyze_stub = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            echo "Got low confidence in fast test, running exact mode..." >&2
+            if [[ "${1:-}" == "--json" ]]; then
+              cat <<'JSON'
+{"album_sr": 44100, "album_bits": 24, "tracks": [{"cutoff_hz": 4930.0}]}
+JSON
+              exit 0
+            fi
+            printf '44100/24\n'
+            """
+        )
+        helper = self.script_dir / "audlint-analyze.sh"
+        helper.write_text(analyze_stub, encoding="utf-8")
+        helper.chmod(helper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        proc = self._run(["--check-upscale", "--dry-run"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
+
     def test_exact_is_not_supported_in_cue2flac(self) -> None:
         proc = self._run(["--exact", "--dry-run"])
         self.assertNotEqual(proc.returncode, 0)

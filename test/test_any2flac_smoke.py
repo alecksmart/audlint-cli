@@ -197,6 +197,9 @@ EOF
                 if [[ -n "${STUB_AUDLINT_ANALYZE_LOG:-}" ]]; then
                   printf '%s\n' "$*" >> "${STUB_AUDLINT_ANALYZE_LOG}"
                 fi
+                if [[ -n "${STUB_AUDLINT_ANALYZE_STDERR:-}" ]]; then
+                  printf '%s\n' "${STUB_AUDLINT_ANALYZE_STDERR}" >&2
+                fi
                 echo "${STUB_AUDLINT_ANALYZE_TARGET:-48000/24}"
                 """
             ),
@@ -236,6 +239,17 @@ EOF
         self.assertNotEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("confirmation required", proc.stderr)
         self.assertIn("Auto profile: 44100/16", proc.stdout)
+
+    def test_auto_profile_surfaces_exact_fallback_notice(self) -> None:
+        src = self.album_dir / "01-hr.wav"
+        src.write_text("", encoding="utf-8")
+
+        proc = self._run(
+            ["--profile=best"],
+            extra_env={"STUB_AUDLINT_ANALYZE_STDERR": "Got low confidence in fast test, running exact mode..."},
+        )
+        self.assertNotEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
 
     def test_auto_profile_mode_supports_with_boost(self) -> None:
         src = self.album_dir / "01-hr.wav"

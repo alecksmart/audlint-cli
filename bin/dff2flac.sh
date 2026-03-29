@@ -108,7 +108,7 @@ resolve_album_target_profile() {
   local album_dir="$1"
   local recode_raw
 
-  recode_raw="$("$AUDLINT_ANALYZE_BIN" "$album_dir" 2>/dev/null || true)"
+  recode_raw="$("$AUDLINT_ANALYZE_BIN" "$album_dir" || true)"
   recode_raw="$(printf '%s\n' "$recode_raw" | head -n1 | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   if [[ "$recode_raw" == "Re-encoding not needed" ]]; then
     recode_raw="$(profile_cache_target_profile "$album_dir" || true)"

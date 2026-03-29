@@ -471,7 +471,7 @@ run_check_upscale_analysis() {
   fi
 
   _analyze_cmd+=(--json "$_analyze_dir")
-  _an_json="$("${_analyze_cmd[@]}" </dev/null 2>/dev/null || true)"
+  _an_json="$("${_analyze_cmd[@]}" </dev/null || true)"
   _an_lines="$(
     python3 - "$_an_json" <<'PY' 2>/dev/null || true
 import json, sys

@@ -359,7 +359,7 @@ resolve_auto_target_profile() {
     return 1
   fi
   analyze_cmd+=("$WORK_DIR")
-  recode_raw="$("${analyze_cmd[@]}" 2>/dev/null || true)"
+  recode_raw="$("${analyze_cmd[@]}" || true)"
   recode_raw="$(printf '%s\n' "$recode_raw" | head -n1 | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   if [[ "$recode_raw" == "Re-encoding not needed" ]]; then
     recode_raw="$(profile_cache_target_profile "$WORK_DIR" || true)"

@@ -614,7 +614,7 @@ resolve_analyze_recode_target() {
   local recode_raw
 
   [[ -x "$AUDLINT_ANALYZE_BIN" ]] || return 1
-  recode_raw="$("$AUDLINT_ANALYZE_BIN" "$album_dir" 2>/dev/null || true)"
+  recode_raw="$("$AUDLINT_ANALYZE_BIN" "$album_dir" || true)"
   if [[ ! "$recode_raw" =~ ^[0-9]+/[0-9]+$ ]]; then
     recode_raw="$(profile_cache_target_profile "$album_dir" || true)"
   fi

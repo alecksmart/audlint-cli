@@ -270,6 +270,10 @@ PY
   IFS= read -r ALBUM_DECISION
 } <<< "$ANALYZE_SUMMARY"
 
+if [[ "$AUTO_EXACT_FALLBACK" == "1" ]]; then
+  echo "Got low confidence in fast test, running exact mode..." >&2
+fi
+
 cat >"$PROFILE_FILE" <<EOF
 RULESET=$SCRIPT_RULESET
 REQUESTED_ANALYSIS_MODE=$REQUESTED_ANALYSIS_MODE_EFFECTIVE

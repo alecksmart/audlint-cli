@@ -40,6 +40,9 @@ class AudlintValueSmokeTests(unittest.TestCase):
             if [[ -n "${{STUB_AUDLINT_ANALYZE_LOG:-}}" ]]; then
               printf '%s\\n' "$*" >> "${{STUB_AUDLINT_ANALYZE_LOG}}"
             fi
+            if [[ -n "${{STUB_AUDLINT_ANALYZE_STDERR:-}}" ]]; then
+              printf '%s\\n' "${{STUB_AUDLINT_ANALYZE_STDERR}}" >&2
+            fi
             album_dir="${{@: -1}}"
             cat > "$album_dir/.sox_album_profile" <<'EOF'
 TARGET_SR=48000
@@ -105,6 +108,14 @@ EOF
         analyze_args = analyze_log.read_text(encoding="utf-8")
         self.assertIn(str(self.album_dir), analyze_args)
         self.assertNotIn("--exact", analyze_args)
+
+    def test_value_surfaces_analyzer_fallback_notice(self) -> None:
+        proc = self._run(
+            [str(self.album_dir)],
+            extra_env={"STUB_AUDLINT_ANALYZE_STDERR": "Got low confidence in fast test, running exact mode..."},
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
 
 
 if __name__ == "__main__":

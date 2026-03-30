@@ -130,6 +130,57 @@ EOF
         self.assertIn(f"dr14meter failed for: {self.album_dir}", proc.stderr)
         self.assertIn("data type 'int24' not understood", proc.stderr)
 
+    def test_value_retries_int24_wav_album_via_proxy_conversion(self) -> None:
+        (self.album_dir / "01 Track.flac").unlink()
+        (self.album_dir / "01 Track.wav").write_text("", encoding="utf-8")
+        ffmpeg_log = self.tmpdir / "ffmpeg.log"
+
+        _write_exec(
+            self.bin_dir / "dr14meter",
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            album_dir="${@: -1}"
+            if [[ "$album_dir" == "${ORIG_ALBUM_DIR:-}" ]]; then
+              printf '%s\n' "Unexpected error: data type 'int24' not understood" >&2
+              exit 1
+            fi
+            cat <<'EOF'
+Official DR value: DR8
+Sampling rate: 96000 Hz
+Average bitrate: 4608 kbs
+Bits per sample: 24 bit
+DR8 -1.00 dB -12.00 dB 62:08 01 Track.wav [wav]
+EOF
+            """,
+        )
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            if [[ -n "${FFMPEG_LOG:-}" ]]; then
+              printf '%s\n' "$*" >> "${FFMPEG_LOG}"
+            fi
+            out="${@: -1}"
+            : > "$out"
+            """,
+        )
+
+        proc = self._run(
+            [str(self.album_dir)],
+            extra_env={
+                "ORIG_ALBUM_DIR": str(self.album_dir),
+                "FFMPEG_LOG": str(ffmpeg_log),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["drTotal"], 8)
+        self.assertEqual(payload["tracks"]["01 Track.wav"], 8)
+        self.assertIn("dr14meter int24 fallback: retrying via temporary PCM32 proxies", proc.stderr)
+        self.assertTrue(ffmpeg_log.read_text(encoding="utf-8").strip())
+
 
 if __name__ == "__main__":
     unittest.main()

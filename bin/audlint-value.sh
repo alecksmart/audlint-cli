@@ -164,6 +164,40 @@ else
 fi
 have "$PYTHON_BIN" || { echo "Missing dependency: python3" >&2; exit 1; }
 
+album_has_dr14_proxy_candidates() {
+  find "$1" -maxdepth 1 -type f \( -iname '*.wav' -o -iname '*.wave' -o -iname '*.aif' -o -iname '*.aiff' \) | grep -q .
+}
+
+build_dr14_proxy_album() {
+  local src_dir="$1"
+  local proxy_dir="$2"
+  local src base lower copied_any=0
+  mkdir -p "$proxy_dir"
+
+  while IFS= read -r -d '' src; do
+    base="$(basename "$src")"
+    lower="${base,,}"
+    case "$lower" in
+      *.wav | *.wave)
+        ffmpeg -v error -nostdin -y -i "$src" -map_metadata -1 -c:a pcm_s32le "$proxy_dir/$base" >/dev/null 2>&1 || return 1
+        copied_any=1
+        ;;
+      *.aif | *.aiff)
+        ffmpeg -v error -nostdin -y -i "$src" -map_metadata -1 -c:a pcm_s32be "$proxy_dir/$base" >/dev/null 2>&1 || return 1
+        copied_any=1
+        ;;
+      *.flac | *.wv | *.ape | *.mp3 | *.m4a | *.aac | *.alac | *.ogg | *.opus | *.caf | *.dsf | *.dff | *.wma)
+        ln -s "$src" "$proxy_dir/$base" 2>/dev/null || cp -p "$src" "$proxy_dir/$base" || return 1
+        copied_any=1
+        ;;
+      *)
+        ;;
+    esac
+  done < <(find "$src_dir" -maxdepth 1 -type f ! -name '.*' -print0)
+
+  [[ "$copied_any" -eq 1 ]]
+}
+
 # ── Step 1: spectral recode target ─────────────────────────────────────────
 analyze_cmd=("$AUDLINT_ANALYZE_BIN")
 analyze_cmd+=("$ALBUM_DIR")
@@ -187,9 +221,13 @@ analyze_decision_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_DECISION" || true)
 # ── Step 2: DR14 measurement ───────────────────────────────────────────────
 tmp_out="$(mktemp -t audvalue_dr14.XXXXXX)"
 report_file=""
+proxy_album_dir=""
 
 cleanup() {
   rm -f "$tmp_out"
+  if [[ -n "${proxy_album_dir:-}" ]]; then
+    rm -rf "$proxy_album_dir"
+  fi
   if [[ -n "${report_file:-}" ]]; then
     rm -f "$report_file"
   fi
@@ -201,6 +239,23 @@ if "$DR14METER_BIN" -n -p "$ALBUM_DIR" >"$tmp_out" 2>&1; then
   dr14_rc=0
 else
   dr14_rc=$?
+fi
+
+if ! grep -Eiq 'Official DR value:|^[[:space:]]*DR[[:space:]]*=|Total DR:|Album DR:' "$tmp_out" \
+  && grep -Fq "data type 'int24' not understood" "$tmp_out"; then
+  if album_has_dr14_proxy_candidates "$ALBUM_DIR"; then
+    if have ffmpeg; then
+      proxy_album_dir="$(mktemp -d -t audvalue_dr14_proxy.XXXXXX)"
+      if build_dr14_proxy_album "$ALBUM_DIR" "$proxy_album_dir"; then
+        printf '%s\n' "dr14meter int24 fallback: retrying via temporary PCM32 proxies" >&2
+        if "$DR14METER_BIN" -n -p "$proxy_album_dir" >"$tmp_out" 2>&1; then
+          dr14_rc=0
+        else
+          dr14_rc=$?
+        fi
+      fi
+    fi
+  fi
 fi
 
 if grep -Eiq 'Official DR value:|^[[:space:]]*DR[[:space:]]*=|Total DR:|Album DR:' "$tmp_out"; then
@@ -231,6 +286,9 @@ fi
 
 if [[ -z "$report_file" || ! -f "$report_file" ]]; then
   echo "dr14meter failed for: $ALBUM_DIR" >&2
+  if [[ "$dr14_rc" -ne 0 ]] && grep -Fq "data type 'int24' not understood" "$tmp_out" && ! have ffmpeg; then
+    echo "Install ffmpeg for automatic int24 WAV fallback, or preconvert the album to FLAC/PCM32." >&2
+  fi
   if [[ -s "$tmp_out" ]]; then
     cat "$tmp_out" >&2
   elif [[ "$dr14_rc" -ne 0 ]]; then
@@ -289,6 +347,8 @@ def normalize_song_name(raw_name: str) -> str:
     name = raw_name.strip()
     if "/" in name:
         name = os.path.basename(name)
+    name = re.sub(r"^\d+:\d{2}(?::\d{2})?\s+", "", name)
+    name = re.sub(r"\s+\[[^\]]+\]$", "", name)
     name = re.sub(r"\s+", " ", name)
     key = name.lower()
     if key in album_files:

@@ -68,6 +68,12 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
                 if [ -n "${FFPROBE_LOG:-}" ]; then
                   printf "%s\\n" "$args" >> "${FFPROBE_LOG}"
                 fi
+                if [[ "$args" == *"-of json"* && "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels"* ]]; then
+                  cat <<'EOF'
+{"streams":[{"codec_name":"flac","sample_rate":"44100","bits_per_raw_sample":"16","bits_per_sample":0,"sample_fmt":"s16","channels":2}],"format":{"duration":"120"}}
+EOF
+                  exit 0
+                fi
                 if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
                   cat <<'EOF'
 [STREAM]
@@ -132,6 +138,9 @@ EOF
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
+                if [ -n "${FFMPEG_LOG:-}" ]; then
+                  printf "%s\\n" "$*" >> "${FFMPEG_LOG}"
+                fi
                 out="${@: -1}"
                 if [[ "$out" == "-" ]]; then
                   # f32le mono bytes for FFT path: >= 44100 samples
@@ -145,11 +154,13 @@ EOF
             ),
         )
 
-    def _run(self, *extra_args: str) -> subprocess.CompletedProcess:
+    def _run(self, *extra_args: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["AUDL_PYTHON_BIN"] = "python3"
         env["NO_COLOR"] = "1"
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [str(ANALYZE), *extra_args, str(self.album_dir)],
             cwd=str(self.album_dir),
@@ -244,6 +255,15 @@ EOF
         self.assertEqual(proc.stdout.strip(), "44100/16")
         self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
 
+    def test_auto_mode_reuses_single_decode_for_exact_fallback(self) -> None:
+        ffmpeg_log = self.tmpdir / "ffmpeg.log"
+        proc = self._run("--json", extra_env={"FFMPEG_LOG": str(ffmpeg_log)})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(invocations), 1)
+        self.assertIn("-ac 2", invocations[0])
+
     def test_exact_mode_uses_separate_profile_cache_ruleset(self) -> None:
         first = self._run()
         self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)
@@ -318,6 +338,12 @@ EOF
                 """\
                 #!/usr/bin/env bash
                 args="$*"
+                if [[ "$args" == *"-of json"* && "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels"* ]]; then
+                  cat <<'EOF'
+{"streams":[{"codec_name":"ape","sample_rate":"44100","bits_per_raw_sample":"16","bits_per_sample":0,"sample_fmt":"s16","channels":2}],"format":{"duration":"120"}}
+EOF
+                  exit 0
+                fi
                 if [[ "$args" == *"codec_name"* && "$args" == *"sample_rate"* && "$args" == *"sample_fmt"* ]]; then
                   cat <<'EOF'
 codec_name=ape
@@ -402,6 +428,12 @@ EOF
                 """\
                 #!/usr/bin/env bash
                 args="$*"
+                if [[ "$args" == *"-of json"* && "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels"* ]]; then
+                  cat <<'EOF'
+{"streams":[{"codec_name":"ape","sample_rate":"96000","bits_per_raw_sample":"24","bits_per_sample":0,"sample_fmt":"s32p","channels":2}],"format":{"duration":"120"}}
+EOF
+                  exit 0
+                fi
                 if [[ "$args" == *"codec_name"* && "$args" == *"sample_rate"* && "$args" == *"sample_fmt"* ]]; then
                   cat <<'EOF'
 codec_name=ape

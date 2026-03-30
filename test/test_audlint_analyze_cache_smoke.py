@@ -1,3 +1,4 @@
+from array import array
 import json
 import os
 import stat
@@ -32,6 +33,13 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def _write_pcm_payload(self, *, seconds: int = 8, channels: int = 2, sample_rate: int = 44100) -> Path:
+        frame_count = seconds * sample_rate * channels
+        payload = array("f", (0.25 if (idx % 2 == 0) else -0.25 for idx in range(frame_count)))
+        path = self.tmpdir / f"payload-{seconds}s-{channels}ch.pcm"
+        path.write_bytes(payload.tobytes())
+        return path
 
     def _install_stubs(self) -> None:
         _write_exec(
@@ -263,6 +271,211 @@ EOF
         invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertEqual(len(invocations), 1)
         self.assertIn("-ac 2", invocations[0])
+
+    def test_large_wavpack_prefers_segment_seek_decodes(self) -> None:
+        (self.album_dir / "01-track.wav").unlink()
+        wv_path = self.album_dir / "01-track.wv"
+        wv_path.write_text("seed-wv", encoding="utf-8")
+        payload_path = self._write_pcm_payload(seconds=8, channels=2, sample_rate=192000)
+        ffmpeg_log = self.tmpdir / "ffmpeg-large.log"
+
+        _write_exec(
+            self.bin_dir / "soxi",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                field="${1:-}"
+                case "$field" in
+                  -r) echo "192000" ;;
+                  -D) echo "3600" ;;
+                  -b) echo "24" ;;
+                  *) exit 1 ;;
+                esac
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                args="$*"
+                if [[ "$args" == *"-of json"* && "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels"* ]]; then
+                  cat <<'EOF'
+{"streams":[{"codec_name":"wavpack","sample_rate":"192000","bits_per_raw_sample":"24","bits_per_sample":0,"sample_fmt":"s32","channels":2}],"format":{"duration":"3600"}}
+EOF
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "wavpack"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=sample_rate"* ]]; then
+                  echo "192000"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* || "$args" == *"stream=bits_per_sample"* ]]; then
+                  echo "24"
+                  exit 0
+                fi
+                if [[ "$args" == *"format=duration"* ]]; then
+                  echo "3600"
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                if [ -n "${{FFMPEG_LOG:-}}" ]; then
+                  printf '%s\\n' "$*" >> "${{FFMPEG_LOG}}"
+                fi
+                cat "{payload_path}"
+                """
+            ),
+        )
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["FFMPEG_LOG"] = str(ffmpeg_log)
+
+        proc = subprocess.run(
+            [
+                "python3",
+                str(ANALYZE_PY),
+                "analyze",
+                "500",
+                "-55",
+                "8",
+                "12",
+                "fast",
+                str(wv_path),
+            ],
+            cwd=str(self.album_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        payload = json.loads(proc.stdout)
+        track = payload["tracks"][0]
+        self.assertEqual(track["analysis_strategy"], "segment")
+        self.assertEqual(track["decode_operations"], 4)
+        invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(invocations), 4)
+        self.assertTrue(all("-ss" in line and "-t" in line for line in invocations))
+
+    def test_large_wavpack_auto_falls_back_from_segment_to_full(self) -> None:
+        (self.album_dir / "01-track.wav").unlink()
+        wv_path = self.album_dir / "01-track.wv"
+        wv_path.write_text("seed-wv", encoding="utf-8")
+        ffmpeg_log = self.tmpdir / "ffmpeg-full-fallback.log"
+
+        _write_exec(
+            self.bin_dir / "soxi",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                field="${1:-}"
+                case "$field" in
+                  -r) echo "192000" ;;
+                  -D) echo "3600" ;;
+                  -b) echo "24" ;;
+                  *) exit 1 ;;
+                esac
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                args="$*"
+                if [[ "$args" == *"-of json"* && "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels"* ]]; then
+                  cat <<'EOF'
+{"streams":[{"codec_name":"wavpack","sample_rate":"192000","bits_per_raw_sample":"24","bits_per_sample":0,"sample_fmt":"s32","channels":2}],"format":{"duration":"3600"}}
+EOF
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "wavpack"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=sample_rate"* ]]; then
+                  echo "192000"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* || "$args" == *"stream=bits_per_sample"* ]]; then
+                  echo "24"
+                  exit 0
+                fi
+                if [[ "$args" == *"format=duration"* ]]; then
+                  echo "3600"
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                if [ -n "${FFMPEG_LOG:-}" ]; then
+                  printf '%s\\n' "$*" >> "${FFMPEG_LOG}"
+                fi
+                head -c 200000 /dev/zero
+                """
+            ),
+        )
+
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["FFMPEG_LOG"] = str(ffmpeg_log)
+
+        proc = subprocess.run(
+            [
+                "python3",
+                str(ANALYZE_PY),
+                "analyze",
+                "500",
+                "-55",
+                "8",
+                "12",
+                "auto",
+                str(wv_path),
+            ],
+            cwd=str(self.album_dir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        payload = json.loads(proc.stdout)
+        track = payload["tracks"][0]
+        self.assertEqual(track["analysis_strategy"], "full")
+        self.assertTrue(track["strategy_fallback_to_full"])
+        self.assertEqual(track["segments_requested"], 6)
+        self.assertEqual(track["segments_used"], 0)
+        self.assertEqual(track["decode_operations"], 7)
+        self.assertEqual(track["segment_probe_analysis_mode"], "exact")
+        self.assertEqual(track["segment_probe_analysis_confidence"], "low")
+        self.assertEqual(track["segment_probe_segments_requested"], 6)
+        self.assertEqual(track["segment_probe_segments_used"], 0)
+        self.assertEqual(track["segment_probe_decode_operations"], 6)
+        invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertTrue(any("-ss" in line and "-t" in line for line in invocations))
+        self.assertTrue(any("-ss" not in line for line in invocations))
 
     def test_exact_mode_uses_separate_profile_cache_ruleset(self) -> None:
         first = self._run()

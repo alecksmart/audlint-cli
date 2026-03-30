@@ -20,6 +20,9 @@ DEFAULT_DECODE_TIMEOUT_SEC = 20.0
 AUTO_ANALYSIS_MODE = "auto"
 FAST_ANALYSIS_MODE = "fast"
 EXACT_ANALYSIS_MODE = "exact"
+ANALYSIS_STRATEGY_FAST = "fast"
+ANALYSIS_STRATEGY_SEGMENT = "segment"
+ANALYSIS_STRATEGY_FULL = "full"
 CD_FAMILY_SR_HZ = 44100
 STUDIO_48_FAMILY_SR_HZ = 48000
 CD_NYQUIST_HZ = 22050.0
@@ -31,6 +34,26 @@ EXACT_MIN_WINDOWS = 24
 EXACT_WINDOW_MULTIPLIER = 2
 MAX_ANALYSIS_SR_HZ = 192000
 PCM_BYTES_PER_SAMPLE = 4
+STRATEGY_CONFIG_VERSION = "hybrid-v1"
+SEGMENT_EXPENSIVE_CODECS = {
+    "ape",
+    "wavpack",
+    "wv",
+    "dsf",
+    "dff",
+    "dsd_lsbf",
+    "dsd_msbf",
+    "dsd_lsbf_planar",
+    "dsd_msbf_planar",
+}
+SEGMENT_EXPENSIVE_SUFFIXES = {".ape", ".wv", ".dsf", ".dff"}
+SEGMENT_DURATION_THRESHOLD_SEC = 15.0 * 60.0
+SEGMENT_SIZE_THRESHOLD_BYTES = 250 * 1024 * 1024
+SEGMENT_CUE_IMAGE_THRESHOLD_BYTES = 100 * 1024 * 1024
+SEGMENT_FAST_COUNT = 4
+SEGMENT_EXACT_COUNT = 6
+SEGMENT_MIN_SECONDS = 6.0
+SEGMENT_MAX_SECONDS = 12.0
 
 
 @dataclass(frozen=True)
@@ -40,6 +63,9 @@ class TrackMeta:
     bits: int | None
     channels: int | None
     analysis_sr: int | None
+    codec: str | None
+    size_bytes: int
+    has_sibling_cue: bool
     prefer_ffmpeg_first: bool
 
 
@@ -52,6 +78,7 @@ class DecodedTrack:
     dur: float | None
     channels: int
     frames: int
+    source_start_sec: float
 
 
 def usage() -> str:
@@ -114,6 +141,16 @@ def cmd_config_fingerprint(argv: list[str]) -> int:
         f"max_windows={argv[4]}",
         f"fp_sample_bytes={argv[5]}",
         f"fp_mode={argv[6]}",
+        f"strategy_config={STRATEGY_CONFIG_VERSION}",
+        f"segment_codecs={','.join(sorted(SEGMENT_EXPENSIVE_CODECS))}",
+        f"segment_suffixes={','.join(sorted(SEGMENT_EXPENSIVE_SUFFIXES))}",
+        f"segment_duration_threshold_sec={SEGMENT_DURATION_THRESHOLD_SEC}",
+        f"segment_size_threshold_bytes={SEGMENT_SIZE_THRESHOLD_BYTES}",
+        f"segment_cue_image_threshold_bytes={SEGMENT_CUE_IMAGE_THRESHOLD_BYTES}",
+        f"segment_fast_count={SEGMENT_FAST_COUNT}",
+        f"segment_exact_count={SEGMENT_EXACT_COUNT}",
+        f"segment_min_seconds={SEGMENT_MIN_SECONDS}",
+        f"segment_max_seconds={SEGMENT_MAX_SECONDS}",
     ]
     joined = "\n".join(parts).encode("utf-8", "strict")
     print(hashlib.sha256(joined).hexdigest())
@@ -258,11 +295,19 @@ def ffprobe_duration(path: str) -> float | None:
     return None
 
 
+def sibling_cue_exists(path: str) -> bool:
+    try:
+        dirname = os.path.dirname(path) or "."
+        return any(entry.lower().endswith(".cue") for entry in os.listdir(dirname))
+    except OSError:
+        return False
+
+
 def prefer_ffmpeg_decode(path: str, soxi_duration: float | None) -> bool:
     if not HAS_FFMPEG:
         return False
     suffix = os.path.splitext(path)[1].lower()
-    if suffix == ".ape":
+    if suffix in SEGMENT_EXPENSIVE_SUFFIXES:
         return True
     return soxi_duration is None or soxi_duration <= 0
 
@@ -339,16 +384,24 @@ def audio_meta(path: str) -> TrackMeta:
     if dur is None or dur <= 0:
         dur = ffprobe_duration(path)
     bits = probe_source_bits(path, meta)
+    codec = (meta.get("codec_name") or ffprobe_stream_text(path, "codec_name") or "").strip().lower() or None
     channels = parse_positive_int(meta.get("channels"))
     if channels is None:
         channels = parse_positive_int(str(ffprobe_stream(path, "channels") or ""))
     analysis_sr = capped_analysis_sample_rate(sr)
+    try:
+        size_bytes = os.stat(path, follow_symlinks=True).st_size
+    except OSError:
+        size_bytes = 0
     return TrackMeta(
         sr=sr,
         dur=dur,
         bits=bits,
         channels=channels,
         analysis_sr=analysis_sr,
+        codec=codec,
+        size_bytes=size_bytes,
+        has_sibling_cue=sibling_cue_exists(path),
         prefer_ffmpeg_first=prefer_ffmpeg_decode(path, soxi_dur),
     )
 
@@ -400,26 +453,31 @@ def run_decode_command_to_file(cmd: list[str], timeout_sec: float) -> str | None
         return None
 
 
-def decode_track_pcm(
+def decode_pcm_span(
     path: str,
     track_meta: TrackMeta,
-    window_sec: float,
     decode_channels: int,
+    span_sec: float,
+    start_sec: float | None = None,
+    duration_sec: float | None = None,
 ) -> DecodedTrack | None:
     analysis_sr = track_meta.analysis_sr
     if analysis_sr is None or analysis_sr <= 0:
         return None
 
     decode_channels = 2 if decode_channels >= 2 else 1
-    timeout_sec = decode_timeout_sec(window_sec, track_meta.dur)
+    timeout_sec = decode_timeout_sec(span_sec, duration_sec or track_meta.dur)
 
     ffmpeg_cmd = [
         "ffmpeg",
         "-v",
         "error",
-        "-i",
-        path,
     ]
+    if start_sec is not None:
+        ffmpeg_cmd.extend(["-ss", f"{max(0.0, start_sec):.6f}"])
+    if duration_sec is not None:
+        ffmpeg_cmd.extend(["-t", f"{max(0.0, duration_sec):.6f}"])
+    ffmpeg_cmd.extend(["-i", path])
     if decode_channels >= 2:
         ffmpeg_cmd.extend(["-filter:a", "pan=stereo|c0=c0|c1=c1", "-ac", "2"])
     else:
@@ -429,6 +487,10 @@ def decode_track_pcm(
     sox_cmd = ["sox", path, "-t", "f32", "-c", str(decode_channels), "-r", str(int(analysis_sr)), "-"]
     if decode_channels >= 2:
         sox_cmd.extend(["remix", "1", "2"])
+    if start_sec is not None or duration_sec is not None:
+        sox_cmd.extend(["trim", f"{max(0.0, start_sec or 0.0):.6f}"])
+        if duration_sec is not None:
+            sox_cmd.append(f"{max(0.0, duration_sec):.6f}")
 
     commands: list[list[str]] = []
     if track_meta.prefer_ffmpeg_first and HAS_FFMPEG:
@@ -452,18 +514,47 @@ def decode_track_pcm(
         if debug_enabled():
             debug(
                 f"decoded track={os.path.basename(path)} sr_in={track_meta.sr} "
-                f"analysis_sr={analysis_sr} channels={decode_channels} frames={frames}"
+                f"analysis_sr={analysis_sr} channels={decode_channels} frames={frames} "
+                f"start={0.0 if start_sec is None else start_sec:.3f} "
+                f"duration={'full' if duration_sec is None else f'{duration_sec:.3f}'}"
             )
         return DecodedTrack(
             path=path,
             pcm_path=pcm_path,
             source_sr=track_meta.sr,
             analysis_sr=int(analysis_sr),
-            dur=track_meta.dur,
+            dur=duration_sec if duration_sec is not None else track_meta.dur,
             channels=decode_channels,
             frames=frames,
+            source_start_sec=0.0 if start_sec is None else float(start_sec),
         )
     return None
+
+
+def decode_track_pcm(
+    path: str,
+    track_meta: TrackMeta,
+    window_sec: float,
+    decode_channels: int,
+) -> DecodedTrack | None:
+    return decode_pcm_span(path, track_meta, decode_channels, window_sec)
+
+
+def decode_segment_pcm(
+    path: str,
+    track_meta: TrackMeta,
+    segment_start_sec: float,
+    segment_duration_sec: float,
+    decode_channels: int,
+) -> DecodedTrack | None:
+    return decode_pcm_span(
+        path,
+        track_meta,
+        decode_channels,
+        segment_duration_sec,
+        start_sec=segment_start_sec,
+        duration_sec=segment_duration_sec,
+    )
 
 
 def cleanup_decoded_track(decoded_track: DecodedTrack | None) -> None:
@@ -503,6 +594,54 @@ def build_window_starts(dur: float, window_sec: float, max_windows: int) -> list
     return starts
 
 
+def choose_analysis_strategy(path: str, track_meta: TrackMeta) -> tuple[str, str]:
+    codec = (track_meta.codec or "").strip().lower()
+    suffix = os.path.splitext(path)[1].lower()
+    reasons: list[str] = []
+
+    if codec in SEGMENT_EXPENSIVE_CODECS or suffix in SEGMENT_EXPENSIVE_SUFFIXES:
+        reasons.append(f"expensive_codec:{codec or suffix}")
+    if track_meta.has_sibling_cue and track_meta.size_bytes >= SEGMENT_CUE_IMAGE_THRESHOLD_BYTES:
+        reasons.append("cue_backed_large_image")
+    if track_meta.dur and track_meta.dur >= SEGMENT_DURATION_THRESHOLD_SEC:
+        reasons.append(f"long_duration:{int(track_meta.dur)}s")
+    if track_meta.size_bytes >= SEGMENT_SIZE_THRESHOLD_BYTES:
+        reasons.append(f"large_file:{track_meta.size_bytes}")
+
+    if reasons:
+        return ANALYSIS_STRATEGY_SEGMENT, ",".join(reasons)
+    return ANALYSIS_STRATEGY_FAST, "normal_source"
+
+
+def segment_count_for_mode(analysis_mode: str) -> int:
+    analysis_mode = normalize_analysis_mode(analysis_mode)
+    if analysis_mode == EXACT_ANALYSIS_MODE:
+        return SEGMENT_EXACT_COUNT
+    return SEGMENT_FAST_COUNT
+
+
+def segment_duration_for_window(window_sec: float) -> float:
+    return max(SEGMENT_MIN_SECONDS, min(SEGMENT_MAX_SECONDS, float(window_sec)))
+
+
+def build_segment_starts(dur: float | None, segment_sec: float, segment_count: int) -> list[float]:
+    if dur is None or dur <= 0:
+        return [0.0]
+    usable = max(0.0, dur - segment_sec)
+    if usable <= 0:
+        return [0.0]
+
+    count = min(segment_count, max(1, int(dur // max(segment_sec, 1.0))))
+    if count <= 1:
+        return [usable * 0.5]
+
+    starts: list[float] = []
+    for idx in range(count):
+        ratio = 0.08 + (0.84 * (idx / (count - 1)))
+        starts.append(max(0.0, min(usable * ratio, usable)))
+    return starts
+
+
 def select_channel_signal(window_frames, channel_mode: str):
     import numpy as np
 
@@ -526,7 +665,7 @@ def analyze_cutoff_series_from_decoded(
     channel_mode: str = "mono",
 ) -> dict[str, object]:
     sr = track_meta.sr
-    dur = track_meta.dur
+    dur = decoded_track.dur if decoded_track is not None else track_meta.dur
     analysis_sr = track_meta.analysis_sr
 
     if decoded_track is None or analysis_sr is None or not dur:
@@ -658,6 +797,93 @@ def analyze_cutoff(
     return result["sr"], result["dur"], result["cutoff_hz"]
 
 
+def prepare_segment_decodes(
+    path: str,
+    track_meta: TrackMeta,
+    window_sec: float,
+    decode_channels: int,
+    analysis_mode: str,
+) -> list[DecodedTrack]:
+    segment_duration = segment_duration_for_window(window_sec)
+    starts = build_segment_starts(track_meta.dur, segment_duration, segment_count_for_mode(analysis_mode))
+    decodes: list[DecodedTrack] = []
+    for start_sec in starts:
+        decoded_track = decode_segment_pcm(
+            path,
+            track_meta,
+            start_sec,
+            segment_duration,
+            decode_channels,
+        )
+        if decoded_track is not None:
+            decodes.append(decoded_track)
+    return decodes
+
+
+def analyze_cutoff_series_from_segments(
+    segment_decodes: list[DecodedTrack],
+    track_meta: TrackMeta,
+    window_sec: float,
+    thresh_rel_db: float,
+    channel_mode: str,
+) -> dict[str, object]:
+    if not segment_decodes:
+        return {
+            "sr": track_meta.sr,
+            "analysis_sr": track_meta.analysis_sr,
+            "dur": track_meta.dur,
+            "channel_mode": channel_mode,
+            "cutoff_hz": None,
+            "cutoffs_hz": [],
+            "windows_requested": 0,
+            "windows_used": 0,
+            "segments_requested": 0,
+            "segments_used": 0,
+        }
+
+    cutoffs: list[float] = []
+    windows_requested = 0
+    windows_used = 0
+    segments_used = 0
+
+    for idx, decoded_track in enumerate(segment_decodes, start=1):
+        result = analyze_cutoff_series_from_decoded(
+            decoded_track,
+            track_meta,
+            window_sec,
+            1,
+            thresh_rel_db,
+            channel_mode=channel_mode,
+        )
+        segment_cutoffs = [float(value) for value in result.get("cutoffs_hz", [])]
+        cutoffs.extend(segment_cutoffs)
+        windows_requested += int(result.get("windows_requested", 0))
+        windows_used += int(result.get("windows_used", 0))
+        if segment_cutoffs:
+            segments_used += 1
+
+        confidence = analysis_confidence(cutoffs, windows_requested, ANALYSIS_STRATEGY_SEGMENT)
+        if confidence == "high" and idx >= min(2, len(segment_decodes)):
+            debug(
+                f"segment early-exit track={os.path.basename(decoded_track.path)} "
+                f"mode={channel_mode} segments={idx}/{len(segment_decodes)}"
+            )
+            break
+
+    return {
+        "sr": track_meta.sr,
+        "analysis_sr": track_meta.analysis_sr,
+        "dur": track_meta.dur,
+        "channel_mode": channel_mode,
+        "cutoff_hz": float(statistics.median(cutoffs)) if cutoffs else None,
+        "cutoffs_hz": cutoffs,
+        "windows_requested": windows_requested,
+        "windows_used": windows_used,
+        "segments_requested": len(segment_decodes),
+        "segments_used": segments_used,
+    }
+
+
 def confidence_rank(confidence: str) -> int:
     if confidence == "high":
         return 3
@@ -666,19 +892,33 @@ def confidence_rank(confidence: str) -> int:
     return 1
 
 
-def analysis_confidence(cutoffs_hz: list[float], windows_requested: int) -> str:
+def analysis_confidence(
+    cutoffs_hz: list[float],
+    windows_requested: int,
+    analysis_strategy: str = ANALYSIS_STRATEGY_FULL,
+) -> str:
     if not cutoffs_hz:
         return "low"
     windows_used = len(cutoffs_hz)
-    if windows_used < min(3, max(1, windows_requested)):
+    min_windows = min(3, max(1, windows_requested))
+    if analysis_strategy == ANALYSIS_STRATEGY_SEGMENT:
+        min_windows = min(2, max(1, windows_requested))
+    if windows_used < min_windows:
         return "low"
     if windows_used < 3:
-        return "low"
+        if analysis_strategy != ANALYSIS_STRATEGY_SEGMENT:
+            return "low"
     median_cutoff = statistics.median(cutoffs_hz)
     if median_cutoff <= 0:
         return "low"
     spread_hz = max(cutoffs_hz) - min(cutoffs_hz)
     spread_ratio = spread_hz / max(float(median_cutoff), 1.0)
+    if analysis_strategy == ANALYSIS_STRATEGY_SEGMENT:
+        if windows_used >= 4 and spread_ratio <= 0.12:
+            return "high"
+        if windows_used >= 3 and spread_ratio <= 0.25:
+            return "medium"
+        return "low"
     if windows_used >= 8 and spread_ratio <= 0.12:
         return "high"
     if windows_used >= 5 and spread_ratio <= 0.25:
@@ -693,6 +933,7 @@ def select_track_analysis_from_decoded(
     max_windows: int,
     thresh_rel_db: float,
     analysis_mode: str = FAST_ANALYSIS_MODE,
+    analysis_strategy: str = ANALYSIS_STRATEGY_FULL,
 ) -> dict[str, object]:
     analysis_mode = normalize_analysis_mode(analysis_mode)
     requested_windows = effective_max_windows(max_windows, analysis_mode)
@@ -705,10 +946,16 @@ def select_track_analysis_from_decoded(
         thresh_rel_db,
         channel_mode="mono",
     )
-    mono_result["confidence"] = analysis_confidence(mono_result["cutoffs_hz"], int(mono_result["windows_requested"]))
+    mono_result["confidence"] = analysis_confidence(
+        mono_result["cutoffs_hz"],
+        int(mono_result["windows_requested"]),
+        analysis_strategy,
+    )
 
     series_results: list[dict[str, object]] = [mono_result]
     channel_cutoffs: dict[str, float | None] = {"mono": mono_result.get("cutoff_hz")}
+    segments_requested = int(mono_result.get("segments_requested", 0))
+    segments_used = int(mono_result.get("segments_used", 0))
 
     if analysis_mode == EXACT_ANALYSIS_MODE and (track_meta.channels or 0) >= 2:
         mono_low_confidence = mono_result["confidence"] == "low"
@@ -722,7 +969,94 @@ def select_track_analysis_from_decoded(
                     thresh_rel_db,
                     channel_mode=channel_mode,
                 )
-                result["confidence"] = analysis_confidence(result["cutoffs_hz"], int(result["windows_requested"]))
+                result["confidence"] = analysis_confidence(
+                    result["cutoffs_hz"],
+                    int(result["windows_requested"]),
+                    analysis_strategy,
+                )
+                series_results.append(result)
+                channel_cutoffs[channel_mode] = result.get("cutoff_hz")
+                segments_requested = max(segments_requested, int(result.get("segments_requested", 0)))
+                segments_used = max(segments_used, int(result.get("segments_used", 0)))
+        else:
+            channel_cutoffs["left"] = None
+            channel_cutoffs["right"] = None
+
+    valid_results = [result for result in series_results if result.get("cutoff_hz") is not None]
+    if valid_results:
+        selected = max(
+            valid_results,
+            key=lambda result: (
+                float(result["cutoff_hz"]),
+                confidence_rank(str(result["confidence"])),
+                int(result["windows_used"]),
+            ),
+        )
+    else:
+        selected = mono_result
+
+    selected_cutoffs = [float(value) for value in selected.get("cutoffs_hz", [])]
+    return {
+        "sr": track_meta.sr,
+        "analysis_sr": track_meta.analysis_sr,
+        "dur": track_meta.dur,
+        "cutoff_hz": selected.get("cutoff_hz"),
+        "analysis_mode": analysis_mode,
+        "analysis_strategy": analysis_strategy,
+        "analysis_confidence": selected.get("confidence", "low"),
+        "selected_channel": selected.get("channel_mode", "mono"),
+        "windows_requested": selected.get("windows_requested", 0),
+        "windows_used": selected.get("windows_used", 0),
+        "window_cutoffs_hz": selected_cutoffs,
+        "channel_cutoffs_hz": channel_cutoffs,
+        "segments_requested": segments_requested,
+        "segments_used": segments_used,
+        "decode_operations": 1 if decoded_track is not None else 0,
+    }
+
+
+def select_track_analysis_from_segments(
+    segment_decodes: list[DecodedTrack],
+    track_meta: TrackMeta,
+    window_sec: float,
+    max_windows: int,
+    thresh_rel_db: float,
+    analysis_mode: str = FAST_ANALYSIS_MODE,
+) -> dict[str, object]:
+    analysis_mode = normalize_analysis_mode(analysis_mode)
+
+    mono_result = analyze_cutoff_series_from_segments(
+        segment_decodes,
+        track_meta,
+        window_sec,
+        thresh_rel_db,
+        channel_mode="mono",
+    )
+    mono_result["confidence"] = analysis_confidence(
+        mono_result["cutoffs_hz"],
+        int(mono_result["windows_requested"]),
+        ANALYSIS_STRATEGY_SEGMENT,
+    )
+
+    series_results: list[dict[str, object]] = [mono_result]
+    channel_cutoffs: dict[str, float | None] = {"mono": mono_result.get("cutoff_hz")}
+
+    if analysis_mode == EXACT_ANALYSIS_MODE and (track_meta.channels or 0) >= 2:
+        mono_low_confidence = mono_result["confidence"] == "low"
+        if mono_low_confidence:
+            for channel_mode in ("left", "right"):
+                result = analyze_cutoff_series_from_segments(
+                    segment_decodes,
+                    track_meta,
+                    window_sec,
+                    thresh_rel_db,
+                    channel_mode=channel_mode,
+                )
+                result["confidence"] = analysis_confidence(
+                    result["cutoffs_hz"],
+                    int(result["windows_requested"]),
+                    ANALYSIS_STRATEGY_SEGMENT,
+                )
                 series_results.append(result)
                 channel_cutoffs[channel_mode] = result.get("cutoff_hz")
         else:
@@ -749,37 +1083,235 @@ def select_track_analysis_from_decoded(
         "dur": track_meta.dur,
         "cutoff_hz": selected.get("cutoff_hz"),
         "analysis_mode": analysis_mode,
+        "analysis_strategy": ANALYSIS_STRATEGY_SEGMENT,
         "analysis_confidence": selected.get("confidence", "low"),
         "selected_channel": selected.get("channel_mode", "mono"),
         "windows_requested": selected.get("windows_requested", 0),
         "windows_used": selected.get("windows_used", 0),
         "window_cutoffs_hz": selected_cutoffs,
         "channel_cutoffs_hz": channel_cutoffs,
+        "segments_requested": selected.get("segments_requested", len(segment_decodes)),
+        "segments_used": selected.get("segments_used", 0),
+        "decode_operations": len(segment_decodes),
     }
 
 
-def select_track_analysis(
+def cleanup_decoded_tracks(decoded_tracks: list[DecodedTrack]) -> None:
+    for decoded_track in decoded_tracks:
+        cleanup_decoded_track(decoded_track)
+
+
+def decode_channels_for_mode(requested_analysis_mode: str, channels: int | None) -> int:
+    if normalize_analysis_mode(requested_analysis_mode) in {AUTO_ANALYSIS_MODE, EXACT_ANALYSIS_MODE} and (channels or 0) >= 2:
+        return 2
+    return 1
+
+
+def should_segment_fallback_to_full(track_analysis: dict[str, object]) -> bool:
+    return str(track_analysis.get("analysis_confidence", "low")) == "low"
+
+
+def analyze_track(
     path: str,
     window_sec: float,
     max_windows: int,
     thresh_rel_db: float,
-    track_meta: TrackMeta | None = None,
-    analysis_mode: str = FAST_ANALYSIS_MODE,
-) -> dict[str, object]:
-    track_meta = track_meta or audio_meta(path)
-    decode_channels = 1
-    if normalize_analysis_mode(analysis_mode) in {AUTO_ANALYSIS_MODE, EXACT_ANALYSIS_MODE} and (track_meta.channels or 0) >= 2:
-        decode_channels = 2
+    requested_analysis_mode: str,
+) -> tuple[TrackMeta, dict[str, object], str, bool]:
+    track_meta = audio_meta(path)
+    strategy, strategy_reason = choose_analysis_strategy(path, track_meta)
+    decode_channels = decode_channels_for_mode(requested_analysis_mode, track_meta.channels)
+
+    debug(
+        f"strategy track={os.path.basename(path)} strategy={strategy} reason={strategy_reason} "
+        f"codec={track_meta.codec or 'unknown'} size={track_meta.size_bytes} dur={track_meta.dur}"
+    )
+
+    effective_analysis_mode = normalize_analysis_mode(requested_analysis_mode)
+    auto_exact_fallback = False
+    strategy_fallback_to_full = False
+    track_analysis: dict[str, object]
+
+    if strategy == ANALYSIS_STRATEGY_SEGMENT:
+        fast_decodes: list[DecodedTrack] = []
+        exact_decodes: list[DecodedTrack] = []
+        segment_probe_analysis: dict[str, object] | None = None
+        try:
+            normalized_mode = normalize_analysis_mode(requested_analysis_mode)
+            if normalized_mode == AUTO_ANALYSIS_MODE:
+                fast_decodes = prepare_segment_decodes(
+                    path,
+                    track_meta,
+                    window_sec,
+                    decode_channels,
+                    FAST_ANALYSIS_MODE,
+                )
+                track_analysis = select_track_analysis_from_segments(
+                    fast_decodes,
+                    track_meta,
+                    window_sec,
+                    max_windows,
+                    thresh_rel_db,
+                    analysis_mode=FAST_ANALYSIS_MODE,
+                )
+                effective_analysis_mode = FAST_ANALYSIS_MODE
+            elif normalized_mode == EXACT_ANALYSIS_MODE:
+                track_analysis = {"analysis_confidence": "low"}
+            else:
+                fast_decodes = prepare_segment_decodes(
+                    path,
+                    track_meta,
+                    window_sec,
+                    decode_channels,
+                    FAST_ANALYSIS_MODE,
+                )
+                track_analysis = select_track_analysis_from_segments(
+                    fast_decodes,
+                    track_meta,
+                    window_sec,
+                    max_windows,
+                    thresh_rel_db,
+                    analysis_mode=FAST_ANALYSIS_MODE,
+                )
+                effective_analysis_mode = FAST_ANALYSIS_MODE
+
+            if normalized_mode == AUTO_ANALYSIS_MODE and track_analysis["analysis_confidence"] == "low":
+                auto_exact_fallback = True
+                effective_analysis_mode = EXACT_ANALYSIS_MODE
+                exact_decodes = prepare_segment_decodes(
+                    path,
+                    track_meta,
+                    window_sec,
+                    decode_channels,
+                    EXACT_ANALYSIS_MODE,
+                )
+                track_analysis = select_track_analysis_from_segments(
+                    exact_decodes,
+                    track_meta,
+                    window_sec,
+                    max_windows,
+                    thresh_rel_db,
+                    analysis_mode=EXACT_ANALYSIS_MODE,
+                )
+            elif normalized_mode == EXACT_ANALYSIS_MODE:
+                effective_analysis_mode = EXACT_ANALYSIS_MODE
+                exact_decodes = prepare_segment_decodes(
+                    path,
+                    track_meta,
+                    window_sec,
+                    decode_channels,
+                    EXACT_ANALYSIS_MODE,
+                )
+                track_analysis = select_track_analysis_from_segments(
+                    exact_decodes,
+                    track_meta,
+                    window_sec,
+                    max_windows,
+                    thresh_rel_db,
+                    analysis_mode=EXACT_ANALYSIS_MODE,
+                )
+
+            segment_probe_analysis = dict(track_analysis)
+            if effective_analysis_mode == EXACT_ANALYSIS_MODE and should_segment_fallback_to_full(track_analysis):
+                full_decoded = decode_track_pcm(path, track_meta, window_sec, decode_channels)
+                try:
+                    full_analysis = select_track_analysis_from_decoded(
+                        full_decoded,
+                        track_meta,
+                        window_sec,
+                        max_windows,
+                        thresh_rel_db,
+                        analysis_mode=EXACT_ANALYSIS_MODE,
+                        analysis_strategy=ANALYSIS_STRATEGY_FULL,
+                    )
+                finally:
+                    cleanup_decoded_track(full_decoded)
+                full_analysis["decode_operations"] = int(full_analysis.get("decode_operations", 0)) + len(exact_decodes or fast_decodes)
+                full_analysis["segments_requested"] = int(segment_probe_analysis.get("segments_requested", 0))
+                full_analysis["segments_used"] = int(segment_probe_analysis.get("segments_used", 0))
+                full_analysis["strategy_fallback_to_full"] = True
+                full_analysis["analysis_strategy_reason"] = strategy_reason
+                full_analysis["initial_analysis_strategy"] = strategy
+                full_analysis["segment_probe_analysis_mode"] = str(segment_probe_analysis.get("analysis_mode", effective_analysis_mode))
+                full_analysis["segment_probe_analysis_confidence"] = str(
+                    segment_probe_analysis.get("analysis_confidence", "low")
+                )
+                full_analysis["segment_probe_selected_channel"] = str(
+                    segment_probe_analysis.get("selected_channel", "mono")
+                )
+                full_analysis["segment_probe_cutoff_hz"] = segment_probe_analysis.get("cutoff_hz")
+                full_analysis["segment_probe_windows_requested"] = int(
+                    segment_probe_analysis.get("windows_requested", 0)
+                )
+                full_analysis["segment_probe_windows_used"] = int(segment_probe_analysis.get("windows_used", 0))
+                full_analysis["segment_probe_window_cutoffs_hz"] = list(
+                    segment_probe_analysis.get("window_cutoffs_hz", [])
+                )
+                full_analysis["segment_probe_channel_cutoffs_hz"] = dict(
+                    segment_probe_analysis.get("channel_cutoffs_hz", {})
+                )
+                full_analysis["segment_probe_segments_requested"] = int(
+                    segment_probe_analysis.get("segments_requested", 0)
+                )
+                full_analysis["segment_probe_segments_used"] = int(
+                    segment_probe_analysis.get("segments_used", 0)
+                )
+                full_analysis["segment_probe_decode_operations"] = len(exact_decodes or fast_decodes)
+                track_analysis = full_analysis
+                strategy_fallback_to_full = True
+                debug(f"strategy-fallback track={os.path.basename(path)} from=segment to=full")
+            else:
+                track_analysis["strategy_fallback_to_full"] = False
+                track_analysis["analysis_strategy_reason"] = strategy_reason
+                track_analysis["initial_analysis_strategy"] = strategy
+
+            return track_meta, track_analysis, effective_analysis_mode, auto_exact_fallback
+        finally:
+            cleanup_decoded_tracks(exact_decodes)
+            cleanup_decoded_tracks(fast_decodes)
+
     decoded_track = decode_track_pcm(path, track_meta, window_sec, decode_channels)
     try:
-        return select_track_analysis_from_decoded(
-            decoded_track,
-            track_meta,
-            window_sec,
-            max_windows,
-            thresh_rel_db,
-            analysis_mode=analysis_mode,
-        )
+        if normalize_analysis_mode(requested_analysis_mode) == AUTO_ANALYSIS_MODE:
+            track_analysis = select_track_analysis_from_decoded(
+                decoded_track,
+                track_meta,
+                window_sec,
+                max_windows,
+                thresh_rel_db,
+                analysis_mode=FAST_ANALYSIS_MODE,
+                analysis_strategy=ANALYSIS_STRATEGY_FAST,
+            )
+            if track_analysis["analysis_confidence"] == "low":
+                auto_exact_fallback = True
+                effective_analysis_mode = EXACT_ANALYSIS_MODE
+                track_analysis = select_track_analysis_from_decoded(
+                    decoded_track,
+                    track_meta,
+                    window_sec,
+                    max_windows,
+                    thresh_rel_db,
+                    analysis_mode=EXACT_ANALYSIS_MODE,
+                    analysis_strategy=ANALYSIS_STRATEGY_FAST,
+                )
+            else:
+                effective_analysis_mode = FAST_ANALYSIS_MODE
+        else:
+            effective_analysis_mode = normalize_analysis_mode(requested_analysis_mode)
+            track_analysis = select_track_analysis_from_decoded(
+                decoded_track,
+                track_meta,
+                window_sec,
+                max_windows,
+                thresh_rel_db,
+                analysis_mode=effective_analysis_mode,
+                analysis_strategy=ANALYSIS_STRATEGY_FAST,
+            )
+
+        track_analysis["strategy_fallback_to_full"] = False
+        track_analysis["analysis_strategy_reason"] = strategy_reason
+        track_analysis["initial_analysis_strategy"] = strategy
+        return track_meta, track_analysis, effective_analysis_mode, auto_exact_fallback
     finally:
         cleanup_decoded_track(decoded_track)
 
@@ -897,145 +1429,142 @@ def cmd_analyze(argv: list[str]) -> int:
         return 2
 
     requested_analysis_mode = analysis_mode
-    effective_analysis_mode = analysis_mode
-
-    prepared_tracks: list[tuple[str, TrackMeta, DecodedTrack | None]] = []
-    try:
-        for path in files:
-            track_meta = audio_meta(path)
-            decode_channels = 1
-            if requested_analysis_mode in {AUTO_ANALYSIS_MODE, EXACT_ANALYSIS_MODE} and (track_meta.channels or 0) >= 2:
-                decode_channels = 2
-            decoded_track = decode_track_pcm(path, track_meta, window_sec, decode_channels)
-            prepared_tracks.append((path, track_meta, decoded_track))
-
-        track_analyses: list[tuple[str, TrackMeta, dict[str, object]]] = []
-        if requested_analysis_mode == AUTO_ANALYSIS_MODE:
-            fast_track_analyses: list[tuple[str, TrackMeta, dict[str, object]]] = []
-            for path, track_meta, decoded_track in prepared_tracks:
-                track_analysis = select_track_analysis_from_decoded(
-                    decoded_track,
-                    track_meta,
-                    window_sec,
-                    max_windows,
-                    thresh_rel_db,
-                    analysis_mode=FAST_ANALYSIS_MODE,
-                )
-                fast_track_analyses.append((path, track_meta, track_analysis))
-
-            if any(track_analysis["analysis_confidence"] == "low" for _path, _meta, track_analysis in fast_track_analyses):
-                effective_analysis_mode = EXACT_ANALYSIS_MODE
-                for path, track_meta, decoded_track in prepared_tracks:
-                    track_analysis = select_track_analysis_from_decoded(
-                        decoded_track,
-                        track_meta,
-                        window_sec,
-                        max_windows,
-                        thresh_rel_db,
-                        analysis_mode=EXACT_ANALYSIS_MODE,
-                    )
-                    track_analyses.append((path, track_meta, track_analysis))
-            else:
-                effective_analysis_mode = FAST_ANALYSIS_MODE
-                track_analyses = fast_track_analyses
-        else:
-            effective_analysis_mode = requested_analysis_mode
-            for path, track_meta, decoded_track in prepared_tracks:
-                track_analysis = select_track_analysis_from_decoded(
-                    decoded_track,
-                    track_meta,
-                    window_sec,
-                    max_windows,
-                    thresh_rel_db,
-                    analysis_mode=effective_analysis_mode,
-                )
-                track_analyses.append((path, track_meta, track_analysis))
-
-        tracks = []
-        auto_exact_fallback = requested_analysis_mode == AUTO_ANALYSIS_MODE and effective_analysis_mode == EXACT_ANALYSIS_MODE
-        for path, track_meta, track_analysis in track_analyses:
-            sr_in = track_meta.sr
-            bits_in = track_meta.bits
-            cutoff = track_analysis["cutoff_hz"]
-            if sr_in is None:
-                continue
-            decision = resolve_recode_decision(cutoff, sr_in, headroom_hz)
-            tracks.append(
-                {
-                    "file": path,
-                    "sr_in": int(sr_in) if sr_in else None,
-                    "bits_in": int(bits_in) if bits_in else None,
-                    "channels_in": int(track_meta.channels) if track_meta.channels else None,
-                    "requested_analysis_mode": requested_analysis_mode,
-                    "analysis_mode": effective_analysis_mode,
-                    "auto_exact_fallback": auto_exact_fallback,
-                    "analysis_confidence": track_analysis["analysis_confidence"],
-                    "selected_channel": track_analysis["selected_channel"],
-                    "windows_requested": int(track_analysis["windows_requested"]),
-                    "windows_used": int(track_analysis["windows_used"]),
-                    "window_cutoffs_hz": track_analysis["window_cutoffs_hz"],
-                    "channel_cutoffs_hz": track_analysis["channel_cutoffs_hz"],
-                    "cutoff_hz": cutoff,
-                    "effective_cutoff_hz": decision["effective_cutoff_hz"],
-                    "source_family_sr": decision["source_family_sr"],
-                    "standard_family_sr": decision["standard_family_sr"],
-                    "fake_upscale": decision["fake_upscale"],
-                    "tgt_sr": decision["target_sr"],
-                    "decision": decision["decision"],
-                }
-            )
-
-        if not tracks:
-            print(json.dumps({"error": "no_tracks"}))
-            return 0
-
-        album_sr = max(track["tgt_sr"] for track in tracks if track["tgt_sr"] is not None)
-        album_confidence = min(
-            (track["analysis_confidence"] for track in tracks),
-            key=confidence_rank,
+    track_results: list[tuple[str, TrackMeta, dict[str, object], str, bool]] = []
+    for path in files:
+        track_meta, track_analysis, effective_analysis_mode, auto_exact_fallback = analyze_track(
+            path,
+            window_sec,
+            max_windows,
+            thresh_rel_db,
+            requested_analysis_mode,
         )
-        fake_track_families = sorted(
+        track_results.append((path, track_meta, track_analysis, effective_analysis_mode, auto_exact_fallback))
+
+    tracks = []
+    for path, track_meta, track_analysis, effective_analysis_mode, auto_exact_fallback in track_results:
+        sr_in = track_meta.sr
+        bits_in = track_meta.bits
+        cutoff = track_analysis["cutoff_hz"]
+        if sr_in is None:
+            continue
+        decision = resolve_recode_decision(cutoff, sr_in, headroom_hz)
+        tracks.append(
             {
-                int(track["standard_family_sr"])
-                for track in tracks
-                if track.get("fake_upscale") and track.get("standard_family_sr") is not None
+                "file": path,
+                "sr_in": int(sr_in) if sr_in else None,
+                "bits_in": int(bits_in) if bits_in else None,
+                "channels_in": int(track_meta.channels) if track_meta.channels else None,
+                "requested_analysis_mode": requested_analysis_mode,
+                "analysis_mode": effective_analysis_mode,
+                "auto_exact_fallback": auto_exact_fallback,
+                "analysis_strategy": track_analysis.get("analysis_strategy", ANALYSIS_STRATEGY_FAST),
+                "analysis_strategy_reason": track_analysis.get("analysis_strategy_reason", ""),
+                "initial_analysis_strategy": track_analysis.get("initial_analysis_strategy", track_analysis.get("analysis_strategy", ANALYSIS_STRATEGY_FAST)),
+                "strategy_fallback_to_full": bool(track_analysis.get("strategy_fallback_to_full")),
+                "analysis_confidence": track_analysis["analysis_confidence"],
+                "selected_channel": track_analysis["selected_channel"],
+                "windows_requested": int(track_analysis["windows_requested"]),
+                "windows_used": int(track_analysis["windows_used"]),
+                "window_cutoffs_hz": track_analysis["window_cutoffs_hz"],
+                "channel_cutoffs_hz": track_analysis["channel_cutoffs_hz"],
+                "segments_requested": int(track_analysis.get("segments_requested", 0)),
+                "segments_used": int(track_analysis.get("segments_used", 0)),
+                "decode_operations": int(track_analysis.get("decode_operations", 0)),
+                "segment_probe_analysis_mode": track_analysis.get("segment_probe_analysis_mode"),
+                "segment_probe_analysis_confidence": track_analysis.get("segment_probe_analysis_confidence"),
+                "segment_probe_selected_channel": track_analysis.get("segment_probe_selected_channel"),
+                "segment_probe_cutoff_hz": track_analysis.get("segment_probe_cutoff_hz"),
+                "segment_probe_windows_requested": (
+                    int(track_analysis["segment_probe_windows_requested"])
+                    if track_analysis.get("segment_probe_windows_requested") is not None
+                    else None
+                ),
+                "segment_probe_windows_used": (
+                    int(track_analysis["segment_probe_windows_used"])
+                    if track_analysis.get("segment_probe_windows_used") is not None
+                    else None
+                ),
+                "segment_probe_window_cutoffs_hz": track_analysis.get("segment_probe_window_cutoffs_hz"),
+                "segment_probe_channel_cutoffs_hz": track_analysis.get("segment_probe_channel_cutoffs_hz"),
+                "segment_probe_segments_requested": (
+                    int(track_analysis["segment_probe_segments_requested"])
+                    if track_analysis.get("segment_probe_segments_requested") is not None
+                    else None
+                ),
+                "segment_probe_segments_used": (
+                    int(track_analysis["segment_probe_segments_used"])
+                    if track_analysis.get("segment_probe_segments_used") is not None
+                    else None
+                ),
+                "segment_probe_decode_operations": (
+                    int(track_analysis["segment_probe_decode_operations"])
+                    if track_analysis.get("segment_probe_decode_operations") is not None
+                    else None
+                ),
+                "cutoff_hz": cutoff,
+                "effective_cutoff_hz": decision["effective_cutoff_hz"],
+                "source_family_sr": decision["source_family_sr"],
+                "standard_family_sr": decision["standard_family_sr"],
+                "fake_upscale": decision["fake_upscale"],
+                "tgt_sr": decision["target_sr"],
+                "decision": decision["decision"],
             }
         )
-        album_has_fake_upscale_tracks = any(bool(track.get("fake_upscale")) for track in tracks)
-        album_fake_upscale = album_has_fake_upscale_tracks
-        album_family_sr = fake_track_families[0] if len(fake_track_families) == 1 else None
-        album_decision = "keep_source"
-        if any(track.get("decision") == "downgrade_fake_upscale" for track in tracks):
-            album_decision = "downgrade_fake_upscale"
-        elif any(track.get("decision") == "cap_highres_ceiling" for track in tracks):
-            album_decision = "cap_highres_ceiling"
-        bits_list = [track["bits_in"] for track in tracks if track["bits_in"]]
-        album_bits = 24
-        if bits_list:
-            album_bits = min(24, max(bits_list))
-            album_bits = 16 if album_bits < 16 else album_bits
 
-        print(
-            json.dumps(
-                {
-                    "requested_analysis_mode": requested_analysis_mode,
-                    "analysis_mode": effective_analysis_mode,
-                    "auto_exact_fallback": auto_exact_fallback,
-                    "album_confidence": album_confidence,
-                    "album_sr": int(album_sr),
-                    "album_bits": int(album_bits),
-                    "album_fake_upscale": album_fake_upscale,
-                    "album_has_fake_upscale_tracks": album_has_fake_upscale_tracks,
-                    "album_family_sr": int(album_family_sr) if album_family_sr is not None else None,
-                    "album_decision": album_decision,
-                    "tracks": tracks,
-                }
-            )
-        )
+    if not tracks:
+        print(json.dumps({"error": "no_tracks"}))
         return 0
-    finally:
-        for _path, _track_meta, decoded_track in prepared_tracks:
-            cleanup_decoded_track(decoded_track)
+
+    album_sr = max(track["tgt_sr"] for track in tracks if track["tgt_sr"] is not None)
+    album_confidence = min(
+        (track["analysis_confidence"] for track in tracks),
+        key=confidence_rank,
+    )
+    fake_track_families = sorted(
+        {
+            int(track["standard_family_sr"])
+            for track in tracks
+            if track.get("fake_upscale") and track.get("standard_family_sr") is not None
+        }
+    )
+    album_has_fake_upscale_tracks = any(bool(track.get("fake_upscale")) for track in tracks)
+    album_fake_upscale = album_has_fake_upscale_tracks
+    album_family_sr = fake_track_families[0] if len(fake_track_families) == 1 else None
+    album_decision = "keep_source"
+    if any(track.get("decision") == "downgrade_fake_upscale" for track in tracks):
+        album_decision = "downgrade_fake_upscale"
+    elif any(track.get("decision") == "cap_highres_ceiling" for track in tracks):
+        album_decision = "cap_highres_ceiling"
+    bits_list = [track["bits_in"] for track in tracks if track["bits_in"]]
+    album_bits = 24
+    if bits_list:
+        album_bits = min(24, max(bits_list))
+        album_bits = 16 if album_bits < 16 else album_bits
+    album_analysis_mode = EXACT_ANALYSIS_MODE if any(track["analysis_mode"] == EXACT_ANALYSIS_MODE for track in tracks) else FAST_ANALYSIS_MODE
+    album_auto_exact_fallback = any(bool(track["auto_exact_fallback"]) for track in tracks)
+    album_strategy_fallback_to_full = any(bool(track.get("strategy_fallback_to_full")) for track in tracks)
+    album_analysis_strategies = sorted({str(track.get("analysis_strategy", ANALYSIS_STRATEGY_FAST)) for track in tracks})
+
+    print(
+        json.dumps(
+            {
+                "requested_analysis_mode": requested_analysis_mode,
+                "analysis_mode": album_analysis_mode,
+                "auto_exact_fallback": album_auto_exact_fallback,
+                "album_confidence": album_confidence,
+                "album_sr": int(album_sr),
+                "album_bits": int(album_bits),
+                "album_fake_upscale": album_fake_upscale,
+                "album_has_fake_upscale_tracks": album_has_fake_upscale_tracks,
+                "album_family_sr": int(album_family_sr) if album_family_sr is not None else None,
+                "album_decision": album_decision,
+                "album_analysis_strategies": album_analysis_strategies,
+                "album_strategy_fallback_to_full": album_strategy_fallback_to_full,
+                "tracks": tracks,
+            }
+        )
+    )
+    return 0
 
 
 def main(argv: list[str]) -> int:

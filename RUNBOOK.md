@@ -447,11 +447,15 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - trusted-profile validation now normalizes through `profile.sh` before applying the dataset-specific allowlist
      - profile-to-directory labels now come from `profile.sh`
      - ffmpeg FLAC rendering now goes through a shared `encoder.sh` helper instead of duplicating ffmpeg sample-format / bit-depth flags in the entry script
+   - Dataset outputs are album-scoped inside each bucket so multiple trusted source albums can coexist safely:
+     - `real/<profile>/<album_name>/...`
+     - `fake/<variant>/<album_name>/...`
+     - `edge_cases/<bucket>/<album_name>/...`
    - The builder creates:
-     - bit-perfect trusted-source copies in `real/<profile>/`
-     - clean lower-profile references in `real/44100_16/` and `real/48000_24/` when they are true downsample targets
-     - lossy-to-FLAC fake-upscale buckets for MP3, AAC, and Opus variants
-     - empty `edge_cases/` placeholders for manual additions
+     - bit-perfect trusted-source copies in `real/<profile>/<album_name>/`
+     - clean lower-profile references in `real/44100_16/<album_name>/` and `real/48000_24/<album_name>/` when they are true downsample targets
+     - lossy-to-FLAC fake-upscale buckets for MP3, AAC, and Opus variants under `fake/<variant>/<album_name>/`
+     - empty album-scoped `edge_cases/` placeholders for manual additions
    - It skips existing outputs unless `--force` is provided and uses bounded ffmpeg worker parallelism.
    - Validation:
      - `python3 test/test_audlint_dataset_smoke.py` passes

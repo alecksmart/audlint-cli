@@ -41,6 +41,7 @@ TRUSTED_PROFILE=""
 TRUSTED_SR_HZ=0
 TRUSTED_BITS=0
 TRUSTED_LABEL=""
+ALBUM_LABEL=""
 TMP_WORK_DIR=""
 declare -a RESULT_FILES=()
 
@@ -55,6 +56,10 @@ Arguments:
   <dataset_dir>      dataset root to create/update
   <album_dir>        directory containing trusted WAV files
   <trusted_profile>  exact ground-truth profile, e.g. 44100/16, 96000/24
+
+Outputs are grouped by album basename inside each dataset bucket, e.g.:
+  real/96000_24/<album_name>/
+  fake/mp3_192_upscaled/<album_name>/
 
 Options:
   --force            overwrite generated outputs instead of skipping them
@@ -109,14 +114,14 @@ prepare_dataset_dirs() {
 
   mkdir -p "$DATASET_DIR/real" "$DATASET_DIR/fake" "$DATASET_DIR/edge_cases"
   for dir in "${base_real_dirs[@]}"; do
-    mkdir -p "$DATASET_DIR/real/$dir"
+    mkdir -p "$DATASET_DIR/real/$dir/$ALBUM_LABEL"
   done
-  mkdir -p "$DATASET_DIR/real/$TRUSTED_LABEL"
+  mkdir -p "$DATASET_DIR/real/$TRUSTED_LABEL/$ALBUM_LABEL"
   for dir in "${fake_dirs[@]}"; do
-    mkdir -p "$DATASET_DIR/fake/$dir"
+    mkdir -p "$DATASET_DIR/fake/$dir/$ALBUM_LABEL"
   done
   for dir in "${edge_dirs[@]}"; do
-    mkdir -p "$DATASET_DIR/edge_cases/$dir"
+    mkdir -p "$DATASET_DIR/edge_cases/$dir/$ALBUM_LABEL"
   done
 }
 
@@ -161,12 +166,12 @@ is_lower_profile_than_trusted() {
 copy_real_wav() {
   local src="$1"
   local dst=""
-  dst="$DATASET_DIR/real/$TRUSTED_LABEL/$(basename "$src")"
+  dst="$DATASET_DIR/real/$TRUSTED_LABEL/$ALBUM_LABEL/$(basename "$src")"
   if [[ -e "$dst" && "$FORCE" -eq 0 ]]; then
     log_line "[SKIP] real copy exists $(basename "$dst")"
     return 0
   fi
-  log_line "[REAL] copying $(basename "$src") -> real/$TRUSTED_LABEL/"
+  log_line "[REAL] copying $(basename "$src") -> real/$TRUSTED_LABEL/$ALBUM_LABEL/"
   cp -fp "$src" "$dst"
 }
 
@@ -364,6 +369,8 @@ require_bins ffmpeg ffprobe >/dev/null || exit 2
 mkdir -p "$DATASET_DIR"
 DATASET_DIR="$(cd "$DATASET_DIR" && pwd)"
 ALBUM_DIR="$(cd "$ALBUM_DIR" && pwd)"
+ALBUM_LABEL="$(basename "$ALBUM_DIR")"
+[[ -n "$ALBUM_LABEL" ]] || die "failed to derive album label from album_dir: $ALBUM_DIR"
 
 TRUSTED_SR_HZ="${TRUSTED_PROFILE%%/*}"
 TRUSTED_BITS="${TRUSTED_PROFILE#*/}"
@@ -425,12 +432,12 @@ for src in "${WAV_FILES[@]}"; do
     [[ -n "$clean_label" ]] || die "failed to normalize clean profile: $clean_profile"
     clean_sr_hz="${clean_profile%%/*}"
     clean_bits="${clean_profile#*/}"
-    clean_dst="$DATASET_DIR/real/$clean_label/$stem.flac"
+    clean_dst="$DATASET_DIR/real/$clean_label/$ALBUM_LABEL/$stem.flac"
     task_id=$((task_id + 1))
     result_file="$TMP_WORK_DIR/result_$task_id.tsv"
     if schedule_job \
       "$task_id" \
-      "[REAL] clean ${clean_profile} -> real/$clean_label/$(basename "$clean_dst")" \
+      "[REAL] clean ${clean_profile} -> real/$clean_label/$ALBUM_LABEL/$(basename "$clean_dst")" \
       "clean_real" \
       "$src" \
       "$clean_dst" \
@@ -450,12 +457,12 @@ for src in "${WAV_FILES[@]}"; do
 
   for variant in "${FAKE_VARIANTS[@]}"; do
     IFS=: read -r codec bitrate_kbps bucket <<<"$variant"
-    fake_dst="$DATASET_DIR/fake/$bucket/$stem.$bucket.flac"
+    fake_dst="$DATASET_DIR/fake/$bucket/$ALBUM_LABEL/$stem.$bucket.flac"
     task_id=$((task_id + 1))
     result_file="$TMP_WORK_DIR/result_$task_id.tsv"
     if schedule_job \
       "$task_id" \
-      "[FAKE] $codec ${bitrate_kbps}k -> $(basename "$fake_dst")" \
+      "[FAKE] $codec ${bitrate_kbps}k -> $bucket/$ALBUM_LABEL/$(basename "$fake_dst")" \
       "fake" \
       "$src" \
       "$fake_dst" \

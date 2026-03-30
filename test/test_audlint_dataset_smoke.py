@@ -117,26 +117,27 @@ EOF
         first = self._run(str(self.dataset_dir), str(self.album_dir), "96000/24")
         self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)
 
-        self.assertEqual((self.dataset_dir / "real" / "96000_24" / "01 Track.wav").read_text(encoding="utf-8"), "track-one")
-        self.assertEqual((self.dataset_dir / "real" / "96000_24" / "02 Surround.wav").read_text(encoding="utf-8"), "track-two")
+        album_bucket = "album wav"
+        self.assertEqual((self.dataset_dir / "real" / "96000_24" / album_bucket / "01 Track.wav").read_text(encoding="utf-8"), "track-one")
+        self.assertEqual((self.dataset_dir / "real" / "96000_24" / album_bucket / "02 Surround.wav").read_text(encoding="utf-8"), "track-two")
 
         for rel_path in (
-            "fake/mp3_128_upscaled/01 Track.mp3_128_upscaled.flac",
-            "fake/mp3_192_upscaled/01 Track.mp3_192_upscaled.flac",
-            "fake/mp3_320_upscaled/01 Track.mp3_320_upscaled.flac",
-            "fake/aac_128_upscaled/01 Track.aac_128_upscaled.flac",
-            "fake/aac_256_upscaled/01 Track.aac_256_upscaled.flac",
-            "fake/opus_96_upscaled/01 Track.opus_96_upscaled.flac",
-            "fake/opus_160_upscaled/01 Track.opus_160_upscaled.flac",
-            "real/44100_16/01 Track.flac",
-            "real/48000_24/01 Track.flac",
+            "fake/mp3_128_upscaled/album wav/01 Track.mp3_128_upscaled.flac",
+            "fake/mp3_192_upscaled/album wav/01 Track.mp3_192_upscaled.flac",
+            "fake/mp3_320_upscaled/album wav/01 Track.mp3_320_upscaled.flac",
+            "fake/aac_128_upscaled/album wav/01 Track.aac_128_upscaled.flac",
+            "fake/aac_256_upscaled/album wav/01 Track.aac_256_upscaled.flac",
+            "fake/opus_96_upscaled/album wav/01 Track.opus_96_upscaled.flac",
+            "fake/opus_160_upscaled/album wav/01 Track.opus_160_upscaled.flac",
+            "real/44100_16/album wav/01 Track.flac",
+            "real/48000_24/album wav/01 Track.flac",
         ):
             self.assertTrue((self.dataset_dir / rel_path).exists(), msg=rel_path)
 
         for rel_dir in (
-            "edge_cases/lowpass_mastering",
-            "edge_cases/vinyl_rips",
-            "edge_cases/noisy_live",
+            "edge_cases/lowpass_mastering/album wav",
+            "edge_cases/vinyl_rips/album wav",
+            "edge_cases/noisy_live/album wav",
         ):
             self.assertTrue((self.dataset_dir / rel_dir).is_dir(), msg=rel_dir)
 
@@ -151,7 +152,7 @@ EOF
         ffmpeg_line_count = len(ffmpeg_log.splitlines())
         second = self._run(str(self.dataset_dir), str(self.album_dir), "96000/24")
         self.assertEqual(second.returncode, 0, msg=second.stderr + "\n" + second.stdout)
-        self.assertIn("[SKIP] mp3 128k -> 01 Track.mp3_128_upscaled.flac", second.stdout)
+        self.assertIn("[SKIP] mp3 128k -> mp3_128_upscaled/album wav/01 Track.mp3_128_upscaled.flac", second.stdout)
         self.assertEqual(len(self.ffmpeg_log.read_text(encoding="utf-8").splitlines()), ffmpeg_line_count)
 
     def test_rejects_invalid_profile(self) -> None:

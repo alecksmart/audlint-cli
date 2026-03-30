@@ -713,10 +713,15 @@ audio_album_summary() {
   local f
 
   out_ref=()
+  # shellcheck disable=SC2154
   out_ref[source_quality]="?"
+  # shellcheck disable=SC2154
   out_ref[bitrate_label]=""
+  # shellcheck disable=SC2154
   out_ref[codec_name]="unknown"
+  # shellcheck disable=SC2154
   out_ref[has_lossy]="0"
+  # shellcheck disable=SC2154
   out_ref[file_count]="0"
 
   for f in "${files_ref[@]}"; do

@@ -191,22 +191,6 @@ check_path_parent_writable() {
   fi
 }
 
-check_file_readable_if_set() {
-  local label="$1"
-  local raw="$2"
-  [[ -n "$raw" ]] || {
-    report_warn "$label" "unset"
-    return
-  }
-  local expanded
-  expanded="$(env_expand_value "$raw")"
-  if [[ -f "$expanded" && -r "$expanded" ]]; then
-    report_ok "$label" "$expanded"
-  else
-    report_fail "$label" "file missing/unreadable: $expanded"
-  fi
-}
-
 check_python_import() {
   local py_bin="$1"
   local module="$2"

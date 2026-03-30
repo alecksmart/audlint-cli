@@ -136,7 +136,7 @@ fi
 RSYNC_OPTS=(
   -a             # archive mode (preserves most metadata)
   --no-perms     # do not preserve permissions
-  --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r  # normalized readable dirs/files on destination
+  "--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r"  # normalized readable dirs/files on destination
   -O             # omit directory times
   --no-group     # do not preserve group
   -v             # verbose

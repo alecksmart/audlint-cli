@@ -196,12 +196,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$DR14METER_BIN" "$ALBUM_DIR" >"$tmp_out" 2>&1
+dr14_rc=0
+if "$DR14METER_BIN" -n -p "$ALBUM_DIR" >"$tmp_out" 2>&1; then
+  dr14_rc=0
+else
+  dr14_rc=$?
+fi
 
-report_name="$(grep -Eo 'dr14-DR[^[:space:]]+\.txt' "$tmp_out" | tail -n1 || true)"
+if grep -Eiq 'Official DR value:|^[[:space:]]*DR[[:space:]]*=|Total DR:|Album DR:' "$tmp_out"; then
+  report_file="$tmp_out"
+fi
 
-report_file="$(
-  "$PYTHON_BIN" - "$ALBUM_DIR" "$report_name" <<'PY'
+report_name="$(grep -Eo 'dr14[^[:space:]]+\.txt' "$tmp_out" | tail -n1 || true)"
+
+if [[ -z "$report_file" ]]; then
+  report_file="$(
+    "$PYTHON_BIN" - "$ALBUM_DIR" "$report_name" <<'PY'
 import glob, os, sys
 album_dir = sys.argv[1]
 hint_name = sys.argv[2]
@@ -210,13 +220,26 @@ if hint_name:
     if os.path.isfile(hinted):
         print(hinted)
         raise SystemExit(0)
-candidates = glob.glob(os.path.join(album_dir, "dr14-DR*.txt"))
+candidates = glob.glob(os.path.join(album_dir, "dr14*.txt"))
 if not candidates:
     raise SystemExit(1)
 candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
 print(candidates[0])
 PY
-)" || { echo "Unable to locate dr14meter report in: $ALBUM_DIR" >&2; exit 1; }
+  )" || true
+fi
+
+if [[ -z "$report_file" || ! -f "$report_file" ]]; then
+  echo "dr14meter failed for: $ALBUM_DIR" >&2
+  if [[ -s "$tmp_out" ]]; then
+    cat "$tmp_out" >&2
+  elif [[ "$dr14_rc" -ne 0 ]]; then
+    echo "dr14meter exited with status: $dr14_rc" >&2
+  else
+    echo "dr14meter produced no parseable report output" >&2
+  fi
+  exit 1
+fi
 
 # ── Step 3: parse report + grade ───────────────────────────────────────────
 # Scoring preset: env var > standard (normalized in dr_grade.py)

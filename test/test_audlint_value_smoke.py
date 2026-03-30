@@ -60,16 +60,13 @@ EOF
             """\
             #!/usr/bin/env bash
             set -euo pipefail
-            album_dir="${1:-}"
-            report="$album_dir/dr14-DR14.txt"
-            cat > "$report" <<'EOF'
+            cat <<'EOF'
 Official DR value: DR9
 Sampling rate: 96000 Hz
 Average bitrate: 2116 kbs
 Bits per sample: 24 bit
 DR9 -1.00 dB -12.00 dB 01 Track.flac
 EOF
-            printf 'Wrote report: %s\n' "$(basename "$report")"
             """,
         )
     def _run(self, args, extra_env=None) -> subprocess.CompletedProcess:
@@ -116,6 +113,22 @@ EOF
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
+
+    def test_value_surfaces_dr14meter_failure_output(self) -> None:
+        _write_exec(
+            self.bin_dir / "dr14meter",
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            printf '%s\n' "Unexpected error: data type 'int24' not understood" >&2
+            exit 1
+            """,
+        )
+
+        proc = self._run([str(self.album_dir)])
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout)
+        self.assertIn(f"dr14meter failed for: {self.album_dir}", proc.stderr)
+        self.assertIn("data type 'int24' not understood", proc.stderr)
 
 
 if __name__ == "__main__":

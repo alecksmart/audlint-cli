@@ -41,6 +41,57 @@ _encoder_sample_fmt() {
   esac
 }
 
+encoder_render_flac_ffmpeg() {
+  local in="" out="" sr_hz="" bits="" gain_db="" force_channels=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --in)       shift; in="$1" ;;
+    --out)      shift; out="$1" ;;
+    --sr)       shift; sr_hz="$1" ;;
+    --bits)     shift; bits="$1" ;;
+    --gain)     shift; gain_db="$1" ;;
+    --channels) shift; force_channels="$1" ;;
+    *) printf 'encoder_render_flac_ffmpeg: unknown argument: %s\n' "$1" >&2; return 1 ;;
+    esac
+    shift
+  done
+
+  [[ -n "$in" && -n "$out" && -n "$sr_hz" && -n "$bits" ]] || {
+    printf 'encoder_render_flac_ffmpeg: --in, --out, --sr, --bits are required\n' >&2
+    return 1
+  }
+  if [[ -n "$force_channels" ]] && [[ ! "$force_channels" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'encoder_render_flac_ffmpeg: --channels must be a positive integer\n' >&2
+    return 1
+  fi
+
+  local sample_fmt
+  local -a filter_args=()
+  local -a channel_args=()
+  sample_fmt="$(_encoder_sample_fmt "$bits")"
+  if [[ -n "$gain_db" ]] && awk -v g="$gain_db" 'BEGIN{exit !(g+0 != 0)}'; then
+    filter_args=(-af "volume=${gain_db}dB")
+  fi
+  if [[ -n "$force_channels" ]]; then
+    channel_args=(-ac "$force_channels")
+  fi
+
+  ffmpeg -hide_banner -loglevel error -nostdin -y \
+    -i "$in" \
+    "${filter_args[@]}" \
+    -map 0:a:0 \
+    -map_metadata 0 \
+    "${channel_args[@]}" \
+    -c:a flac \
+    -f flac \
+    -ar "$sr_hz" \
+    -sample_fmt "$sample_fmt" \
+    -bits_per_raw_sample "$bits" \
+    -compression_level 8 \
+    "$out" </dev/null || return 1
+}
+
 # _encoder_sr_khz <sr_hz>
 # Converts Hz to a sox-compatible kHz token (e.g. 96000 -> 96k, 44100 -> 44100).
 _encoder_sr_khz() {
@@ -246,25 +297,16 @@ encoder_to_flac() {
 
   else
     # ffmpeg fallback
-    local sample_fmt
-    sample_fmt="$(_encoder_sample_fmt "$bits")"
-    local -a filter_args=()
-    if [[ -n "$gain_db" ]] && awk -v g="$gain_db" 'BEGIN{exit !(g+0 != 0)}'; then
-      filter_args=(-af "volume=${gain_db}dB")
+    local -a ffmpeg_render_args=(
+      --in "$in"
+      --out "$out"
+      --sr "$sr_hz"
+      --bits "$bits"
+    )
+    if [[ -n "$gain_db" ]]; then
+      ffmpeg_render_args+=(--gain "$gain_db")
     fi
-
-    ffmpeg -hide_banner -loglevel error -nostdin -y \
-      -i "$in" \
-      "${filter_args[@]}" \
-      -map 0:a:0 \
-      -map_metadata 0 \
-      -c:a flac \
-      -f flac \
-      -ar "$sr_hz" \
-      -sample_fmt "$sample_fmt" \
-      -bits_per_raw_sample "$bits" \
-      -compression_level 8 \
-      "$out" </dev/null || return 1
+    encoder_render_flac_ffmpeg "${ffmpeg_render_args[@]}" || return 1
   fi
 }
 

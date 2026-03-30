@@ -87,7 +87,7 @@ Python: `dr_grade.py`, `genre_lookup.py`, `profile_norm.py`, `rich_table.py`, `s
 ## Validation Baseline
 
 - `make bash5-check` — passes (`88/88`)
-- `make test` — passes: core `239` (`skipped=1`) + legacy `67`
+- `make test` — passes: core `240` (`skipped=1`) + legacy `67`
 - `python3 -m unittest discover -s test -p 'test_*.py'` — last known pass before this refactor: `216` tests, `skipped=1`
 - `make fmt-check` — passes
 - `make lint` — passes
@@ -443,6 +443,10 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
 
 26. Dataset builder for trusted WAV sources (2026-03-30):
    - Added `bin/audlint-dataset.sh` to build analyzer datasets from trusted WAV albums.
+   - Integrated it with shared audlint sources of truth:
+     - trusted-profile validation now normalizes through `profile.sh` before applying the dataset-specific allowlist
+     - profile-to-directory labels now come from `profile.sh`
+     - ffmpeg FLAC rendering now goes through a shared `encoder.sh` helper instead of duplicating ffmpeg sample-format / bit-depth flags in the entry script
    - The builder creates:
      - bit-perfect trusted-source copies in `real/<profile>/`
      - clean lower-profile references in `real/44100_16/` and `real/48000_24/` when they are true downsample targets
@@ -573,3 +577,16 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
 - Shared logic in `lib/sh/` — avoid duplicating business logic in entry scripts.
 - Portable `mktemp` templates ending with bare `XXXXXX`.
 - Concise inline comments only where logic is non-obvious.
+
+## Full Integration Rules For New Scripts
+
+- New entry scripts must source `bootstrap.sh`, `env.sh`, and `deps.sh` before adding local fallback logic for path resolution, env loading, or dependency checks.
+- New scripts must use existing domain helpers as the primary source of truth:
+  - `profile.sh` for profile parsing, normalization, labeling, and profile help text
+  - `audio.sh` for file discovery, CPU/job sizing, and audio metadata probing
+  - `encoder.sh` for shared encode/render command construction
+  - other `lib/sh/` helpers whenever the problem already matches their scope
+- When a new script needs behavior that overlaps existing encode/probe/profile logic, extend a shared helper instead of duplicating command flags or parsing rules in the entry script.
+- Script-local constants and policy are allowed only for genuinely feature-specific behavior, such as dataset bucket names or workflow-specific queue semantics; keep them isolated and documented.
+- Stricter script-specific validation may be layered on top of shared parsing, but shared parsing must still be the first authority. Example: normalize through `profile.sh`, then apply a local allowlist if the workflow is narrower than the rest of audlint.
+- Every new executable must ship with at least one focused smoke/regression test and must update `RUNBOOK.md` inventory and validation notes when it expands the public tool surface.

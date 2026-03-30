@@ -159,6 +159,11 @@ EOF
         self.assertEqual(proc.returncode, 1, msg=proc.stdout)
         self.assertIn("trusted_profile must match", proc.stderr)
 
+    def test_rejects_non_canonical_profile_form(self) -> None:
+        proc = self._run(str(self.dataset_dir), str(self.album_dir), "44.1/16")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout)
+        self.assertIn("trusted_profile must match", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

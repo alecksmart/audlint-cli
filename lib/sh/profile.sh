@@ -96,6 +96,13 @@ profile_is_canonical() {
   [[ "$raw" =~ ^[1-9][0-9]*/([1-9][0-9]*|32f|64f)$ ]]
 }
 
+profile_dir_label() {
+  local normalized
+  normalized="$(profile_normalize "${1:-}" || true)"
+  [[ -n "$normalized" ]] || return 1
+  printf '%s' "${normalized//\//_}"
+}
+
 profile_print_supported_targets() {
   cat <<'EOF_TARGETS'
 Common target profiles:

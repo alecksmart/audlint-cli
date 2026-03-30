@@ -25,6 +25,10 @@ source "$BOOTSTRAP_DIR/../lib/sh/env.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
@@ -59,6 +63,8 @@ Options:
 Environment:
   AUDLINT_DATASET_JOBS   max concurrent ffmpeg jobs (default: min(cpu,4))
 EOF_HELP
+  printf '\n'
+  profile_print_supported_targets
 }
 
 die() {
@@ -77,18 +83,6 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
-
-profile_to_dir_label() {
-  printf '%s' "${1//\//_}"
-}
-
-bits_to_sample_fmt() {
-  case "${1:-}" in
-  16) printf 's16' ;;
-  24) printf 's32' ;;
-  *) return 1 ;;
-  esac
-}
 
 prepare_dataset_dirs() {
   local -a base_real_dirs=(
@@ -233,26 +227,18 @@ ffmpeg_render_flac() {
   local sr_hz="$3"
   local bits="$4"
   local channels="$5"
-  local sample_fmt
-  local -a mix_args=()
+  local -a render_args=(
+    --in "$src"
+    --out "$dst"
+    --sr "$sr_hz"
+    --bits "$bits"
+  )
 
-  sample_fmt="$(bits_to_sample_fmt "$bits")" || return 1
   if [[ "$channels" =~ ^[0-9]+$ ]] && ((channels > 2)); then
-    mix_args=(-ac 2)
+    render_args+=(--channels 2)
   fi
 
-  ffmpeg -hide_banner -loglevel error -nostdin -y \
-    -i "$src" \
-    -map 0:a:0 \
-    -map_metadata 0 \
-    "${mix_args[@]}" \
-    -c:a flac \
-    -f flac \
-    -ar "$sr_hz" \
-    -sample_fmt "$sample_fmt" \
-    -bits_per_raw_sample "$bits" \
-    -compression_level 8 \
-    "$dst" </dev/null
+  encoder_render_flac_ffmpeg "${render_args[@]}"
 }
 
 generate_job_worker() {
@@ -365,9 +351,11 @@ done
 DATASET_DIR="$1"
 ALBUM_DIR="$2"
 TRUSTED_PROFILE="$3"
+RAW_TRUSTED_PROFILE="$TRUSTED_PROFILE"
 
 [[ -d "$ALBUM_DIR" ]] || die "album_dir does not exist: $ALBUM_DIR"
-if [[ ! "$TRUSTED_PROFILE" =~ ^(44100|48000|88200|96000|176400|192000)/(16|24)$ ]]; then
+TRUSTED_PROFILE="$(profile_normalize "$TRUSTED_PROFILE" || true)"
+if [[ -z "$TRUSTED_PROFILE" || "$TRUSTED_PROFILE" != "$RAW_TRUSTED_PROFILE" || ! "$TRUSTED_PROFILE" =~ ^(44100|48000|88200|96000|176400|192000)/(16|24)$ ]]; then
   die "trusted_profile must match ^(44100|48000|88200|96000|176400|192000)/(16|24)$"
 fi
 
@@ -379,7 +367,8 @@ ALBUM_DIR="$(cd "$ALBUM_DIR" && pwd)"
 
 TRUSTED_SR_HZ="${TRUSTED_PROFILE%%/*}"
 TRUSTED_BITS="${TRUSTED_PROFILE#*/}"
-TRUSTED_LABEL="$(profile_to_dir_label "$TRUSTED_PROFILE")"
+TRUSTED_LABEL="$(profile_dir_label "$TRUSTED_PROFILE" || true)"
+[[ -n "$TRUSTED_LABEL" ]] || die "failed to normalize trusted_profile directory label"
 
 collect_wav_files "$ALBUM_DIR" WAV_FILES
 if ((${#WAV_FILES[@]} == 0)); then
@@ -432,7 +421,8 @@ for src in "${WAV_FILES[@]}"; do
     if ! is_lower_profile_than_trusted "$clean_profile"; then
       continue
     fi
-    clean_label="$(profile_to_dir_label "$clean_profile")"
+    clean_label="$(profile_dir_label "$clean_profile" || true)"
+    [[ -n "$clean_label" ]] || die "failed to normalize clean profile: $clean_profile"
     clean_sr_hz="${clean_profile%%/*}"
     clean_bits="${clean_profile#*/}"
     clean_dst="$DATASET_DIR/real/$clean_label/$stem.flac"

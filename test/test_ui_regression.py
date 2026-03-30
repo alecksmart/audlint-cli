@@ -297,6 +297,13 @@ class UiRegressionTests(unittest.TestCase):
             re.compile(r"codec filter: all \| profile filter: all \| sort: ASC \| search: grand funk"),
         )
 
+    def test_help_exits_without_dev_tty_noise(self) -> None:
+        proc = self._run(["--help"])
+        all_out = f"{proc.stdout}\n{proc.stderr}"
+        self.assertEqual(proc.returncode, 0, msg=all_out)
+        self.assertIn("Usage:", proc.stdout)
+        self.assertEqual(proc.stderr.strip(), "", msg=all_out)
+
     def test_shared_ui_helpers_render_plain_buttons_and_choice_mapping(self) -> None:
         proc = self._run_shell(
             textwrap.dedent(

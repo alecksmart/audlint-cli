@@ -127,21 +127,79 @@ bootstrap_resolve_paths() {
   : "${SCRIPT_PATH}${SCRIPT_DIR}${REPO_ROOT}"
 }
 
-tty_ensure_line_mode() {
+tty_open_input_fd() {
+  local out_var="${1:-}"
+  local opened_fd=""
+
+  [[ -n "$out_var" ]] || return 2
+
   if [[ -t 0 ]]; then
-    stty sane <&0 2>/dev/null || true
-    stty echo icanon icrnl <&0 2>/dev/null || true
-  elif [[ -r /dev/tty ]]; then
-    stty sane </dev/tty 2>/dev/null || true
-    stty echo icanon icrnl </dev/tty 2>/dev/null || true
+    printf -v "$out_var" '%s' "0"
+    return 0
   fi
+
+  if { exec {opened_fd}</dev/tty; } 2>/dev/null; then
+    printf -v "$out_var" '%s' "$opened_fd"
+    return 0
+  fi
+
+  printf -v "$out_var" '%s' ""
+  return 1
+}
+
+tty_close_input_fd() {
+  local tty_fd="${1:-}"
+
+  [[ -n "$tty_fd" ]] || return 0
+  [[ "$tty_fd" == "0" ]] && return 0
+  exec {tty_fd}<&- 2>/dev/null || true
+}
+
+tty_open_output_fd() {
+  local out_var="${1:-}"
+  local opened_fd=""
+
+  [[ -n "$out_var" ]] || return 2
+
+  if [[ -t 1 ]]; then
+    printf -v "$out_var" '%s' "1"
+    return 0
+  fi
+
+  if { exec {opened_fd}>/dev/tty; } 2>/dev/null; then
+    printf -v "$out_var" '%s' "$opened_fd"
+    return 0
+  fi
+
+  printf -v "$out_var" '%s' ""
+  return 1
+}
+
+tty_close_output_fd() {
+  local tty_fd="${1:-}"
+
+  [[ -n "$tty_fd" ]] || return 0
+  [[ "$tty_fd" == "1" ]] && return 0
+  exec {tty_fd}>&- 2>/dev/null || true
+}
+
+tty_ensure_line_mode() {
+  local tty_fd=""
+  tty_open_input_fd tty_fd || return 0
+  stty sane 0<&"$tty_fd" 2>/dev/null || true
+  stty echo icanon icrnl 0<&"$tty_fd" 2>/dev/null || true
+  tty_close_input_fd "$tty_fd"
 }
 
 tty_print_text() {
   local text="${1-}"
-  if ! { printf '%s' "$text" >/dev/tty; } 2>/dev/null; then
+  local tty_fd=""
+  if ! tty_open_output_fd tty_fd; then
     printf '%s' "$text"
+    return 0
   fi
+  printf '%s' "$text" 1>&"$tty_fd" 2>/dev/null || true
+  tty_close_output_fd "$tty_fd"
 }
 
 tty_print_line() {
@@ -151,39 +209,25 @@ tty_print_line() {
 
 tty_read_line() {
   local out_var="${1:-}"
-  local saved_stdin_fd=""
   local _tty_line=""
   local rc=1
+  local tty_fd=""
 
   [[ -n "$out_var" ]] || return 2
 
-  if [[ ! -t 0 ]]; then
-    [[ -r /dev/tty ]] || {
-      printf -v "$out_var" '%s' "$_tty_line"
-      return 1
-    }
-    exec {saved_stdin_fd}<&0 || {
-      printf -v "$out_var" '%s' "$_tty_line"
-      return 1
-    }
-    if ! exec </dev/tty; then
-      exec 0<&$saved_stdin_fd
-      exec {saved_stdin_fd}<&-
-      printf -v "$out_var" '%s' "$_tty_line"
-      return 1
-    fi
+  if ! tty_open_input_fd tty_fd; then
+    printf -v "$out_var" '%s' "$_tty_line"
+    return 1
   fi
 
-  tty_ensure_line_mode
-  if IFS= read -r _tty_line 2>/dev/null; then
+  stty sane 0<&"$tty_fd" 2>/dev/null || true
+  stty echo icanon icrnl 0<&"$tty_fd" 2>/dev/null || true
+  if IFS= read -r -u "$tty_fd" _tty_line 2>/dev/null; then
     rc=0
   fi
-  tty_ensure_line_mode
-
-  if [[ -n "$saved_stdin_fd" ]]; then
-    exec 0<&$saved_stdin_fd
-    exec {saved_stdin_fd}<&-
-  fi
+  stty sane 0<&"$tty_fd" 2>/dev/null || true
+  stty echo icanon icrnl 0<&"$tty_fd" 2>/dev/null || true
+  tty_close_input_fd "$tty_fd"
 
   printf -v "$out_var" '%s' "$_tty_line"
   return "$rc"
@@ -194,56 +238,46 @@ tty_read_key() {
   local silent="${2:-0}"
   local _tty_key=""
   local rc=1
-  local saved_stdin_fd=""
   local tty_state=""
+  local tty_fd=""
 
   [[ -n "$out_var" ]] || return 2
 
-  if [[ ! -t 0 ]]; then
-    [[ -r /dev/tty ]] || {
-      printf -v "$out_var" '%s' "$_tty_key"
-      return 1
-    }
-    exec {saved_stdin_fd}<&0 || {
-      printf -v "$out_var" '%s' "$_tty_key"
-      return 1
-    }
-    if ! exec </dev/tty; then
-      exec 0<&$saved_stdin_fd
-      exec {saved_stdin_fd}<&-
-      printf -v "$out_var" '%s' "$_tty_key"
-      return 1
-    fi
+  if ! tty_open_input_fd tty_fd; then
+    printf -v "$out_var" '%s' "$_tty_key"
+    return 1
   fi
 
-  tty_state="$(stty -g <&0 2>/dev/null || true)"
+  tty_state="$(stty -g 0<&"$tty_fd" 2>/dev/null || true)"
   if [[ -n "$tty_state" ]]; then
     if [[ "$silent" == "1" ]]; then
-      stty -echo -icanon min 1 time 0 <&0 2>/dev/null || true
+      stty -echo -icanon min 1 time 0 0<&"$tty_fd" 2>/dev/null || true
     else
-      stty echo -icanon min 1 time 0 <&0 2>/dev/null || true
+      stty echo -icanon min 1 time 0 0<&"$tty_fd" 2>/dev/null || true
     fi
-    if IFS= read -r -n 1 _tty_key 2>/dev/null; then
+    if IFS= read -r -n 1 -u "$tty_fd" _tty_key 2>/dev/null; then
       rc=0
     fi
-    stty "$tty_state" <&0 2>/dev/null || true
+    stty "$tty_state" 0<&"$tty_fd" 2>/dev/null || true
   else
-    tty_ensure_line_mode
+    stty sane 0<&"$tty_fd" 2>/dev/null || true
+    stty echo icanon icrnl 0<&"$tty_fd" 2>/dev/null || true
     if [[ "$silent" == "1" ]]; then
-      if IFS= read -r -n 1 -s _tty_key 2>/dev/null; then
+      if IFS= read -r -n 1 -s -u "$tty_fd" _tty_key 2>/dev/null; then
         rc=0
       fi
     else
-      if IFS= read -r -n 1 _tty_key 2>/dev/null; then
+      if IFS= read -r -n 1 -u "$tty_fd" _tty_key 2>/dev/null; then
         rc=0
       fi
     fi
-    tty_ensure_line_mode
+    stty sane 0<&"$tty_fd" 2>/dev/null || true
+    stty echo icanon icrnl 0<&"$tty_fd" 2>/dev/null || true
   fi
 
   if ((rc != 0)) && [[ -z "$_tty_key" ]]; then
     local line_fallback=""
-    if IFS= read -r line_fallback 2>/dev/null; then
+    if IFS= read -r -u "$tty_fd" line_fallback 2>/dev/null; then
       _tty_key="${line_fallback:0:1}"
       [[ -n "$_tty_key" ]] && rc=0
     fi
@@ -252,11 +286,7 @@ tty_read_key() {
     _tty_key=$'\n'
   fi
 
-  if [[ -n "$saved_stdin_fd" ]]; then
-    exec 0<&$saved_stdin_fd
-    exec {saved_stdin_fd}<&-
-  fi
-
+  tty_close_input_fd "$tty_fd"
   printf -v "$out_var" '%s' "$_tty_key"
   return "$rc"
 }

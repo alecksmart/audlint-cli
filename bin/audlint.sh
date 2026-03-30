@@ -484,21 +484,17 @@ term_lines_value() {
 }
 
 screen_clear_safe() {
-  if [[ -w /dev/tty ]]; then
-    printf '\033[H\033[2J\033[3J' >/dev/tty 2>/dev/null || true
-    return 0
-  fi
-  [[ -t 1 ]] || return 0
-  printf '\033[H\033[2J\033[3J'
+  local tty_fd=""
+  tty_open_output_fd tty_fd || return 0
+  printf '\033[H\033[2J\033[3J' 1>&"$tty_fd" 2>/dev/null || true
+  tty_close_output_fd "$tty_fd"
 }
 
 screen_reset_terminal_safe() {
-  if [[ -w /dev/tty ]]; then
-    printf '\r\033[0m\033[?25h\033[;r' >/dev/tty 2>/dev/null || true
-    return 0
-  fi
-  [[ -t 1 ]] || return 0
-  printf '\r\033[0m\033[?25h\033[;r'
+  local tty_fd=""
+  tty_open_output_fd tty_fd || return 0
+  printf '\r\033[0m\033[?25h\033[;r' 1>&"$tty_fd" 2>/dev/null || true
+  tty_close_output_fd "$tty_fd"
 }
 
 audlint_terminal_exit_cleanup() {

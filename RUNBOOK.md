@@ -69,6 +69,7 @@ Makefile       single project Makefile
 
 - `audlint.sh` — main entrypoint / dispatcher
 - `audlint-task.sh`, `audlint-value.sh`, `audlint-analyze.sh`, `audlint-spectre.sh`
+- `audlint-analyze-corpus.sh`
 - `audlint-maintain.sh`, `audlint-doctor.sh`, `audlint-codec-probe.sh`
 - `qty_compare.sh`, `spectre.sh`
 - `sync_music.sh`
@@ -85,7 +86,7 @@ Python: `dr_grade.py`, `genre_lookup.py`, `profile_norm.py`, `rich_table.py`, `s
 ## Validation Baseline
 
 - `make bash5-check` — passes (`84/84`)
-- `make test` — passes: core `235` (`skipped=1`) + legacy `67`
+- `make test` — passes: core `237` (`skipped=1`) + legacy `67`
 - `python3 -m unittest discover -s test -p 'test_*.py'` — last known pass before this refactor: `216` tests, `skipped=1`
 - `make fmt-check` — passes
 - `make lint` — passes
@@ -251,10 +252,19 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `make lint` passes
      - `make bash5-check` passes
      - `make test` passes
-     - `make bash5-check` passes (`82/82`)
-     - `make test` passes: core `133` (`skipped=1`) + legacy `108`
 
-12. Boost auto-gain safety tuning (2026-03-11):
+13. Analyzer corpus runner for trusted-vs-weak labels (2026-03-30):
+   - Added `bin/audlint-analyze-corpus.sh` plus `lib/py/audlint_analyze_corpus.py`.
+   - The corpus manifest accepts `trusted` and `weak` entries so analyzer validation can proceed without pretending old audlint-derived library labels are ground truth.
+   - Trusted mismatches fail the run; weak mismatches are reported as warnings so they can still guide tuning without blocking.
+   - This is the intended bridge until a larger externally sourced trusted corpus is available.
+   - Validation:
+     - `python3 test/test_audlint_analyze_corpus_smoke.py` passes
+     - `make lint` passes
+     - `make bash5-check` passes
+     - `make test` passes
+
+14. Boost auto-gain safety tuning (2026-03-11):
    - Centralized auto-boost policy in `lib/sh/audio.sh` so `any2flac.sh`, `boost_album.sh`, `cue2flac.sh`, and `dff2flac.sh` all use the same target ceiling, minimum-apply threshold, signed gain formatting, and absolute-threshold comparison.
    - Lowered the finished-file auto-boost ceiling to `-1.5 dBTP` to leave safer headroom after resampling instead of pushing recodes close to full scale.
    - Fixed hot-source handling so auto-boost may apply attenuation as well as positive gain; previously negative gains were skipped because only positive thresholds enabled the path.
@@ -268,7 +278,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `e128c20` `fix(boost): lower auto-gain ceiling for recodes`
      - `b33793c` `fix(boost): apply signed auto-gain for hot sources`
 
-13. Encoder output readability pass (2026-03-11):
+15. Encoder output readability pass (2026-03-11):
    - Added shared output-formatting helpers in `lib/sh/ui.sh` for highlighted values, signed gains, and differentiated input/output paths.
    - `any2flac.sh` now uses the shared UI layer and colorizes its target profile, boost summary, per-file source -> target lines, and completion summary.
    - `cue2flac.sh`, `dff2flac.sh`, and `boost_album.sh` now highlight key calculated values and make encoder input/output paths easier to scan in long runs.
@@ -279,7 +289,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `make bash5-check` passes (`84/84`)
      - `make test` passes (`195` tests, `skipped=1`)
 
-14. Task-maintenance visibility and rescan correctness (2026-03-12):
+16. Task-maintenance visibility and rescan correctness (2026-03-12):
    - Colorized `audlint-task` progress values so codec/profile fields stand out in long maintenance runs.
    - Preserved color through `audlint-maintain.sh` log piping by forcing color on the task side and falling back to raw ANSI escapes when `tput` is unavailable.
    - Fixed a discovery churn bug where freshly scanned albums could be requeued immediately because scan-side writes bumped album directory mtimes after `last_checked_at` was stamped.
@@ -292,7 +302,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `make bash5-check` passes (`84/84`)
      - `python3 test/legacy/test_legacy_audlint_task_db.py` passes (`43` tests)
 
-15. Support greeter toggle and install default (2026-03-12):
+17. Support greeter toggle and install default (2026-03-12):
    - Added the colored `>>> Slava Ukraini!` support greeter after grade stats in `audlint.sh`.
    - Added `AUDL_HIDE_SUPPORT_GREETER` handling so the greeter can be hidden without code changes.
    - `install.sh` now writes `AUDL_HIDE_SUPPORT_GREETER=1` by default for new `.env` files; this workstation may override it locally.
@@ -302,7 +312,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
    - Validation:
      - `make bash5-check` passes
 
-16. Config and installer normalization pass (2026-03-13 to 2026-03-15):
+18. Config and installer normalization pass (2026-03-13 to 2026-03-15):
    - Standardized the support-greeter flag spelling to `AUDL_HIDE_SUPPORT_GREETER` everywhere in tracked code.
    - Added `AUDL_BIN_PATH` as the canonical installed-bin location, defaulting to `$HOME/.local/bin`, and threaded it through `install.sh`, `Makefile`, docs, and task examples.
    - Hardened `install.sh` path prompts so values like `$AUDL_PATH/library.sqlite` expand correctly during validation.
@@ -319,7 +329,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `make bash5-check` passes (`84/84`)
      - `make test` passes (`199` tests, `skipped=1`) at the config-unification checkpoint
 
-17. Browser exit cleanup hardening (2026-03-15):
+19. Browser exit cleanup hardening (2026-03-15):
    - `audlint.sh` now performs terminal cleanup from `EXIT`, `INT`, and `TERM` traps instead of only from the normal interactive quit path.
    - Interactive teardown now restores the scroll region, resets terminal state, and clears the screen through the real terminal device when available.
    - Added PTY regression coverage for `SIGINT` so Ctrl-C exits leave the terminal clean.
@@ -330,7 +340,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `make bash5-check` passes (`84/84`)
      - `make test` passes (`200` tests, `skipped=1`)
 
-18. Exact recode verification mode and analyzer unification (2026-03-29 to 2026-03-30):
+20. Exact recode verification mode and analyzer unification (2026-03-29 to 2026-03-30):
    - Reworked `auz` / `audlint-analyze` so recode decisions follow one authority:
      - downgrade only when a source is fake-upscaled or above the family ceiling
      - resolve the underlying family as `44100` or `48000`
@@ -360,7 +370,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `make bash5-check` passes (`84/84`)
      - `make test` passes (`216` tests, `skipped=1`)
 
-19. Public README/open-source polish (2026-03-13 to 2026-03-15):
+21. Public README/open-source polish (2026-03-13 to 2026-03-15):
    - Refreshed the root `README.md` for GitHub-first presentation: public intro copy, screenshot placement, main features, workflow diagram, dependencies/quick-start ordering, maintenance/paranoia mode notes, safety disclaimer, and supported library layout guidance.
    - Moved repo-layout detail into `docs/README.md` and kept the root README focused on end-user understanding.
    - Updated the main-window screenshot and refined diagram wording around backup/paranoia mode and transfer destinations.
@@ -370,11 +380,11 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `752a421` `docs(readme): expand feature and layout examples`
      - `7fd0f7f` `docs(readme): label backup flow as paranoia mode`
 
-20. Release-validation snapshot (2026-03-15):
+22. Release-validation snapshot (2026-03-15):
    - Host-side release suite is green: `make test` and direct `python3 -m unittest discover -s test -p 'test_*.py'` both pass with `200` tests and `skipped=1`.
    - Docker-backed Linux reruns were attempted for Debian 12, Ubuntu 24.04, and Fedora 41, but all three are currently blocked by the local Docker daemon/socket being unavailable.
 
-21. Public launch and release publication (2026-03-15 to 2026-03-29):
+23. Public launch and release publication (2026-03-15 to 2026-03-29):
    - Final release-facing README wording was polished and the main-window screenshot was restored to the previous version before publishing.
    - `develop` advanced to `fa3bab4` (`docs(readme): polish release copy and restore screenshot`).
    - `main` was published as a flattened public snapshot at `4fb0de9` (`release: v1.1.0 (squash from develop)`).
@@ -388,7 +398,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
    - annotated tag `v1.2.0` was created and pushed
    - release notes highlighted analyzer/recode-rule hardening and `--exact` support
 
-22. Decode-once analyzer engine refactor (2026-03-30):
+24. Decode-once analyzer engine refactor (2026-03-30):
    - Replaced the old per-window decode path in `lib/py/audlint_analyze.py` with a decode-once execution model:
      - one ffprobe JSON metadata probe per track when available
      - one PCM decode per track into a temp raw file
@@ -416,7 +426,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `python3 test/test_audlint_task_smoke.py` passes
      - `make test` passes: core `222` (`skipped=1`) + legacy `67`
 
-23. Hybrid analyzer strategy switcher for huge sources (2026-03-30):
+25. Hybrid analyzer strategy switcher for huge sources (2026-03-30):
    - Added internal `fast`, `segment`, and `full` execution strategies in `lib/py/audlint_analyze.py`.
    - Large/expensive sources now prefer segment seek-decodes instead of unconditional full-track decode:
      - WavPack / APE / DSD-family files
@@ -475,6 +485,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
    - **Validation**
      - Benchmark before/after every analyzer-decision change on 2-3 representative albums, including at least one huge cue/image or WavPack case.
      - Build a labeled regression corpus covering true `44.1`, true `48`, fake `48`, fake `96/192`, sparse genuine hi-res, DSD-family examples, and misleading spectrogram exports.
+     - Use `audlint-analyze-corpus.sh` as the corpus runner so trusted and weak labels are tracked separately.
      - Current trusted in-library anchor is `/Volumes/Music/Hijacked` (`96000/24` genuine); the rest of the library should be treated as weak labels because it was encoded by earlier audlint versions.
      - For future trusted references, prefer external publisher/reference catalogs rather than self-labeled library output.
      - Add regression coverage for false-positive protection and fallback-on-conflict before changing thresholds again.

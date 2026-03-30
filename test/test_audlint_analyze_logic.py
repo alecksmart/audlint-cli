@@ -10,6 +10,25 @@ sys.path.insert(0, str(REPO_ROOT / "lib" / "py"))
 import audlint_analyze  # noqa: E402
 
 
+def _segment_sample(
+    *,
+    cutoff_hz: float | None,
+    classification: str,
+    target_sr: int,
+    hf_present: bool = False,
+    boundary_ambiguous: bool = False,
+    classification_reason: str = "test",
+) -> dict[str, object]:
+    return {
+        "cutoff_hz": cutoff_hz,
+        "classification": classification,
+        "decision_target_sr_hint": target_sr,
+        "hf_present": hf_present,
+        "boundary_ambiguous": boundary_ambiguous,
+        "classification_reason": classification_reason,
+    }
+
+
 class AudlintAnalyzeLogicTests(unittest.TestCase):
     def test_normal_flac_prefers_fast_strategy(self) -> None:
         meta = audlint_analyze.TrackMeta(
@@ -66,6 +85,117 @@ class AudlintAnalyzeLogicTests(unittest.TestCase):
             audlint_analyze.ANALYSIS_STRATEGY_SEGMENT,
         )
         self.assertEqual(confidence, "high")
+
+    def test_segment_summary_accepts_consistent_keep_source_majority(self) -> None:
+        meta = audlint_analyze.TrackMeta(
+            sr=96000.0,
+            dur=3600.0,
+            bits=24,
+            channels=2,
+            analysis_sr=96000,
+            codec="wavpack",
+            size_bytes=900 * 1024 * 1024,
+            has_sibling_cue=True,
+            prefer_ffmpeg_first=True,
+        )
+        summary = audlint_analyze.summarize_segment_samples(
+            [
+                _segment_sample(cutoff_hz=43500.0, classification="full-band", target_sr=96000),
+                _segment_sample(cutoff_hz=42900.0, classification="full-band", target_sr=96000),
+                _segment_sample(cutoff_hz=44100.0, classification="full-band", target_sr=96000),
+            ],
+            meta,
+            500,
+        )
+        self.assertEqual(summary["decision_confidence"], "high")
+        self.assertEqual(summary["decision_reason"], "accepted_by_consistency")
+        self.assertFalse(summary["allow_fake_upscale"])
+
+    def test_segment_summary_blocks_false_positive_downgrade_when_hf_contradicts(self) -> None:
+        meta = audlint_analyze.TrackMeta(
+            sr=192000.0,
+            dur=3600.0,
+            bits=24,
+            channels=2,
+            analysis_sr=192000,
+            codec="wavpack",
+            size_bytes=900 * 1024 * 1024,
+            has_sibling_cue=False,
+            prefer_ffmpeg_first=True,
+        )
+        summary = audlint_analyze.summarize_segment_samples(
+            [
+                _segment_sample(cutoff_hz=14900.0, classification="cutoff-limited", target_sr=44100),
+                _segment_sample(cutoff_hz=15100.0, classification="cutoff-limited", target_sr=44100),
+                _segment_sample(
+                    cutoff_hz=45500.0,
+                    classification="full-band",
+                    target_sr=192000,
+                    hf_present=True,
+                    classification_reason="hf_presence_guard",
+                ),
+            ],
+            meta,
+            500,
+        )
+        decision = audlint_analyze.resolve_recode_decision(15000.0, 192000.0, 500, summary)
+        self.assertFalse(summary["allow_fake_upscale"])
+        self.assertEqual(summary["decision_confidence"], "medium")
+        self.assertEqual(decision["decision"], "keep_source")
+        self.assertTrue(decision["downgrade_guarded"])
+
+    def test_segment_summary_allows_true_fake_upscale_when_consistent(self) -> None:
+        meta = audlint_analyze.TrackMeta(
+            sr=96000.0,
+            dur=1800.0,
+            bits=24,
+            channels=2,
+            analysis_sr=96000,
+            codec="flac",
+            size_bytes=500 * 1024 * 1024,
+            has_sibling_cue=False,
+            prefer_ffmpeg_first=False,
+        )
+        summary = audlint_analyze.summarize_segment_samples(
+            [
+                _segment_sample(cutoff_hz=18200.0, classification="cutoff-limited", target_sr=44100),
+                _segment_sample(cutoff_hz=17950.0, classification="cutoff-limited", target_sr=44100),
+                _segment_sample(cutoff_hz=18120.0, classification="cutoff-limited", target_sr=44100),
+                _segment_sample(cutoff_hz=18040.0, classification="cutoff-limited", target_sr=44100),
+            ],
+            meta,
+            500,
+        )
+        decision = audlint_analyze.resolve_recode_decision(18050.0, 96000.0, 500, summary)
+        self.assertTrue(summary["allow_fake_upscale"])
+        self.assertIn(summary["decision_confidence"], {"medium", "high"})
+        self.assertEqual(decision["decision"], "downgrade_fake_upscale")
+        self.assertEqual(decision["target_sr"], 44100)
+
+    def test_segment_summary_falls_back_on_family_inconsistency(self) -> None:
+        meta = audlint_analyze.TrackMeta(
+            sr=192000.0,
+            dur=2400.0,
+            bits=24,
+            channels=2,
+            analysis_sr=192000,
+            codec="wavpack",
+            size_bytes=800 * 1024 * 1024,
+            has_sibling_cue=False,
+            prefer_ffmpeg_first=True,
+        )
+        summary = audlint_analyze.summarize_segment_samples(
+            [
+                _segment_sample(cutoff_hz=18100.0, classification="cutoff-limited", target_sr=44100),
+                _segment_sample(cutoff_hz=17950.0, classification="cutoff-limited", target_sr=44100),
+                _segment_sample(cutoff_hz=23200.0, classification="cutoff-limited", target_sr=48000),
+                _segment_sample(cutoff_hz=22950.0, classification="cutoff-limited", target_sr=48000),
+            ],
+            meta,
+            500,
+        )
+        self.assertEqual(summary["decision_confidence"], "low")
+        self.assertEqual(summary["decision_reason"], "fallback_due_to_family_inconsistency")
 
     def test_48k_source_near_nyquist_stays_48_family(self) -> None:
         decision = audlint_analyze.resolve_recode_decision(21750.0, 48000.0, 500)

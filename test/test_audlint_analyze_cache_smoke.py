@@ -366,9 +366,9 @@ EOF
         payload = json.loads(proc.stdout)
         track = payload["tracks"][0]
         self.assertEqual(track["analysis_strategy"], "segment")
-        self.assertEqual(track["decode_operations"], 4)
+        self.assertEqual(track["decode_operations"], 3)
         invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
-        self.assertEqual(len(invocations), 4)
+        self.assertEqual(len(invocations), 3)
         self.assertTrue(all("-ss" in line and "-t" in line for line in invocations))
 
     def test_large_wavpack_auto_falls_back_from_segment_to_full(self) -> None:

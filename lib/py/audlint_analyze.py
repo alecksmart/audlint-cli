@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 import shutil
 import statistics
@@ -34,7 +36,7 @@ EXACT_MIN_WINDOWS = 24
 EXACT_WINDOW_MULTIPLIER = 2
 MAX_ANALYSIS_SR_HZ = 192000
 PCM_BYTES_PER_SAMPLE = 4
-STRATEGY_CONFIG_VERSION = "hybrid-v1"
+STRATEGY_CONFIG_VERSION = "hybrid-v2"
 SEGMENT_EXPENSIVE_CODECS = {
     "ape",
     "wavpack",
@@ -54,6 +56,16 @@ SEGMENT_FAST_COUNT = 4
 SEGMENT_EXACT_COUNT = 6
 SEGMENT_MIN_SECONDS = 6.0
 SEGMENT_MAX_SECONDS = 12.0
+SEGMENT_CONSISTENCY_TOLERANCE_HZ = 2500.0
+SEGMENT_BOUNDARY_AMBIGUITY_HZ = 1500.0
+SEGMENT_STRONG_MAJORITY_RATIO = 0.75
+SEGMENT_ACCEPT_MAJORITY_RATIO = 0.6
+SEGMENT_EARLY_ACCEPT_MIN = 3
+SEGMENT_LARGE_DOWNGRADE_RATIO = 2.5
+SEGMENT_BRICKWALL_DROP_DB = 14.0
+HF_GUARD_PEAK_DB_THRESHOLD = -78.0
+HF_GUARD_OCCUPANCY_THRESHOLD = 0.002
+HF_GUARD_ENERGY_RATIO_THRESHOLD = 1e-4
 
 
 @dataclass(frozen=True)
@@ -151,6 +163,16 @@ def cmd_config_fingerprint(argv: list[str]) -> int:
         f"segment_exact_count={SEGMENT_EXACT_COUNT}",
         f"segment_min_seconds={SEGMENT_MIN_SECONDS}",
         f"segment_max_seconds={SEGMENT_MAX_SECONDS}",
+        f"segment_consistency_tolerance_hz={SEGMENT_CONSISTENCY_TOLERANCE_HZ}",
+        f"segment_boundary_ambiguity_hz={SEGMENT_BOUNDARY_AMBIGUITY_HZ}",
+        f"segment_strong_majority_ratio={SEGMENT_STRONG_MAJORITY_RATIO}",
+        f"segment_accept_majority_ratio={SEGMENT_ACCEPT_MAJORITY_RATIO}",
+        f"segment_early_accept_min={SEGMENT_EARLY_ACCEPT_MIN}",
+        f"segment_large_downgrade_ratio={SEGMENT_LARGE_DOWNGRADE_RATIO}",
+        f"segment_brickwall_drop_db={SEGMENT_BRICKWALL_DROP_DB}",
+        f"hf_guard_peak_db_threshold={HF_GUARD_PEAK_DB_THRESHOLD}",
+        f"hf_guard_occupancy_threshold={HF_GUARD_OCCUPANCY_THRESHOLD}",
+        f"hf_guard_energy_ratio_threshold={HF_GUARD_ENERGY_RATIO_THRESHOLD}",
     ]
     joined = "\n".join(parts).encode("utf-8", "strict")
     print(hashlib.sha256(joined).hexdigest())
@@ -642,6 +664,39 @@ def build_segment_starts(dur: float | None, segment_sec: float, segment_count: i
     return starts
 
 
+def guard_band_start_hz(sr_in: float | None) -> float | None:
+    family_sr = source_family_sr(sr_in)
+    if family_sr == CD_FAMILY_SR_HZ:
+        return CD_NYQUIST_HZ
+    if family_sr == STUDIO_48_FAMILY_SR_HZ:
+        return STUDIO_48_NYQUIST_HZ
+    return None
+
+
+def required_segment_votes(sample_count: int, ratio: float = SEGMENT_ACCEPT_MAJORITY_RATIO) -> int:
+    if sample_count <= 0:
+        return 0
+    return max(2, int(math.ceil(sample_count * ratio)))
+
+
+def decision_boundary_distance_hz(cutoff_hz: float | None, sr_in: float, headroom_hz: int) -> float | None:
+    target_sr = classify_family_target_sr(cutoff_hz, sr_in, headroom_hz)
+    if target_sr is None or int(target_sr) >= int(sr_in):
+        return None
+    effective = effective_cutoff_hz(cutoff_hz, headroom_hz)
+    if effective is None:
+        return None
+    return abs(float(effective) - (float(target_sr) / 2.0))
+
+
+def segment_consistency_ratio(cutoffs_hz: list[float], tolerance_hz: float = SEGMENT_CONSISTENCY_TOLERANCE_HZ) -> float:
+    if not cutoffs_hz:
+        return 0.0
+    median_cutoff = float(statistics.median(cutoffs_hz))
+    consistent = sum(1 for cutoff in cutoffs_hz if abs(float(cutoff) - median_cutoff) <= tolerance_hz)
+    return consistent / float(len(cutoffs_hz))
+
+
 def select_channel_signal(window_frames, channel_mode: str):
     import numpy as np
 
@@ -678,6 +733,13 @@ def analyze_cutoff_series_from_decoded(
             "cutoffs_hz": [],
             "windows_requested": 0,
             "windows_used": 0,
+            "hf_energy_ratio": 0.0,
+            "hf_peak_db": None,
+            "hf_present": False,
+            "hf_present_windows": 0,
+            "shape_drop_db": None,
+            "window_hf_energy_ratios": [],
+            "window_shape_drop_dbs": [],
         }
 
     starts = build_window_starts(dur, window_sec, max_windows)
@@ -694,6 +756,13 @@ def analyze_cutoff_series_from_decoded(
             "cutoffs_hz": [],
             "windows_requested": len(starts),
             "windows_used": 0,
+            "hf_energy_ratio": 0.0,
+            "hf_peak_db": None,
+            "hf_present": False,
+            "hf_present_windows": 0,
+            "shape_drop_db": None,
+            "window_hf_energy_ratios": [],
+            "window_shape_drop_dbs": [],
         }
 
     if decoded_track.frames <= 0:
@@ -706,6 +775,13 @@ def analyze_cutoff_series_from_decoded(
             "cutoffs_hz": [],
             "windows_requested": len(starts),
             "windows_used": 0,
+            "hf_energy_ratio": 0.0,
+            "hf_peak_db": None,
+            "hf_present": False,
+            "hf_present_windows": 0,
+            "shape_drop_db": None,
+            "window_hf_energy_ratios": [],
+            "window_shape_drop_dbs": [],
         }
 
     frame_shape = (decoded_track.frames, decoded_track.channels)
@@ -713,6 +789,13 @@ def analyze_cutoff_series_from_decoded(
     window_frames = max(1, int(round(window_sec * analysis_sr)))
     min_frames = max(1, int(analysis_sr))
     cutoffs: list[float] = []
+    hf_energy_ratios: list[float] = []
+    hf_peak_dbs: list[float] = []
+    hf_present_windows = 0
+    shape_drop_dbs: list[float] = []
+    guard_band_hz = guard_band_start_hz(sr)
+    nyquist_hz = analysis_sr / 2.0
+    freqs = None
 
     try:
         for t0 in starts:
@@ -734,6 +817,8 @@ def analyze_cutoff_series_from_decoded(
             peak = mag.max() if mag.size else 0.0
             if peak <= 0:
                 continue
+            if freqs is None or len(freqs) != mag.size:
+                freqs = np.linspace(0.0, nyquist_hz, mag.size, dtype=np.float64)
             db = 20.0 * np.log10(np.maximum(mag / peak, 1e-12))
             idx = (db >= thresh_rel_db).nonzero()[0]
             if idx.size == 0:
@@ -741,6 +826,33 @@ def analyze_cutoff_series_from_decoded(
             k = int(idx.max())
             freq = (k / (mag.size - 1)) * (analysis_sr / 2.0)
             cutoffs.append(float(freq))
+
+            if guard_band_hz is not None and guard_band_hz < nyquist_hz and freqs is not None:
+                guard_mask = freqs >= guard_band_hz
+                if guard_mask.any():
+                    guard_mag = mag[guard_mask]
+                    guard_db = db[guard_mask]
+                    total_energy = float(np.sum(mag * mag))
+                    guard_energy = float(np.sum(guard_mag * guard_mag))
+                    guard_ratio = (guard_energy / total_energy) if total_energy > 0 else 0.0
+                    guard_peak_db = float(np.max(guard_db)) if guard_db.size else -120.0
+                    guard_occupancy = float(np.mean(guard_db >= HF_GUARD_PEAK_DB_THRESHOLD)) if guard_db.size else 0.0
+                    hf_energy_ratios.append(guard_ratio)
+                    hf_peak_dbs.append(guard_peak_db)
+                    if (
+                        guard_peak_db >= HF_GUARD_PEAK_DB_THRESHOLD
+                        or guard_occupancy >= HF_GUARD_OCCUPANCY_THRESHOLD
+                        or guard_ratio >= HF_GUARD_ENERGY_RATIO_THRESHOLD
+                    ):
+                        hf_present_windows += 1
+
+            if freqs is not None and freq > 3000.0:
+                pre_mask = (freqs >= max(0.0, freq - 2000.0)) & (freqs < max(0.0, freq - 500.0))
+                post_mask = (freqs >= min(nyquist_hz, freq + 500.0)) & (freqs < min(nyquist_hz, freq + 2500.0))
+                if pre_mask.any() and post_mask.any():
+                    pre_mean_db = float(np.mean(db[pre_mask]))
+                    post_mean_db = float(np.mean(db[post_mask]))
+                    shape_drop_dbs.append(pre_mean_db - post_mean_db)
     finally:
         del pcm
 
@@ -759,6 +871,13 @@ def analyze_cutoff_series_from_decoded(
         "cutoffs_hz": cutoffs,
         "windows_requested": len(starts),
         "windows_used": len(cutoffs),
+        "hf_energy_ratio": float(statistics.median(hf_energy_ratios)) if hf_energy_ratios else 0.0,
+        "hf_peak_db": float(max(hf_peak_dbs)) if hf_peak_dbs else None,
+        "hf_present": bool(hf_present_windows > 0),
+        "hf_present_windows": hf_present_windows,
+        "shape_drop_db": float(statistics.median(shape_drop_dbs)) if shape_drop_dbs else None,
+        "window_hf_energy_ratios": hf_energy_ratios,
+        "window_shape_drop_dbs": shape_drop_dbs,
     }
 
 
@@ -797,93 +916,6 @@ def analyze_cutoff(
     return result["sr"], result["dur"], result["cutoff_hz"]
 
 
-def prepare_segment_decodes(
-    path: str,
-    track_meta: TrackMeta,
-    window_sec: float,
-    decode_channels: int,
-    analysis_mode: str,
-) -> list[DecodedTrack]:
-    segment_duration = segment_duration_for_window(window_sec)
-    starts = build_segment_starts(track_meta.dur, segment_duration, segment_count_for_mode(analysis_mode))
-    decodes: list[DecodedTrack] = []
-    for start_sec in starts:
-        decoded_track = decode_segment_pcm(
-            path,
-            track_meta,
-            start_sec,
-            segment_duration,
-            decode_channels,
-        )
-        if decoded_track is not None:
-            decodes.append(decoded_track)
-    return decodes
-
-
-def analyze_cutoff_series_from_segments(
-    segment_decodes: list[DecodedTrack],
-    track_meta: TrackMeta,
-    window_sec: float,
-    thresh_rel_db: float,
-    channel_mode: str,
-) -> dict[str, object]:
-    if not segment_decodes:
-        return {
-            "sr": track_meta.sr,
-            "analysis_sr": track_meta.analysis_sr,
-            "dur": track_meta.dur,
-            "channel_mode": channel_mode,
-            "cutoff_hz": None,
-            "cutoffs_hz": [],
-            "windows_requested": 0,
-            "windows_used": 0,
-            "segments_requested": 0,
-            "segments_used": 0,
-        }
-
-    cutoffs: list[float] = []
-    windows_requested = 0
-    windows_used = 0
-    segments_used = 0
-
-    for idx, decoded_track in enumerate(segment_decodes, start=1):
-        result = analyze_cutoff_series_from_decoded(
-            decoded_track,
-            track_meta,
-            window_sec,
-            1,
-            thresh_rel_db,
-            channel_mode=channel_mode,
-        )
-        segment_cutoffs = [float(value) for value in result.get("cutoffs_hz", [])]
-        cutoffs.extend(segment_cutoffs)
-        windows_requested += int(result.get("windows_requested", 0))
-        windows_used += int(result.get("windows_used", 0))
-        if segment_cutoffs:
-            segments_used += 1
-
-        confidence = analysis_confidence(cutoffs, windows_requested, ANALYSIS_STRATEGY_SEGMENT)
-        if confidence == "high" and idx >= min(2, len(segment_decodes)):
-            debug(
-                f"segment early-exit track={os.path.basename(decoded_track.path)} "
-                f"mode={channel_mode} segments={idx}/{len(segment_decodes)}"
-            )
-            break
-
-    return {
-        "sr": track_meta.sr,
-        "analysis_sr": track_meta.analysis_sr,
-        "dur": track_meta.dur,
-        "channel_mode": channel_mode,
-        "cutoff_hz": float(statistics.median(cutoffs)) if cutoffs else None,
-        "cutoffs_hz": cutoffs,
-        "windows_requested": windows_requested,
-        "windows_used": windows_used,
-        "segments_requested": len(segment_decodes),
-        "segments_used": segments_used,
-    }
-
-
 def confidence_rank(confidence: str) -> int:
     if confidence == "high":
         return 3
@@ -892,7 +924,7 @@ def confidence_rank(confidence: str) -> int:
     return 1
 
 
-def analysis_confidence(
+def statistical_confidence(
     cutoffs_hz: list[float],
     windows_requested: int,
     analysis_strategy: str = ANALYSIS_STRATEGY_FULL,
@@ -926,6 +958,301 @@ def analysis_confidence(
     return "low"
 
 
+def analysis_confidence(
+    cutoffs_hz: list[float],
+    windows_requested: int,
+    analysis_strategy: str = ANALYSIS_STRATEGY_FULL,
+) -> str:
+    return statistical_confidence(cutoffs_hz, windows_requested, analysis_strategy)
+
+
+def segment_starts_for_mode(dur: float | None, window_sec: float, analysis_mode: str) -> tuple[float, list[float]]:
+    segment_duration = segment_duration_for_window(window_sec)
+    exact_starts = build_segment_starts(dur, segment_duration, SEGMENT_EXACT_COUNT)
+    normalized_mode = normalize_analysis_mode(analysis_mode)
+    if normalized_mode == FAST_ANALYSIS_MODE:
+        return segment_duration, exact_starts[: min(SEGMENT_FAST_COUNT, len(exact_starts))]
+    return segment_duration, exact_starts
+
+
+def classify_segment_sample(
+    result: dict[str, object],
+    track_meta: TrackMeta,
+    headroom_hz: int,
+    *,
+    segment_index: int,
+    source_start_sec: float,
+) -> dict[str, object]:
+    cutoff_hz = result.get("cutoff_hz")
+    hf_present = bool(result.get("hf_present", False))
+    shape_drop_db = result.get("shape_drop_db")
+    boundary_distance_hz = None
+    decision_hint: dict[str, object] | None = None
+    classification = "uncertain"
+    classification_reason = "no_cutoff"
+    decision_target_sr_hint = int(track_meta.sr) if track_meta.sr else None
+
+    if cutoff_hz is not None and track_meta.sr is not None:
+        decision_hint = resolve_recode_decision(float(cutoff_hz), float(track_meta.sr), headroom_hz)
+        boundary_distance_hz = decision_boundary_distance_hz(float(cutoff_hz), float(track_meta.sr), headroom_hz)
+        decision_target_sr_hint = int(decision_hint["target_sr"]) if decision_hint.get("target_sr") is not None else decision_target_sr_hint
+        if bool(decision_hint.get("fake_upscale")):
+            if hf_present:
+                classification = "full-band"
+                classification_reason = "hf_presence_guard"
+            elif boundary_distance_hz is not None and boundary_distance_hz <= SEGMENT_BOUNDARY_AMBIGUITY_HZ:
+                classification = "uncertain"
+                classification_reason = "boundary_ambiguity"
+            elif shape_drop_db is not None and float(shape_drop_db) >= SEGMENT_BRICKWALL_DROP_DB:
+                classification = "cutoff-limited"
+                classification_reason = "brickwall_cutoff"
+            else:
+                classification = "uncertain"
+                classification_reason = "gradual_rolloff"
+        else:
+            classification = "full-band"
+            classification_reason = "full_band_signal"
+
+    return {
+        "segment_index": segment_index,
+        "source_start_sec": source_start_sec,
+        "cutoff_hz": cutoff_hz,
+        "hf_energy_ratio": float(result.get("hf_energy_ratio", 0.0) or 0.0),
+        "hf_peak_db": result.get("hf_peak_db"),
+        "hf_present": hf_present,
+        "shape_drop_db": shape_drop_db,
+        "windows_requested": int(result.get("windows_requested", 0)),
+        "windows_used": int(result.get("windows_used", 0)),
+        "decision_hint": decision_hint,
+        "decision_target_sr_hint": decision_target_sr_hint,
+        "classification": classification,
+        "classification_reason": classification_reason,
+        "boundary_ambiguous": bool(boundary_distance_hz is not None and boundary_distance_hz <= SEGMENT_BOUNDARY_AMBIGUITY_HZ),
+        "boundary_distance_hz": boundary_distance_hz,
+    }
+
+
+def summarize_segment_samples(
+    segment_samples: list[dict[str, object]],
+    track_meta: TrackMeta,
+    headroom_hz: int,
+) -> dict[str, object]:
+    cutoffs = [float(sample["cutoff_hz"]) for sample in segment_samples if sample.get("cutoff_hz") is not None]
+    statistical = statistical_confidence(cutoffs, len(segment_samples), ANALYSIS_STRATEGY_SEGMENT)
+    consistency_ratio = segment_consistency_ratio(cutoffs)
+    classification_counts = Counter(str(sample.get("classification", "uncertain")) for sample in segment_samples)
+    cutoff_limited_samples = [sample for sample in segment_samples if sample.get("classification") == "cutoff-limited"]
+    full_band_samples = [sample for sample in segment_samples if sample.get("classification") == "full-band"]
+    downgrade_targets = [
+        int(sample["decision_target_sr_hint"])
+        for sample in cutoff_limited_samples
+        if sample.get("decision_target_sr_hint") is not None and track_meta.sr is not None and int(sample["decision_target_sr_hint"]) < int(track_meta.sr)
+    ]
+    target_counts = Counter(downgrade_targets)
+    majority_target_sr, majority_target_count = (None, 0)
+    if target_counts:
+        majority_target_sr, majority_target_count = target_counts.most_common(1)[0]
+    decisive_samples = len(cutoff_limited_samples) + len(full_band_samples)
+    sample_count = len(segment_samples)
+    required_votes = required_segment_votes(max(sample_count, decisive_samples))
+    target_agreement = (majority_target_count / float(len(cutoff_limited_samples))) if cutoff_limited_samples else 0.0
+    family_inconsistent = len(target_counts) > 1
+    strong_minor_target = any(count >= 2 for target, count in target_counts.items() if target != majority_target_sr)
+    hf_guard_present = any(bool(sample.get("hf_present")) for sample in segment_samples)
+    boundary_ambiguous = any(bool(sample.get("boundary_ambiguous")) for sample in segment_samples)
+    large_downgrade = bool(
+        majority_target_sr is not None
+        and track_meta.sr is not None
+        and majority_target_sr > 0
+        and (float(track_meta.sr) / float(majority_target_sr)) >= SEGMENT_LARGE_DOWNGRADE_RATIO
+    )
+
+    decision_confidence = "low"
+    decision_reason = "fallback_due_to_no_signal"
+    fallback_reason = "fallback_due_to_no_signal"
+    allow_fake_upscale = False
+
+    if cutoffs:
+        downgrade_consistent = (
+            majority_target_sr is not None
+            and majority_target_count >= required_votes
+            and not family_inconsistent
+            and not strong_minor_target
+            and not boundary_ambiguous
+            and not hf_guard_present
+            and len(full_band_samples) == 0
+            and consistency_ratio >= SEGMENT_ACCEPT_MAJORITY_RATIO
+        )
+        if downgrade_consistent and large_downgrade:
+            downgrade_consistent = (
+                majority_target_count == len(segment_samples)
+                and consistency_ratio >= SEGMENT_STRONG_MAJORITY_RATIO
+                and statistical != "low"
+            )
+
+        if downgrade_consistent:
+            decision_confidence = (
+                "high"
+                if (
+                    majority_target_count >= max(SEGMENT_EARLY_ACCEPT_MIN, required_votes)
+                    and consistency_ratio >= SEGMENT_STRONG_MAJORITY_RATIO
+                    and statistical != "low"
+                )
+                else "medium"
+            )
+            decision_reason = "accepted_by_consistency" if consistency_ratio >= SEGMENT_STRONG_MAJORITY_RATIO else "accepted_by_majority_vote"
+            fallback_reason = None
+            allow_fake_upscale = True
+        elif family_inconsistent:
+            decision_confidence = "low"
+            decision_reason = "fallback_due_to_family_inconsistency"
+            fallback_reason = decision_reason
+        elif boundary_ambiguous and not hf_guard_present and len(full_band_samples) == 0:
+            decision_confidence = "low"
+            decision_reason = "fallback_due_to_boundary_ambiguity"
+            fallback_reason = decision_reason
+        else:
+            keep_source_votes = len(full_band_samples)
+            keep_source_stable = (
+                keep_source_votes >= required_votes
+                or hf_guard_present
+                or (majority_target_count == 0 and consistency_ratio >= SEGMENT_ACCEPT_MAJORITY_RATIO)
+                or (majority_target_count >= required_votes and (hf_guard_present or keep_source_votes > 0))
+            )
+            if keep_source_stable:
+                decision_confidence = (
+                    "high"
+                    if keep_source_votes >= max(SEGMENT_EARLY_ACCEPT_MIN, required_votes) and consistency_ratio >= SEGMENT_ACCEPT_MAJORITY_RATIO
+                    else "medium"
+                )
+                decision_reason = "accepted_by_consistency" if consistency_ratio >= SEGMENT_ACCEPT_MAJORITY_RATIO or hf_guard_present else "accepted_by_majority_vote"
+                fallback_reason = None
+                allow_fake_upscale = False
+            else:
+                decision_confidence = "low"
+                decision_reason = "fallback_due_to_disagreement"
+                fallback_reason = decision_reason
+
+    return {
+        "cutoff_hz": float(statistics.median(cutoffs)) if cutoffs else None,
+        "cutoffs_hz": cutoffs,
+        "statistical_confidence": statistical,
+        "decision_confidence": decision_confidence,
+        "decision_reason": decision_reason,
+        "fallback_reason": fallback_reason,
+        "allow_fake_upscale": allow_fake_upscale,
+        "consistency_ratio": consistency_ratio,
+        "classification_counts": dict(classification_counts),
+        "hf_guard_present": hf_guard_present,
+        "boundary_ambiguous": boundary_ambiguous,
+        "majority_target_sr": majority_target_sr,
+        "majority_target_count": majority_target_count,
+        "segments_used": len(cutoffs),
+        "segment_classifications": [str(sample.get("classification", "uncertain")) for sample in segment_samples],
+        "segment_classification_reasons": [str(sample.get("classification_reason", "")) for sample in segment_samples],
+    }
+
+
+def collect_segment_channel_result(
+    path: str,
+    track_meta: TrackMeta,
+    window_sec: float,
+    thresh_rel_db: float,
+    headroom_hz: int,
+    channel_mode: str,
+    decode_channels: int,
+    starts: list[float],
+    segment_duration: float,
+    decoded_tracks: list[DecodedTrack] | None = None,
+) -> tuple[dict[str, object], list[DecodedTrack]]:
+    decoded_tracks = decoded_tracks or []
+    segment_samples: list[dict[str, object]] = []
+    windows_requested = 0
+    windows_used = 0
+    for idx, start_sec in enumerate(starts):
+        if idx >= len(decoded_tracks):
+            decoded_track = decode_segment_pcm(
+                path,
+                track_meta,
+                start_sec,
+                segment_duration,
+                decode_channels,
+            )
+            if decoded_track is None:
+                continue
+            decoded_tracks.append(decoded_track)
+        decoded_track = decoded_tracks[idx]
+        result = analyze_cutoff_series_from_decoded(
+            decoded_track,
+            track_meta,
+            window_sec,
+            1,
+            thresh_rel_db,
+            channel_mode=channel_mode,
+        )
+        windows_requested += int(result.get("windows_requested", 0))
+        windows_used += int(result.get("windows_used", 0))
+        segment_samples.append(
+            classify_segment_sample(
+                result,
+                track_meta,
+                headroom_hz,
+                segment_index=idx,
+                source_start_sec=decoded_track.source_start_sec,
+            )
+        )
+        summary = summarize_segment_samples(segment_samples, track_meta, headroom_hz)
+        if summary["decision_confidence"] == "high" and len(segment_samples) >= min(SEGMENT_EARLY_ACCEPT_MIN, len(starts)):
+            debug(
+                f"segment early-exit track={os.path.basename(path)} mode={channel_mode} "
+                f"segments={len(segment_samples)}/{len(starts)} reason={summary['decision_reason']}"
+            )
+            break
+
+    summary = summarize_segment_samples(segment_samples, track_meta, headroom_hz)
+    if debug_enabled():
+        debug(
+            f"segment-summary track={os.path.basename(path)} mode={channel_mode} "
+            f"stat={summary['statistical_confidence']} decision={summary['decision_confidence']} "
+            f"reason={summary['decision_reason']} classes={summary['classification_counts']} "
+            f"consistency={summary['consistency_ratio']:.2f}"
+        )
+        for sample in segment_samples:
+            debug(
+                f"segment-sample track={os.path.basename(path)} mode={channel_mode} "
+                f"idx={int(sample['segment_index']) + 1} start={sample['source_start_sec']:.2f}s "
+                f"cutoff={sample.get('cutoff_hz')} class={sample['classification']} "
+                f"hf={int(bool(sample.get('hf_present')))} reason={sample['classification_reason']}"
+            )
+
+    return (
+        {
+            "sr": track_meta.sr,
+            "analysis_sr": track_meta.analysis_sr,
+            "dur": track_meta.dur,
+            "channel_mode": channel_mode,
+            "cutoff_hz": summary["cutoff_hz"],
+            "cutoffs_hz": summary["cutoffs_hz"],
+            "windows_requested": windows_requested,
+            "windows_used": windows_used,
+            "segments_requested": len(segment_samples),
+            "segments_budget": len(starts),
+            "segments_used": summary["segments_used"],
+            "confidence": summary["statistical_confidence"],
+            "decision_confidence": summary["decision_confidence"],
+            "decision_reason": summary["decision_reason"],
+            "fallback_reason": summary["fallback_reason"],
+            "allow_fake_upscale": summary["allow_fake_upscale"],
+            "consistency_ratio": summary["consistency_ratio"],
+            "segment_classifications": summary["segment_classifications"],
+            "segment_classification_reasons": summary["segment_classification_reasons"],
+            "hf_present": summary["hf_guard_present"],
+            "classification_counts": summary["classification_counts"],
+        },
+        decoded_tracks,
+    )
+
+
 def select_track_analysis_from_decoded(
     decoded_track: DecodedTrack | None,
     track_meta: TrackMeta,
@@ -951,6 +1278,12 @@ def select_track_analysis_from_decoded(
         int(mono_result["windows_requested"]),
         analysis_strategy,
     )
+    mono_result["decision_confidence"] = mono_result["confidence"]
+    mono_result["decision_reason"] = (
+        "accepted_by_consistency" if mono_result["confidence"] != "low" else "fallback_due_to_disagreement"
+    )
+    mono_result["fallback_reason"] = None if mono_result["confidence"] != "low" else "fallback_due_to_disagreement"
+    mono_result["allow_fake_upscale"] = True
 
     series_results: list[dict[str, object]] = [mono_result]
     channel_cutoffs: dict[str, float | None] = {"mono": mono_result.get("cutoff_hz")}
@@ -974,6 +1307,12 @@ def select_track_analysis_from_decoded(
                     int(result["windows_requested"]),
                     analysis_strategy,
                 )
+                result["decision_confidence"] = result["confidence"]
+                result["decision_reason"] = (
+                    "accepted_by_consistency" if result["confidence"] != "low" else "fallback_due_to_disagreement"
+                )
+                result["fallback_reason"] = None if result["confidence"] != "low" else "fallback_due_to_disagreement"
+                result["allow_fake_upscale"] = True
                 series_results.append(result)
                 channel_cutoffs[channel_mode] = result.get("cutoff_hz")
                 segments_requested = max(segments_requested, int(result.get("segments_requested", 0)))
@@ -987,9 +1326,10 @@ def select_track_analysis_from_decoded(
         selected = max(
             valid_results,
             key=lambda result: (
-                float(result["cutoff_hz"]),
+                confidence_rank(str(result.get("decision_confidence", result.get("confidence", "low")))),
                 confidence_rank(str(result["confidence"])),
                 int(result["windows_used"]),
+                float(result["cutoff_hz"]),
             ),
         )
     else:
@@ -1003,7 +1343,12 @@ def select_track_analysis_from_decoded(
         "cutoff_hz": selected.get("cutoff_hz"),
         "analysis_mode": analysis_mode,
         "analysis_strategy": analysis_strategy,
-        "analysis_confidence": selected.get("confidence", "low"),
+        "analysis_confidence": selected.get("decision_confidence", selected.get("confidence", "low")),
+        "statistical_confidence": selected.get("confidence", "low"),
+        "decision_confidence": selected.get("decision_confidence", selected.get("confidence", "low")),
+        "decision_reason": selected.get("decision_reason", "accepted_by_consistency"),
+        "fallback_reason": selected.get("fallback_reason"),
+        "allow_fake_upscale": bool(selected.get("allow_fake_upscale", True)),
         "selected_channel": selected.get("channel_mode", "mono"),
         "windows_requested": selected.get("windows_requested", 0),
         "windows_used": selected.get("windows_used", 0),
@@ -1016,49 +1361,59 @@ def select_track_analysis_from_decoded(
 
 
 def select_track_analysis_from_segments(
-    segment_decodes: list[DecodedTrack],
+    path: str,
     track_meta: TrackMeta,
     window_sec: float,
-    max_windows: int,
     thresh_rel_db: float,
+    headroom_hz: int,
+    decode_channels: int,
     analysis_mode: str = FAST_ANALYSIS_MODE,
-) -> dict[str, object]:
+    decoded_tracks: list[DecodedTrack] | None = None,
+) -> tuple[dict[str, object], list[DecodedTrack]]:
     analysis_mode = normalize_analysis_mode(analysis_mode)
+    segment_duration, starts = segment_starts_for_mode(track_meta.dur, window_sec, analysis_mode)
+    decoded_tracks = decoded_tracks or []
 
-    mono_result = analyze_cutoff_series_from_segments(
-        segment_decodes,
+    mono_result, decoded_tracks = collect_segment_channel_result(
+        path,
         track_meta,
         window_sec,
         thresh_rel_db,
-        channel_mode="mono",
-    )
-    mono_result["confidence"] = analysis_confidence(
-        mono_result["cutoffs_hz"],
-        int(mono_result["windows_requested"]),
-        ANALYSIS_STRATEGY_SEGMENT,
+        headroom_hz,
+        "mono",
+        decode_channels,
+        starts,
+        segment_duration,
+        decoded_tracks=decoded_tracks,
     )
 
     series_results: list[dict[str, object]] = [mono_result]
     channel_cutoffs: dict[str, float | None] = {"mono": mono_result.get("cutoff_hz")}
+    segments_budget = int(mono_result.get("segments_budget", len(starts)))
+    segments_requested = int(mono_result.get("segments_requested", 0))
+    segments_used = int(mono_result.get("segments_used", 0))
 
     if analysis_mode == EXACT_ANALYSIS_MODE and (track_meta.channels or 0) >= 2:
-        mono_low_confidence = mono_result["confidence"] == "low"
+        mono_low_confidence = mono_result.get("decision_confidence", mono_result.get("confidence", "low")) == "low"
         if mono_low_confidence:
             for channel_mode in ("left", "right"):
-                result = analyze_cutoff_series_from_segments(
-                    segment_decodes,
+                result, decoded_tracks = collect_segment_channel_result(
+                    path,
                     track_meta,
                     window_sec,
                     thresh_rel_db,
-                    channel_mode=channel_mode,
-                )
-                result["confidence"] = analysis_confidence(
-                    result["cutoffs_hz"],
-                    int(result["windows_requested"]),
-                    ANALYSIS_STRATEGY_SEGMENT,
+                    headroom_hz,
+                    channel_mode,
+                    decode_channels,
+                    starts,
+                    segment_duration,
+                    decoded_tracks=decoded_tracks,
                 )
                 series_results.append(result)
                 channel_cutoffs[channel_mode] = result.get("cutoff_hz")
+                segments_budget = max(segments_budget, int(result.get("segments_budget", len(starts))))
+                segments_requested = max(segments_requested, int(result.get("segments_requested", 0)))
+                segments_used = max(segments_used, int(result.get("segments_used", 0)))
         else:
             channel_cutoffs["left"] = None
             channel_cutoffs["right"] = None
@@ -1068,32 +1423,45 @@ def select_track_analysis_from_segments(
         selected = max(
             valid_results,
             key=lambda result: (
-                float(result["cutoff_hz"]),
+                confidence_rank(str(result.get("decision_confidence", result.get("confidence", "low")))),
                 confidence_rank(str(result["confidence"])),
                 int(result["windows_used"]),
+                float(result["cutoff_hz"]),
             ),
         )
     else:
         selected = mono_result
 
     selected_cutoffs = [float(value) for value in selected.get("cutoffs_hz", [])]
-    return {
-        "sr": track_meta.sr,
-        "analysis_sr": track_meta.analysis_sr,
-        "dur": track_meta.dur,
-        "cutoff_hz": selected.get("cutoff_hz"),
-        "analysis_mode": analysis_mode,
-        "analysis_strategy": ANALYSIS_STRATEGY_SEGMENT,
-        "analysis_confidence": selected.get("confidence", "low"),
-        "selected_channel": selected.get("channel_mode", "mono"),
-        "windows_requested": selected.get("windows_requested", 0),
-        "windows_used": selected.get("windows_used", 0),
-        "window_cutoffs_hz": selected_cutoffs,
-        "channel_cutoffs_hz": channel_cutoffs,
-        "segments_requested": selected.get("segments_requested", len(segment_decodes)),
-        "segments_used": selected.get("segments_used", 0),
-        "decode_operations": len(segment_decodes),
-    }
+    return (
+        {
+            "sr": track_meta.sr,
+            "analysis_sr": track_meta.analysis_sr,
+            "dur": track_meta.dur,
+            "cutoff_hz": selected.get("cutoff_hz"),
+            "analysis_mode": analysis_mode,
+            "analysis_strategy": ANALYSIS_STRATEGY_SEGMENT,
+            "analysis_confidence": selected.get("decision_confidence", selected.get("confidence", "low")),
+            "statistical_confidence": selected.get("confidence", "low"),
+            "decision_confidence": selected.get("decision_confidence", selected.get("confidence", "low")),
+            "decision_reason": selected.get("decision_reason", "accepted_by_consistency"),
+            "fallback_reason": selected.get("fallback_reason"),
+            "allow_fake_upscale": bool(selected.get("allow_fake_upscale", True)),
+            "selected_channel": selected.get("channel_mode", "mono"),
+            "windows_requested": selected.get("windows_requested", 0),
+            "windows_used": selected.get("windows_used", 0),
+            "window_cutoffs_hz": selected_cutoffs,
+            "channel_cutoffs_hz": channel_cutoffs,
+            "segments_requested": segments_requested,
+            "segments_budget": segments_budget,
+            "segments_used": segments_used,
+            "segment_classifications": selected.get("segment_classifications", []),
+            "segment_classification_reasons": selected.get("segment_classification_reasons", []),
+            "consistency_ratio": selected.get("consistency_ratio"),
+            "decode_operations": len(decoded_tracks),
+        },
+        decoded_tracks,
+    )
 
 
 def cleanup_decoded_tracks(decoded_tracks: list[DecodedTrack]) -> None:
@@ -1108,11 +1476,12 @@ def decode_channels_for_mode(requested_analysis_mode: str, channels: int | None)
 
 
 def should_segment_fallback_to_full(track_analysis: dict[str, object]) -> bool:
-    return str(track_analysis.get("analysis_confidence", "low")) == "low"
+    return str(track_analysis.get("decision_confidence", track_analysis.get("analysis_confidence", "low"))) == "low"
 
 
 def analyze_track(
     path: str,
+    headroom_hz: int,
     window_sec: float,
     max_windows: int,
     thresh_rel_db: float,
@@ -1139,75 +1508,56 @@ def analyze_track(
         try:
             normalized_mode = normalize_analysis_mode(requested_analysis_mode)
             if normalized_mode == AUTO_ANALYSIS_MODE:
-                fast_decodes = prepare_segment_decodes(
+                track_analysis, fast_decodes = select_track_analysis_from_segments(
                     path,
                     track_meta,
                     window_sec,
-                    decode_channels,
-                    FAST_ANALYSIS_MODE,
-                )
-                track_analysis = select_track_analysis_from_segments(
-                    fast_decodes,
-                    track_meta,
-                    window_sec,
-                    max_windows,
                     thresh_rel_db,
+                    headroom_hz,
+                    decode_channels,
                     analysis_mode=FAST_ANALYSIS_MODE,
                 )
                 effective_analysis_mode = FAST_ANALYSIS_MODE
             elif normalized_mode == EXACT_ANALYSIS_MODE:
-                track_analysis = {"analysis_confidence": "low"}
+                track_analysis = {
+                    "analysis_confidence": "low",
+                    "decision_confidence": "low",
+                    "decision_reason": "fallback_due_to_disagreement",
+                }
             else:
-                fast_decodes = prepare_segment_decodes(
+                track_analysis, fast_decodes = select_track_analysis_from_segments(
                     path,
                     track_meta,
                     window_sec,
-                    decode_channels,
-                    FAST_ANALYSIS_MODE,
-                )
-                track_analysis = select_track_analysis_from_segments(
-                    fast_decodes,
-                    track_meta,
-                    window_sec,
-                    max_windows,
                     thresh_rel_db,
+                    headroom_hz,
+                    decode_channels,
                     analysis_mode=FAST_ANALYSIS_MODE,
                 )
                 effective_analysis_mode = FAST_ANALYSIS_MODE
 
-            if normalized_mode == AUTO_ANALYSIS_MODE and track_analysis["analysis_confidence"] == "low":
+            if normalized_mode == AUTO_ANALYSIS_MODE and track_analysis.get("decision_confidence", track_analysis["analysis_confidence"]) == "low":
                 auto_exact_fallback = True
                 effective_analysis_mode = EXACT_ANALYSIS_MODE
-                exact_decodes = prepare_segment_decodes(
+                track_analysis, exact_decodes = select_track_analysis_from_segments(
                     path,
                     track_meta,
                     window_sec,
-                    decode_channels,
-                    EXACT_ANALYSIS_MODE,
-                )
-                track_analysis = select_track_analysis_from_segments(
-                    exact_decodes,
-                    track_meta,
-                    window_sec,
-                    max_windows,
                     thresh_rel_db,
+                    headroom_hz,
+                    decode_channels,
                     analysis_mode=EXACT_ANALYSIS_MODE,
+                    decoded_tracks=fast_decodes,
                 )
             elif normalized_mode == EXACT_ANALYSIS_MODE:
                 effective_analysis_mode = EXACT_ANALYSIS_MODE
-                exact_decodes = prepare_segment_decodes(
+                track_analysis, exact_decodes = select_track_analysis_from_segments(
                     path,
                     track_meta,
                     window_sec,
-                    decode_channels,
-                    EXACT_ANALYSIS_MODE,
-                )
-                track_analysis = select_track_analysis_from_segments(
-                    exact_decodes,
-                    track_meta,
-                    window_sec,
-                    max_windows,
                     thresh_rel_db,
+                    headroom_hz,
+                    decode_channels,
                     analysis_mode=EXACT_ANALYSIS_MODE,
                 )
 
@@ -1228,7 +1578,11 @@ def analyze_track(
                     cleanup_decoded_track(full_decoded)
                 full_analysis["decode_operations"] = int(full_analysis.get("decode_operations", 0)) + len(exact_decodes or fast_decodes)
                 full_analysis["segments_requested"] = int(segment_probe_analysis.get("segments_requested", 0))
+                full_analysis["segments_budget"] = int(segment_probe_analysis.get("segments_budget", segment_probe_analysis.get("segments_requested", 0)))
                 full_analysis["segments_used"] = int(segment_probe_analysis.get("segments_used", 0))
+                full_analysis["allow_fake_upscale"] = bool(full_analysis.get("allow_fake_upscale", True)) and bool(
+                    segment_probe_analysis.get("allow_fake_upscale", True)
+                )
                 full_analysis["strategy_fallback_to_full"] = True
                 full_analysis["analysis_strategy_reason"] = strategy_reason
                 full_analysis["initial_analysis_strategy"] = strategy
@@ -1236,6 +1590,16 @@ def analyze_track(
                 full_analysis["segment_probe_analysis_confidence"] = str(
                     segment_probe_analysis.get("analysis_confidence", "low")
                 )
+                full_analysis["segment_probe_statistical_confidence"] = str(
+                    segment_probe_analysis.get("statistical_confidence", segment_probe_analysis.get("analysis_confidence", "low"))
+                )
+                full_analysis["segment_probe_decision_confidence"] = str(
+                    segment_probe_analysis.get("decision_confidence", segment_probe_analysis.get("analysis_confidence", "low"))
+                )
+                full_analysis["segment_probe_decision_reason"] = str(
+                    segment_probe_analysis.get("decision_reason", "fallback_due_to_disagreement")
+                )
+                full_analysis["segment_probe_fallback_reason"] = segment_probe_analysis.get("fallback_reason")
                 full_analysis["segment_probe_selected_channel"] = str(
                     segment_probe_analysis.get("selected_channel", "mono")
                 )
@@ -1253,10 +1617,20 @@ def analyze_track(
                 full_analysis["segment_probe_segments_requested"] = int(
                     segment_probe_analysis.get("segments_requested", 0)
                 )
+                full_analysis["segment_probe_segments_budget"] = int(
+                    segment_probe_analysis.get("segments_budget", segment_probe_analysis.get("segments_requested", 0))
+                )
                 full_analysis["segment_probe_segments_used"] = int(
                     segment_probe_analysis.get("segments_used", 0)
                 )
                 full_analysis["segment_probe_decode_operations"] = len(exact_decodes or fast_decodes)
+                full_analysis["segment_probe_consistency_ratio"] = segment_probe_analysis.get("consistency_ratio")
+                full_analysis["segment_probe_classifications"] = list(
+                    segment_probe_analysis.get("segment_classifications", [])
+                )
+                full_analysis["segment_probe_classification_reasons"] = list(
+                    segment_probe_analysis.get("segment_classification_reasons", [])
+                )
                 track_analysis = full_analysis
                 strategy_fallback_to_full = True
                 debug(f"strategy-fallback track={os.path.basename(path)} from=segment to=full")
@@ -1375,7 +1749,12 @@ def classify_family_target_sr(cutoff_hz: float | None, sr_in: float, headroom_hz
     return None
 
 
-def resolve_recode_decision(cutoff_hz: float | None, sr_in: float, headroom_hz: int) -> dict[str, object]:
+def resolve_recode_decision(
+    cutoff_hz: float | None,
+    sr_in: float,
+    headroom_hz: int,
+    decision_context: dict[str, object] | None = None,
+) -> dict[str, object]:
     source_sr = int(sr_in)
     source_family = source_family_sr(source_sr)
     standard_family = classify_standard_family_sr(cutoff_hz, source_sr, headroom_hz)
@@ -1384,9 +1763,24 @@ def resolve_recode_decision(cutoff_hz: float | None, sr_in: float, headroom_hz: 
     fake_upscale = bool(selected_target_sr is not None and source_sr > selected_target_sr)
     target_sr = int(selected_target_sr) if fake_upscale and selected_target_sr is not None else source_sr
     decision = "keep_source"
+    decision_confidence = None
+    decision_reason = None
+    fallback_reason = None
+    downgrade_guarded = False
+
+    if decision_context is not None:
+        decision_confidence = str(decision_context.get("decision_confidence", "")).strip() or None
+        decision_reason = str(decision_context.get("decision_reason", "")).strip() or None
+        fallback_reason = decision_context.get("fallback_reason")
 
     if fake_upscale:
-        decision = "downgrade_fake_upscale"
+        allow_fake_upscale = True if decision_context is None else bool(decision_context.get("allow_fake_upscale", True))
+        if allow_fake_upscale:
+            decision = "downgrade_fake_upscale"
+        else:
+            fake_upscale = False
+            target_sr = source_sr
+            downgrade_guarded = True
     else:
         ceiling_candidates = family_target_ladder_hz(source_family)
         if ceiling_candidates:
@@ -1403,6 +1797,10 @@ def resolve_recode_decision(cutoff_hz: float | None, sr_in: float, headroom_hz: 
         "fake_upscale": fake_upscale,
         "target_sr": target_sr,
         "decision": decision,
+        "decision_confidence": decision_confidence,
+        "decision_reason": decision_reason,
+        "fallback_reason": fallback_reason,
+        "downgrade_guarded": downgrade_guarded,
     }
 
 
@@ -1433,6 +1831,7 @@ def cmd_analyze(argv: list[str]) -> int:
     for path in files:
         track_meta, track_analysis, effective_analysis_mode, auto_exact_fallback = analyze_track(
             path,
+            headroom_hz,
             window_sec,
             max_windows,
             thresh_rel_db,
@@ -1447,7 +1846,7 @@ def cmd_analyze(argv: list[str]) -> int:
         cutoff = track_analysis["cutoff_hz"]
         if sr_in is None:
             continue
-        decision = resolve_recode_decision(cutoff, sr_in, headroom_hz)
+        decision = resolve_recode_decision(cutoff, sr_in, headroom_hz, track_analysis)
         tracks.append(
             {
                 "file": path,
@@ -1462,16 +1861,30 @@ def cmd_analyze(argv: list[str]) -> int:
                 "initial_analysis_strategy": track_analysis.get("initial_analysis_strategy", track_analysis.get("analysis_strategy", ANALYSIS_STRATEGY_FAST)),
                 "strategy_fallback_to_full": bool(track_analysis.get("strategy_fallback_to_full")),
                 "analysis_confidence": track_analysis["analysis_confidence"],
+                "statistical_confidence": track_analysis.get("statistical_confidence", track_analysis["analysis_confidence"]),
+                "decision_confidence": track_analysis.get("decision_confidence", track_analysis["analysis_confidence"]),
+                "decision_reason": track_analysis.get("decision_reason"),
+                "fallback_reason": track_analysis.get("fallback_reason"),
                 "selected_channel": track_analysis["selected_channel"],
                 "windows_requested": int(track_analysis["windows_requested"]),
                 "windows_used": int(track_analysis["windows_used"]),
                 "window_cutoffs_hz": track_analysis["window_cutoffs_hz"],
                 "channel_cutoffs_hz": track_analysis["channel_cutoffs_hz"],
                 "segments_requested": int(track_analysis.get("segments_requested", 0)),
+                "segments_budget": (
+                    int(track_analysis["segments_budget"]) if track_analysis.get("segments_budget") is not None else None
+                ),
                 "segments_used": int(track_analysis.get("segments_used", 0)),
+                "segment_classifications": track_analysis.get("segment_classifications"),
+                "segment_classification_reasons": track_analysis.get("segment_classification_reasons"),
+                "consistency_ratio": track_analysis.get("consistency_ratio"),
                 "decode_operations": int(track_analysis.get("decode_operations", 0)),
                 "segment_probe_analysis_mode": track_analysis.get("segment_probe_analysis_mode"),
                 "segment_probe_analysis_confidence": track_analysis.get("segment_probe_analysis_confidence"),
+                "segment_probe_statistical_confidence": track_analysis.get("segment_probe_statistical_confidence"),
+                "segment_probe_decision_confidence": track_analysis.get("segment_probe_decision_confidence"),
+                "segment_probe_decision_reason": track_analysis.get("segment_probe_decision_reason"),
+                "segment_probe_fallback_reason": track_analysis.get("segment_probe_fallback_reason"),
                 "segment_probe_selected_channel": track_analysis.get("segment_probe_selected_channel"),
                 "segment_probe_cutoff_hz": track_analysis.get("segment_probe_cutoff_hz"),
                 "segment_probe_windows_requested": (
@@ -1491,6 +1904,11 @@ def cmd_analyze(argv: list[str]) -> int:
                     if track_analysis.get("segment_probe_segments_requested") is not None
                     else None
                 ),
+                "segment_probe_segments_budget": (
+                    int(track_analysis["segment_probe_segments_budget"])
+                    if track_analysis.get("segment_probe_segments_budget") is not None
+                    else None
+                ),
                 "segment_probe_segments_used": (
                     int(track_analysis["segment_probe_segments_used"])
                     if track_analysis.get("segment_probe_segments_used") is not None
@@ -1501,6 +1919,9 @@ def cmd_analyze(argv: list[str]) -> int:
                     if track_analysis.get("segment_probe_decode_operations") is not None
                     else None
                 ),
+                "segment_probe_consistency_ratio": track_analysis.get("segment_probe_consistency_ratio"),
+                "segment_probe_classifications": track_analysis.get("segment_probe_classifications"),
+                "segment_probe_classification_reasons": track_analysis.get("segment_probe_classification_reasons"),
                 "cutoff_hz": cutoff,
                 "effective_cutoff_hz": decision["effective_cutoff_hz"],
                 "source_family_sr": decision["source_family_sr"],
@@ -1508,6 +1929,7 @@ def cmd_analyze(argv: list[str]) -> int:
                 "fake_upscale": decision["fake_upscale"],
                 "tgt_sr": decision["target_sr"],
                 "decision": decision["decision"],
+                "downgrade_guarded": decision["downgrade_guarded"],
             }
         )
 

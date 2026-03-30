@@ -70,6 +70,7 @@ Makefile       single project Makefile
 - `audlint.sh` — main entrypoint / dispatcher
 - `audlint-task.sh`, `audlint-value.sh`, `audlint-analyze.sh`, `audlint-spectre.sh`
 - `audlint-analyze-corpus.sh`
+- `audlint-dataset.sh`
 - `audlint-maintain.sh`, `audlint-doctor.sh`, `audlint-codec-probe.sh`
 - `qty_compare.sh`, `spectre.sh`
 - `sync_music.sh`
@@ -85,8 +86,8 @@ Python: `dr_grade.py`, `genre_lookup.py`, `profile_norm.py`, `rich_table.py`, `s
 
 ## Validation Baseline
 
-- `make bash5-check` — passes (`84/84`)
-- `make test` — passes: core `237` (`skipped=1`) + legacy `67`
+- `make bash5-check` — passes (`88/88`)
+- `make test` — passes: core `239` (`skipped=1`) + legacy `67`
 - `python3 -m unittest discover -s test -p 'test_*.py'` — last known pass before this refactor: `216` tests, `skipped=1`
 - `make fmt-check` — passes
 - `make lint` — passes
@@ -440,6 +441,20 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `python3 test/test_audlint_analyze_cache_smoke.py` passes
      - `make test` passes
 
+26. Dataset builder for trusted WAV sources (2026-03-30):
+   - Added `bin/audlint-dataset.sh` to build analyzer datasets from trusted WAV albums.
+   - The builder creates:
+     - bit-perfect trusted-source copies in `real/<profile>/`
+     - clean lower-profile references in `real/44100_16/` and `real/48000_24/` when they are true downsample targets
+     - lossy-to-FLAC fake-upscale buckets for MP3, AAC, and Opus variants
+     - empty `edge_cases/` placeholders for manual additions
+   - It skips existing outputs unless `--force` is provided and uses bounded ffmpeg worker parallelism.
+   - Validation:
+     - `python3 test/test_audlint_dataset_smoke.py` passes
+     - `make lint` passes
+     - `make bash5-check` passes
+     - `make test` passes
+
 ### Active
 
 1. **Post-`v1.2.0` stabilization queue**
@@ -485,6 +500,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
    - **Validation**
      - Benchmark before/after every analyzer-decision change on 2-3 representative albums, including at least one huge cue/image or WavPack case.
      - Build a labeled regression corpus covering true `44.1`, true `48`, fake `48`, fake `96/192`, sparse genuine hi-res, DSD-family examples, and misleading spectrogram exports.
+     - Use `audlint-dataset.sh` to synthesize trusted/fake seed corpora from known-good WAV albums before adding them to the corpus runner.
      - Use `audlint-analyze-corpus.sh` as the corpus runner so trusted and weak labels are tracked separately.
      - Current trusted in-library anchor is `/Volumes/Music/Hijacked` (`96000/24` genuine); the rest of the library should be treated as weak labels because it was encoded by earlier audlint versions.
      - For future trusted references, prefer external publisher/reference catalogs rather than self-labeled library output.

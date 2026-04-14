@@ -199,10 +199,12 @@ EOF
             ),
         )
 
-    def _run(self, args) -> subprocess.CompletedProcess:
+    def _run(self, args, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["NO_COLOR"] = "1"
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [str(COVER_ALBUM), *args],
             cwd=str(self.album_dir),
@@ -280,6 +282,191 @@ EOF
         self.assertIn('query=release:"Stub Album" AND artist:"Stub Artist" AND date:2001*', curl_log)
         self.assertIn("coverartarchive.org/release/rel-123/front-500", curl_log)
 
+    def test_cover_album_warns_for_small_art_without_fetch(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{ffprobe_log}"
+                args="$*"
+                input="${{@: -1}}"
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=flac
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=96000
+bits_per_raw_sample=24
+bits_per_sample=0
+sample_fmt=s32
+bit_rate=1411200
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=1411200
+TAG:album_artist=
+TAG:artist=Stub Artist
+TAG:title=Stub Title
+TAG:album=Stub Album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v -show_entries stream=index"* ]]; then
+                  printf 'index=1\\nindex=2\\n'
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v:0 -show_entries stream=codec_name,width,height"* ]]; then
+                  cat <<'EOF'
+codec_name=mjpeg
+width=250
+height=250
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
+
+                exit 0
+                """
+            ),
+        )
+        (self.album_dir / "01.flac").write_text("", encoding="utf-8")
+        (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
+
+        proc = self._run(["--yes"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((self.album_dir / "cover.jpg").exists())
+        self.assertIn("Art: WARN | cover.jpg | JPEG 250x250", proc.stdout)
+        self.assertIn("warning=preferred minimum 300px not met (250x250); re-run with --fetch-missing-art to try remote replacement", proc.stdout)
+
+    def test_cover_album_refetches_when_local_art_is_below_minimum(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{ffprobe_log}"
+                args="$*"
+                input="${{@: -1}}"
+                base="$(basename "$input")"
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=flac
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=96000
+bits_per_raw_sample=24
+bits_per_sample=0
+sample_fmt=s32
+bit_rate=1411200
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=1411200
+TAG:album_artist=
+TAG:artist=Stub Artist
+TAG:title=Stub Title
+TAG:album=Stub Album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v -show_entries stream=index"* ]]; then
+                  printf 'index=1\\nindex=2\\n'
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v:0 -show_entries stream=codec_name,width,height"* ]]; then
+                  if grep -q 'fetched-large' "$input" 2>/dev/null; then
+                    cat <<'EOF'
+codec_name=mjpeg
+width=600
+height=600
+EOF
+                  else
+                    cat <<'EOF'
+codec_name=mjpeg
+width=250
+height=250
+EOF
+                  fi
+                  exit 0
+                fi
+
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
+
+                exit 0
+                """
+            ),
+        )
+        ffmpeg_log = self.tmpdir / "ffmpeg.log"
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{ffmpeg_log}"
+                out="${{@: -1}}"
+                input=""
+                while [[ $# -gt 0 ]]; do
+                  case "${{1:-}}" in
+                    -i)
+                      shift || true
+                      input="${{1:-}}"
+                      ;;
+                  esac
+                  shift || true
+                done
+                mkdir -p "$(dirname "$out")"
+                if [[ "$input" == *"artwork_fetch_image."* ]]; then
+                  printf 'fetched-large' > "$out"
+                else
+                  printf 'local-small' > "$out"
+                fi
+                exit 0
+                """
+            ),
+        )
+        (self.album_dir / "01.flac").write_text("", encoding="utf-8")
+        (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
+
+        proc = self._run(["--yes", "--fetch-missing-art"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((self.album_dir / "cover.jpg").exists())
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+        self.assertIn("source=fetched:musicbrainz:release:rel-123", proc.stdout)
+        self.assertNotIn("Art: WARN", proc.stdout)
+
     def test_cover_album_recovers_when_atomicparsley_deletes_input_cover(self) -> None:
         (self.album_dir / "01.m4a").write_text("", encoding="utf-8")
         (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
@@ -352,11 +539,13 @@ class CoverSeekSmokeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _run(self, args) -> subprocess.CompletedProcess:
+    def _run(self, args, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["NO_COLOR"] = "1"
         env["COVER_ALBUM_BIN"] = str(self.bin_dir / "cover_album.sh")
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [str(COVER_SEEK), *args],
             cwd=str(self.root_dir),
@@ -414,6 +603,30 @@ class CoverSeekSmokeTests(unittest.TestCase):
         self.assertIn("Album-art scan complete. albums=2 ok=1 failed=1", proc.stdout)
         self.assertIn("Failed albums:", proc.stdout)
         self.assertIn("./Artist B/2002 - Album B | Art: ERROR | missing art fetch found no confident MusicBrainz match for Artist B - Album B", proc.stdout)
+
+    def test_cover_seek_forces_child_color_when_parent_color_is_enabled(self) -> None:
+        _write_exec(
+            self.bin_dir / "cover_album.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s|%s|%s\\n' "$(pwd)" "${{FORCE_COLOR:-}}" "$*" >> "{self.cover_log}"
+                printf '\\033[31mArt: ERROR | forced color works\\033[0m\\n'
+                exit 1
+                """
+            ),
+        )
+
+        album_a = self.root_dir / "Artist A" / "2001 - Album A"
+        album_a.mkdir(parents=True, exist_ok=True)
+        (album_a / "01.flac").write_text("", encoding="utf-8")
+
+        proc = self._run(["--yes"], extra_env={"NO_COLOR": "", "FORCE_COLOR": "1"})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("\x1b[31mArt: ERROR | forced color works\x1b[0m", proc.stdout)
+        self.assertIn("./Artist A/2001 - Album A | Art: ERROR | forced color works", proc.stdout)
+        self.assertIn("|1|--summary-only --cleanup-extra-sidecars --yes .", self.cover_log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

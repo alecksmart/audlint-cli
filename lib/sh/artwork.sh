@@ -21,6 +21,7 @@ fi
 
 ARTWORK_LAST_STATUS=""
 ARTWORK_LAST_ERROR=""
+ARTWORK_LAST_WARNING=""
 ARTWORK_LAST_SIDECAR=""
 ARTWORK_LAST_SOURCE=""
 ARTWORK_LAST_WIDTH=0
@@ -38,6 +39,7 @@ ARTWORK_LAST_CONFIG_FINGERPRINT=""
 artwork_reset_last_result() {
   ARTWORK_LAST_STATUS=""
   ARTWORK_LAST_ERROR=""
+  ARTWORK_LAST_WARNING=""
   ARTWORK_LAST_SIDECAR=""
   ARTWORK_LAST_SOURCE=""
   ARTWORK_LAST_WIDTH=0
@@ -67,6 +69,16 @@ artwork_fetch_missing_enabled() {
   esac
 }
 
+artwork_output_supports_color() {
+  if [[ -n "${NO_COLOR:-}" ]]; then
+    return 1
+  fi
+  case "${FORCE_COLOR:-${CLICOLOR_FORCE:-}}" in
+  1 | true | TRUE | yes | YES) return 0 ;;
+  esac
+  [[ -t 1 ]]
+}
+
 artwork_sidecar_name() {
   printf 'cover.jpg'
 }
@@ -78,6 +90,21 @@ artwork_max_dim() {
   else
     printf '600'
   fi
+}
+
+artwork_min_fetch_dim() {
+  local raw="${AUDL_ARTWORK_MIN_FETCH_DIM:-300}"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    if ((raw == 0)); then
+      printf '0'
+      return 0
+    fi
+    if ((raw >= 64)); then
+      printf '%s' "$raw"
+      return 0
+    fi
+  fi
+  printf '300'
 }
 
 artwork_jpeg_quality() {
@@ -146,6 +173,7 @@ artwork_write_cache() {
   {
     printf 'STATUS=%s\n' "$ARTWORK_LAST_STATUS"
     printf 'ERROR=%s\n' "$ARTWORK_LAST_ERROR"
+    printf 'WARNING=%s\n' "$ARTWORK_LAST_WARNING"
     printf 'SIDECAR=%s\n' "$ARTWORK_LAST_SIDECAR"
     printf 'SOURCE=%s\n' "$ARTWORK_LAST_SOURCE"
     printf 'WIDTH=%s\n' "$ARTWORK_LAST_WIDTH"
@@ -165,6 +193,7 @@ artwork_color_for_status() {
   error) printf '%s' "${RED:-}" ;;
   warn) printf '%s' "${YELLOW:-}" ;;
   dry-run) printf '%s' "${CYAN:-}" ;;
+  ok) printf '%s' "${GREEN:-}" ;;
   *) printf '%s' "${CYAN:-}" ;;
   esac
 }
@@ -190,6 +219,9 @@ artwork_status_summary_plain() {
   if [[ -n "${ARTWORK_LAST_SOURCE:-}" ]]; then
     printf ' | source=%s' "$ARTWORK_LAST_SOURCE"
   fi
+  if [[ -n "${ARTWORK_LAST_WARNING:-}" ]]; then
+    printf ' | warning=%s' "$ARTWORK_LAST_WARNING"
+  fi
   if [[ "${ARTWORK_LAST_CACHE_HIT:-0}" == "1" ]]; then
     printf ' | cached'
   elif [[ "${ARTWORK_LAST_CHANGED:-0}" == "1" ]]; then
@@ -213,6 +245,7 @@ artwork_load_last_result_from_cache() {
   artwork_reset_last_result
   ARTWORK_LAST_STATUS="$(artwork_cache_get "$album_dir" "STATUS")"
   ARTWORK_LAST_ERROR="$(artwork_cache_get "$album_dir" "ERROR")"
+  ARTWORK_LAST_WARNING="$(artwork_cache_get "$album_dir" "WARNING")"
   ARTWORK_LAST_SIDECAR="$(artwork_cache_get "$album_dir" "SIDECAR")"
   ARTWORK_LAST_SOURCE="$(artwork_cache_get "$album_dir" "SOURCE")"
   ARTWORK_LAST_WIDTH="$(artwork_cache_get "$album_dir" "WIDTH")"
@@ -306,6 +339,34 @@ artwork_probe_jpeg_dimensions() {
   return 1
 }
 
+artwork_min_dimension() {
+  local width="${1:-0}"
+  local height="${2:-0}"
+  [[ "$width" =~ ^[0-9]+$ ]] || width=0
+  [[ "$height" =~ ^[0-9]+$ ]] || height=0
+  if ((width == 0 || height == 0)); then
+    printf '0'
+  elif ((width <= height)); then
+    printf '%s' "$width"
+  else
+    printf '%s' "$height"
+  fi
+}
+
+artwork_probe_cover_dimensions() {
+  local in="$1"
+  local out_width_var="$2"
+  local out_height_var="$3"
+  local dims probed_width probed_height
+
+  dims="$(artwork_probe_jpeg_dimensions "$in" || true)"
+  IFS=$'\t' read -r probed_width probed_height <<<"$dims"
+  [[ "$probed_width" =~ ^[0-9]+$ ]] || probed_width=0
+  [[ "$probed_height" =~ ^[0-9]+$ ]] || probed_height=0
+  printf -v "$out_width_var" '%s' "$probed_width"
+  printf -v "$out_height_var" '%s' "$probed_height"
+}
+
 artwork_render_canonical_cover_from_image() {
   local image_path="$1"
   local out_path="$2"
@@ -343,8 +404,10 @@ artwork_config_fingerprint() {
   local max_dim="$1"
   local quality="$2"
   local cleanup_extra_sidecars="${3:-0}"
-  printf 'sidecar=%s|max=%s|quality=%s|cleanup_extra_sidecars=%s\n' \
-    "$(artwork_sidecar_name)" "$max_dim" "$quality" "$cleanup_extra_sidecars" | cksum | awk '{print $1 "-" $2}'
+  local fetch_missing="${4:-0}"
+  local min_fetch_dim="${5:-0}"
+  printf 'sidecar=%s|max=%s|quality=%s|cleanup_extra_sidecars=%s|fetch_missing=%s|min_fetch_dim=%s\n' \
+    "$(artwork_sidecar_name)" "$max_dim" "$quality" "$cleanup_extra_sidecars" "$fetch_missing" "$min_fetch_dim" | cksum | awk '{print $1 "-" $2}'
 }
 
 artwork_source_fingerprint() {
@@ -376,7 +439,7 @@ artwork_cache_is_current() {
   status="$(artwork_cache_get "$album_dir" "STATUS")"
   cached_src="$(artwork_cache_get "$album_dir" "SOURCE_FINGERPRINT")"
   cached_cfg="$(artwork_cache_get "$album_dir" "CONFIG_FINGERPRINT")"
-  [[ "$status" == "ok" && "$src_fp" == "$cached_src" && "$cfg_fp" == "$cached_cfg" ]]
+  [[ ("$status" == "ok" || "$status" == "warn") && "$src_fp" == "$cached_src" && "$cfg_fp" == "$cached_cfg" ]]
 }
 
 artwork_guess_album_identity() {
@@ -693,29 +756,62 @@ artwork_pick_source() {
   local max_dim="$3"
   local quality="$4"
   local fetch_missing="${5:-0}"
+  local preferred_min_dim
   local -a cover_files=()
   local -a audio_files=()
   local candidate track count
+  local local_width=0 local_height=0 local_min=0
+  local remote_width=0 remote_height=0 remote_min=0
+  local local_source="" remote_cover="" remote_source=""
+
+  preferred_min_dim="$(artwork_min_fetch_dim)"
 
   artwork_collect_coverlike_files "$album_dir" cover_files
   if ((${#cover_files[@]} > 0)); then
     candidate="${cover_files[0]}"
     if artwork_render_canonical_cover_from_image "$candidate" "$out_cover" "$max_dim" "$quality"; then
-      ARTWORK_LAST_SOURCE="sidecar:$(basename "$candidate")"
-      return 0
+      local_source="sidecar:$(basename "$candidate")"
     fi
   fi
 
-  audio_collect_files "$album_dir" audio_files
-  for track in "${audio_files[@]}"; do
-    count="$(artwork_probe_media_art_count "$track" || true)"
-    [[ "$count" =~ ^[0-9]+$ ]] || count=0
-    ((count > 0)) || continue
-    if artwork_render_canonical_cover_from_embedded "$track" "$out_cover" "$max_dim" "$quality"; then
-      ARTWORK_LAST_SOURCE="embedded:$(basename "$track")"
-      return 0
+  if [[ -z "$local_source" ]]; then
+    audio_collect_files "$album_dir" audio_files
+    for track in "${audio_files[@]}"; do
+      count="$(artwork_probe_media_art_count "$track" || true)"
+      [[ "$count" =~ ^[0-9]+$ ]] || count=0
+      ((count > 0)) || continue
+      if artwork_render_canonical_cover_from_embedded "$track" "$out_cover" "$max_dim" "$quality"; then
+        local_source="embedded:$(basename "$track")"
+        break
+      fi
+    done
+  fi
+
+  if [[ -n "$local_source" ]]; then
+    ARTWORK_LAST_SOURCE="$local_source"
+    artwork_probe_cover_dimensions "$out_cover" local_width local_height
+    local_min="$(artwork_min_dimension "$local_width" "$local_height")"
+    if [[ "$fetch_missing" == "1" && "$preferred_min_dim" =~ ^[0-9]+$ ]] \
+      && ((preferred_min_dim > 0 && local_min > 0 && local_min < preferred_min_dim)); then
+      remote_cover="$(dirname "$out_cover")/remote-cover.jpg"
+      if artwork_try_fetch_cover_from_remote "$album_dir" "$remote_cover" "$max_dim" "$quality"; then
+        remote_source="$ARTWORK_LAST_SOURCE"
+        artwork_probe_cover_dimensions "$remote_cover" remote_width remote_height
+        remote_min="$(artwork_min_dimension "$remote_width" "$remote_height")"
+        if ((remote_min > local_min)); then
+          mv -f "$remote_cover" "$out_cover"
+          ARTWORK_LAST_SOURCE="$remote_source"
+          return 0
+        fi
+        rm -f "$remote_cover"
+      else
+        rm -f "$remote_cover"
+      fi
+      ARTWORK_LAST_ERROR=""
+      ARTWORK_LAST_SOURCE="$local_source"
     fi
-  done
+    return 0
+  fi
 
   if [[ "$fetch_missing" == "1" ]]; then
     if artwork_try_fetch_cover_from_remote "$album_dir" "$out_cover" "$max_dim" "$quality"; then
@@ -859,8 +955,8 @@ artwork_standardize_album() {
   local cleanup_extra_sidecars="${3:-0}"
   local fetch_missing="${4:-0}"
   local dry_run=0
-  local max_dim quality sidecar_name canonical_cover source_fp config_fp
-  local tmp_dir normalized_cover dims width height
+  local max_dim quality sidecar_name canonical_cover source_fp config_fp min_fetch_dim
+  local tmp_dir normalized_cover width height final_min_dim
   local -a audio_files=()
   local track embed_count fail_name=""
   local remove_count=0
@@ -902,8 +998,9 @@ artwork_standardize_album() {
   canonical_cover="$album_dir/$sidecar_name"
   max_dim="$(artwork_max_dim)"
   quality="$(artwork_jpeg_quality)"
+  min_fetch_dim="$(artwork_min_fetch_dim)"
   source_fp="$(artwork_source_fingerprint "$album_dir")"
-  config_fp="$(artwork_config_fingerprint "$max_dim" "$quality" "$cleanup_extra_sidecars")"
+  config_fp="$(artwork_config_fingerprint "$max_dim" "$quality" "$cleanup_extra_sidecars" "$fetch_missing" "$min_fetch_dim")"
 
   if ((dry_run == 0)) && artwork_cache_is_current "$album_dir" "$source_fp" "$config_fp"; then
     artwork_load_last_result_from_cache "$album_dir"
@@ -936,15 +1033,22 @@ artwork_standardize_album() {
     return 1
   fi
 
-  dims="$(artwork_probe_jpeg_dimensions "$normalized_cover" || true)"
-  IFS=$'\t' read -r width height <<<"$dims"
-  [[ "$width" =~ ^[0-9]+$ ]] || width=0
-  [[ "$height" =~ ^[0-9]+$ ]] || height=0
+  artwork_probe_cover_dimensions "$normalized_cover" width height
+  final_min_dim="$(artwork_min_dimension "$width" "$height")"
   ARTWORK_LAST_WIDTH="$width"
   ARTWORK_LAST_HEIGHT="$height"
   ARTWORK_LAST_SIDECAR="$sidecar_name"
   ARTWORK_LAST_SOURCE_FINGERPRINT="$source_fp"
   ARTWORK_LAST_CONFIG_FINGERPRINT="$config_fp"
+  if [[ "$min_fetch_dim" =~ ^[0-9]+$ ]] && ((min_fetch_dim > 0 && final_min_dim > 0 && final_min_dim < min_fetch_dim)); then
+    if [[ "${ARTWORK_LAST_SOURCE:-}" == fetched:* ]]; then
+      ARTWORK_LAST_WARNING="preferred minimum ${min_fetch_dim}px not met after fetch (${width}x${height})"
+    elif [[ "$fetch_missing" == "1" ]]; then
+      ARTWORK_LAST_WARNING="preferred minimum ${min_fetch_dim}px not met (${width}x${height}); no better remote art found"
+    else
+      ARTWORK_LAST_WARNING="preferred minimum ${min_fetch_dim}px not met (${width}x${height}); re-run with --fetch-missing-art to try remote replacement"
+    fi
+  fi
 
   for track in "${audio_files[@]}"; do
     embed_count="$(artwork_probe_media_art_count "$track" || true)"
@@ -983,6 +1087,8 @@ artwork_standardize_album() {
     ARTWORK_LAST_ERROR="failed to write embedded art for ${ARTWORK_LAST_TRACKS_FAILED}/${ARTWORK_LAST_TRACKS_TOTAL} track(s); first failure=${fail_name:-unknown}"
   elif ((dry_run == 1)); then
     ARTWORK_LAST_STATUS="dry-run"
+  elif [[ -n "${ARTWORK_LAST_WARNING:-}" ]]; then
+    ARTWORK_LAST_STATUS="warn"
   else
     ARTWORK_LAST_STATUS="ok"
   fi
@@ -1021,7 +1127,11 @@ artwork_run_cover_album_postprocess() {
     args+=(--fetch-missing-art)
   fi
 
-  output="$("$cover_bin" "${args[@]}" "$album_dir" 2>&1)" || rc=$?
+  if artwork_output_supports_color; then
+    output="$(FORCE_COLOR=1 "$cover_bin" "${args[@]}" "$album_dir" 2>&1)" || rc=$?
+  else
+    output="$("$cover_bin" "${args[@]}" "$album_dir" 2>&1)" || rc=$?
+  fi
   if [[ -n "$output" ]]; then
     printf '%s\n' "$output"
   fi

@@ -102,11 +102,40 @@ echo "${BLUE}Starting Album Art Seek...${RESET}"
 echo "${BLUE}Target:${RESET} $(pwd)"
 echo "------------------------------------------------"
 
+strip_ansi_codes() {
+  local esc
+  esc=$'\033'
+  printf '%s' "${1:-}" | sed "s/${esc}\[[0-9;]*[A-Za-z]//g"
+}
+
+cover_seek_force_child_color() {
+  if [[ -n "${NO_COLOR:-}" ]]; then
+    return 1
+  fi
+  case "${FORCE_COLOR:-${CLICOLOR_FORCE:-}}" in
+  1 | true | TRUE | yes | YES) return 0 ;;
+  esac
+  [[ -t 1 ]]
+}
+
+colorize_summary_line() {
+  local line="${1:-}"
+  local color="${RESET:-}"
+  case "$line" in
+  *"Art: ERROR |"*) color="${RED:-}" ;;
+  *"Art: WARN |"*) color="${YELLOW:-}" ;;
+  *"Art: OK |"*) color="${GREEN:-}" ;;
+  *"Art: DRY-RUN |"*) color="${CYAN:-}" ;;
+  esac
+  printf '%s%s%s' "$color" "$line" "${RESET:-}"
+}
+
 extract_art_summary_from_log() {
   local log_file="$1"
   local line=""
   local art_line=""
   while IFS= read -r line; do
+    line="$(strip_ansi_codes "$line")"
     case "$line" in
     *"Art:"*)
       art_line="Art:${line#*Art:}"
@@ -131,7 +160,11 @@ run_album_if_present() {
       [[ "$DRY_RUN" == true ]] && args+=(--dry-run)
       [[ "$FETCH_MISSING_ART" == true ]] && args+=(--fetch-missing-art)
       [[ "$AUTO_YES" == true ]] && args+=(--yes)
-      "$COVER_ALBUM_BIN" "${args[@]}" . 2>&1 | tee "$output_file"
+      if cover_seek_force_child_color; then
+        FORCE_COLOR=1 "$COVER_ALBUM_BIN" "${args[@]}" . 2>&1 | tee "$output_file"
+      else
+        "$COVER_ALBUM_BIN" "${args[@]}" . 2>&1 | tee "$output_file"
+      fi
     ) || rc=$?
     art_summary="$(extract_art_summary_from_log "$output_file")"
     rm -f "$output_file"
@@ -166,7 +199,7 @@ if ((ALBUM_FAILED_COUNT > 0)); then
   echo "${YELLOW}Album-art scan complete. albums=${ALBUM_COUNT} ok=${ALBUM_OK_COUNT} failed=${ALBUM_FAILED_COUNT}${RESET}"
   echo "${YELLOW}Failed albums:${RESET}"
   for line in "${FAILED_SUMMARY_LINES[@]}"; do
-    echo "  - $line"
+    printf '  - %s\n' "$(colorize_summary_line "$line")"
   done
 else
   echo "${GREEN}Album-art scan complete. albums=${ALBUM_COUNT} ok=${ALBUM_OK_COUNT} failed=0${RESET}"

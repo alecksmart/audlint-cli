@@ -1,5 +1,7 @@
 # Local-only agent runbook and scratch dirs
 RUNBOOK.md
+AGENTS.md
+CLAUDE.md
 
 # Legacy project baseline
 .env

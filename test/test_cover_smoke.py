@@ -280,6 +280,38 @@ EOF
         self.assertIn('query=release:"Stub Album" AND artist:"Stub Artist" AND date:2001*', curl_log)
         self.assertIn("coverartarchive.org/release/rel-123/front-500", curl_log)
 
+    def test_cover_album_recovers_when_atomicparsley_deletes_input_cover(self) -> None:
+        (self.album_dir / "01.m4a").write_text("", encoding="utf-8")
+        (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
+        _write_exec(
+            self.bin_dir / "AtomicParsley",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                cover=""
+                while [[ $# -gt 0 ]]; do
+                  case "${1:-}" in
+                    --artwork)
+                      shift || true
+                      cover="${1:-}"
+                      ;;
+                  esac
+                  shift || true
+                done
+                if [[ -n "$cover" ]]; then
+                  rm -f "$cover"
+                fi
+                exit 1
+                """
+            ),
+        )
+
+        proc = self._run(["--yes", "--cleanup-extra-sidecars"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((self.album_dir / "cover.jpg").exists())
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+
     def test_cover_album_dry_run_reports_plan_without_writing(self) -> None:
         (self.album_dir / "01.flac").write_text("", encoding="utf-8")
         (self.album_dir / "cover.png").write_text("png", encoding="utf-8")

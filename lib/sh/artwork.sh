@@ -729,13 +729,18 @@ artwork_pick_source() {
 artwork_embed_cover_ffmpeg() {
   local media_path="$1"
   local cover_path="$2"
-  local ext tmp_dir tmp_file
+  local ext tmp_dir tmp_file cover_input
   ext="${media_path##*.}"
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/artwork_embed.XXXXXX" 2>/dev/null || true)"
   [[ -n "$tmp_dir" ]] || return 1
+  cover_input="$tmp_dir/cover.jpg"
   tmp_file="$tmp_dir/output.${ext}"
+  if ! cp -f "$cover_path" "$cover_input" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
   if ffmpeg -hide_banner -loglevel error -nostdin -y \
-    -i "$media_path" -i "$cover_path" \
+    -i "$media_path" -i "$cover_input" \
     -map 0:a -map_metadata 0 -map 1:v:0 \
     -c:a copy -c:v mjpeg -disposition:v:0 attached_pic \
     "$tmp_file" </dev/null; then
@@ -747,10 +752,30 @@ artwork_embed_cover_ffmpeg() {
   return 1
 }
 
+artwork_prepare_tool_cover_input() {
+  local source_cover="$1"
+  local out_dir_var="${2:-}"
+  local out_path_var="${3:-}"
+  local tmp_dir=""
+  local tmp_cover=""
+
+  [[ -n "$out_dir_var" && -n "$out_path_var" ]] || return 2
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/artwork_input.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$tmp_dir" ]] || return 1
+  tmp_cover="$tmp_dir/cover.jpg"
+  if ! cp -f "$source_cover" "$tmp_cover" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+  printf -v "$out_dir_var" '%s' "$tmp_dir"
+  printf -v "$out_path_var" '%s' "$tmp_cover"
+  return 0
+}
+
 artwork_embed_cover_for_track() {
   local media_path="$1"
   local cover_path="$2"
-  local codec ext
+  local codec ext cover_input_dir cover_input_path
 
   codec="$(audio_codec_name "$media_path" || true)"
   ext="${media_path##*.}"
@@ -759,27 +784,45 @@ artwork_embed_cover_for_track() {
   case "$codec:$ext" in
   flac:*)
     if declare -F has_bin >/dev/null 2>&1 && has_bin metaflac; then
+      if ! artwork_prepare_tool_cover_input "$cover_path" cover_input_dir cover_input_path; then
+        cover_input_dir=""
+        cover_input_path="$cover_path"
+      fi
       if metaflac --remove --block-type=PICTURE "$media_path" >/dev/null 2>&1 \
-        && metaflac --import-picture-from="$cover_path" "$media_path" >/dev/null 2>&1; then
+        && metaflac --import-picture-from="$cover_input_path" "$media_path" >/dev/null 2>&1; then
+        rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
         return 0
       fi
+      rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
     fi
     artwork_embed_cover_ffmpeg "$media_path" "$cover_path"
     ;;
   mp3:*)
     if declare -F has_bin >/dev/null 2>&1 && has_bin eyeD3; then
+      if ! artwork_prepare_tool_cover_input "$cover_path" cover_input_dir cover_input_path; then
+        cover_input_dir=""
+        cover_input_path="$cover_path"
+      fi
       eyeD3 --remove-all-images "$media_path" >/dev/null 2>&1 || true
-      if eyeD3 --add-image "$cover_path:FRONT_COVER" "$media_path" >/dev/null 2>&1; then
+      if eyeD3 --add-image "$cover_input_path:FRONT_COVER" "$media_path" >/dev/null 2>&1; then
+        rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
         return 0
       fi
+      rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
     fi
     artwork_embed_cover_ffmpeg "$media_path" "$cover_path"
     ;;
   alac:* | aac:* | *:m4a | *:mp4)
     if declare -F has_bin >/dev/null 2>&1 && has_bin AtomicParsley; then
-      if AtomicParsley "$media_path" --artwork REMOVE_ALL --artwork "$cover_path" --overWrite >/dev/null 2>&1; then
+      if ! artwork_prepare_tool_cover_input "$cover_path" cover_input_dir cover_input_path; then
+        cover_input_dir=""
+        cover_input_path="$cover_path"
+      fi
+      if AtomicParsley "$media_path" --artwork REMOVE_ALL --artwork "$cover_input_path" --overWrite >/dev/null 2>&1; then
+        rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
         return 0
       fi
+      rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
     fi
     artwork_embed_cover_ffmpeg "$media_path" "$cover_path"
     ;;

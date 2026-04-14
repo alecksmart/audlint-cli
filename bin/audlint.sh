@@ -642,6 +642,69 @@ search_clause_for_query() {
   search_clause_like_for_query "$raw"
 }
 
+browser_dash_space_compact_expr_sql() {
+  local expr="$1"
+  printf "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(%s,' ',''),'-',''),char(8208),''),char(8209),''),char(8210),''),char(8211),''),char(8212),''),char(8213),'')" "$expr"
+}
+
+browser_artist_group_expr_sql() {
+  local ref="${1:-aq}"
+  local base_expr
+  if [[ "$HAS_COL_ARTIST_NORM" == "1" ]]; then
+    base_expr="COALESCE(NULLIF(${ref}.artist_norm,''),NULLIF(${ref}.artist_lc,''),LOWER(TRIM(COALESCE(${ref}.artist,''))), '')"
+  else
+    base_expr="COALESCE(NULLIF(${ref}.artist_lc,''),LOWER(TRIM(COALESCE(${ref}.artist,''))), '')"
+  fi
+  browser_dash_space_compact_expr_sql "$base_expr"
+}
+
+browser_album_group_expr_sql() {
+  local ref="${1:-aq}"
+  if [[ "$HAS_COL_ALBUM_NORM" == "1" ]]; then
+    printf "COALESCE(NULLIF(%s.album_norm,''),NULLIF(%s.album_lc,''),LOWER(TRIM(COALESCE(%s.album,''))), '')" "$ref" "$ref" "$ref"
+  else
+    printf "COALESCE(NULLIF(%s.album_lc,''),LOWER(TRIM(COALESCE(%s.album,''))), '')" "$ref" "$ref"
+  fi
+}
+
+browser_artist_hyphen_pref_expr_sql() {
+  local ref="${1:-aq}"
+  local artist_expr
+  artist_expr="COALESCE(${ref}.artist,'')"
+  printf "CASE WHEN INSTR(%s,'-')>0 OR INSTR(%s,char(8208))>0 OR INSTR(%s,char(8209))>0 OR INSTR(%s,char(8210))>0 OR INSTR(%s,char(8211))>0 OR INSTR(%s,char(8212))>0 OR INSTR(%s,char(8213))>0 THEN 0 ELSE 1 END" \
+    "$artist_expr" "$artist_expr" "$artist_expr" "$artist_expr" "$artist_expr" "$artist_expr" "$artist_expr"
+}
+
+browser_checked_sort_expr_sql() {
+  local ref="${1:-aq}"
+  if [[ "$HAS_INDEX_CONTRACT" == "1" && "$HAS_COL_CHECKED_SORT" == "1" ]]; then
+    printf "COALESCE(%s.checked_sort,COALESCE(%s.last_checked_at,0))" "$ref" "$ref"
+  else
+    printf "COALESCE(%s.last_checked_at,0)" "$ref"
+  fi
+}
+
+browser_search_dedupe_clause_sql() {
+  local include_codec_filter="${1:-yes}"
+  local include_profile_filter="${2:-yes}"
+  local normalized_query inner_where
+  normalized_query="$(normalize_search_query "$SEARCH_QUERY")"
+  [[ -n "$normalized_query" ]] || {
+    printf ''
+    return 0
+  }
+
+  inner_where="$(build_where_sql "$include_codec_filter" "$include_profile_filter" "no")"
+  [[ -n "$inner_where" ]] || inner_where="WHERE 1=1"
+
+  printf "aq.id = (SELECT dedupe.id FROM album_quality AS dedupe %s AND %s=%s AND %s=%s AND COALESCE(dedupe.year_int,0)=COALESCE(aq.year_int,0) ORDER BY %s ASC, %s DESC, dedupe.id DESC LIMIT 1)" \
+    "$inner_where" \
+    "$(browser_artist_group_expr_sql "dedupe")" "$(browser_artist_group_expr_sql "aq")" \
+    "$(browser_album_group_expr_sql "dedupe")" "$(browser_album_group_expr_sql "aq")" \
+    "$(browser_artist_hyphen_pref_expr_sql "dedupe")" \
+    "$(browser_checked_sort_expr_sql "dedupe")"
+}
+
 style_sorted_cell() {
   local value="$1"
   local esc
@@ -943,7 +1006,7 @@ ${row_select_sql},
          COALESCE(needs_recode,0),
          COALESCE(album,''),
          COALESCE(source_path,'')
-       FROM album_quality
+       FROM album_quality AS aq
        $where_sql
        $order_sql
        $limit_sql;" 2>/dev/null || true
@@ -1124,6 +1187,7 @@ class_clause_for_value() {
 build_where_sql() {
   local include_codec_filter="${1:-yes}"
   local include_profile_filter="${2:-yes}"
+  local include_search_dedupe="${3:-yes}"
   local clauses=()
   local class_clause=""
   class_clause="$(class_clause_for_value "$CLASS_FILTER" || true)"
@@ -1196,6 +1260,13 @@ build_where_sql() {
       else
         clauses+=("LOWER(TRIM(COALESCE(current_quality,'')))='$escaped_profile'")
       fi
+    fi
+  fi
+  if [[ "$include_search_dedupe" == "yes" ]]; then
+    local search_dedupe_clause=""
+    search_dedupe_clause="$(browser_search_dedupe_clause_sql "$include_codec_filter" "$include_profile_filter")"
+    if [[ -n "$search_dedupe_clause" ]]; then
+      clauses+=("$search_dedupe_clause")
     fi
   fi
 

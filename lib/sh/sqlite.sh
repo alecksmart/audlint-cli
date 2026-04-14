@@ -180,7 +180,7 @@ album_quality_browser_stats_row() {
   sqlite3 -separator $'\t' -noheader "$db" \
     "WITH filtered AS (
        SELECT quality_grade
-       FROM album_quality
+       FROM album_quality AS aq
        $where_sql
      )
      SELECT
@@ -207,7 +207,7 @@ album_quality_inventory_rows() {
   sqlite3 -separator $'\t' -noheader "$db" \
     "WITH filtered AS (
        SELECT COALESCE(NULLIF(${key_expr},''),'~unknown') AS inventory_key
-       FROM album_quality
+       FROM album_quality AS aq
        $where_sql
      ),
      grouped AS (

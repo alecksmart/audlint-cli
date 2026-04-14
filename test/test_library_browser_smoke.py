@@ -2122,7 +2122,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
                         str(live_dir),
                         "",
                         "standard",
-                        0,
+                        1,
                         992,
                     ),
                 ]
@@ -2237,6 +2237,192 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertIn("fallback: row id=7 resolved via row id=8", transfer_text, msg=transfer_text)
         self.assertIn(f"source={live_dir}", transfer_text, msg=transfer_text)
         self.assertIn("transfer rc=0", transfer_text, msg=transfer_text)
+
+    def test_search_dedupes_hyphenated_artist_variants_across_pages(self) -> None:
+        bootstrap = self._run(["--no-interactive", "--db", str(self.db_path)])
+        self.assertEqual(bootstrap.returncode, 0, msg=bootstrap.stderr + "\n" + bootstrap.stdout)
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.executemany(
+                """
+                INSERT INTO album_quality (
+                  id, artist, artist_lc, artist_norm, album, album_lc, album_norm, year_int, quality_grade,
+                  dynamic_range_score, current_quality, bitrate, codec, codec_norm,
+                  recode_recommendation, needs_recode, needs_replacement, scan_failed,
+                  notes, rarity, last_checked_at, checked_sort
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        1,
+                        "Jean-Michel Jarre",
+                        "jean-michel jarre",
+                        "jean-michel jarre",
+                        "AERO",
+                        "aero",
+                        "aero",
+                        2004,
+                        "S",
+                        12.0,
+                        "48000/24",
+                        "1507k",
+                        "flac",
+                        "flac",
+                        "Keep as-is",
+                        0,
+                        0,
+                        0,
+                        "",
+                        0,
+                        300,
+                        300,
+                    ),
+                    (
+                        2,
+                        "Jean Michel Jarre",
+                        "jean michel jarre",
+                        "jean michel jarre",
+                        "AERO",
+                        "aero",
+                        "aero",
+                        2004,
+                        "S",
+                        12.0,
+                        "48000/24",
+                        "1507k",
+                        "flac",
+                        "flac",
+                        "Keep as-is",
+                        0,
+                        0,
+                        0,
+                        "",
+                        0,
+                        200,
+                        200,
+                    ),
+                    (
+                        3,
+                        "Jean-Michel Jarre",
+                        "jean-michel jarre",
+                        "jean-michel jarre",
+                        "Zoolook",
+                        "zoolook",
+                        "zoolook",
+                        1984,
+                        "A",
+                        11.0,
+                        "44100/24",
+                        "1411k",
+                        "flac",
+                        "flac",
+                        "Keep as-is",
+                        0,
+                        0,
+                        0,
+                        "",
+                        0,
+                        100,
+                        100,
+                    ),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        master_fd, slave_fd = pty.openpty()
+        winsz = struct.pack("HHHH", 40, 220, 0, 0)
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsz)
+        proc = subprocess.Popen(
+            [str(LIBRARY_BROWSER), "--db", str(self.db_path), "--page-size", "1", "--search", "Jean Michel Jarre"],
+            cwd=str(self.tmpdir),
+            env=self.env,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+
+        output = bytearray()
+
+        def read_until(needle: bytes, timeout_s: float = 6.0, start_idx: int = 0) -> None:
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if needle in output[start_idx:]:
+                    return
+                r, _, _ = select.select([master_fd], [], [], 0.1)
+                if not r:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError as exc:
+                    if exc.errno == errno.EIO:
+                        chunk = b""
+                    else:
+                        raise
+                if not chunk:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                output.extend(chunk)
+            raise AssertionError(
+                f"Timed out waiting for {needle!r}\nOutput:\n{output.decode('utf-8', errors='replace')}"
+            )
+
+        def render_screen_lines() -> list[str]:
+            return self._render_terminal(output.decode("utf-8", errors="replace"), columns=220, rows=40)
+
+        try:
+            read_until(b"q=quit >")
+            page_one_lines = render_screen_lines()
+            page_one_screen = "\n".join(page_one_lines)
+            page_one_album_line = next((line for line in page_one_lines if "AERO" in line), "")
+            self.assertIn("page=1/2", page_one_screen, msg=page_one_screen)
+            self.assertIn("Jean-Michel Jarre", page_one_album_line, msg=page_one_screen)
+            self.assertNotIn("Jean Michel Jarre", page_one_album_line, msg=page_one_screen)
+
+            page_two_start = len(output)
+            os.write(master_fd, b"n")
+            read_until(b"page=2/2", start_idx=page_two_start)
+            read_until(b"q=quit >", start_idx=page_two_start)
+            page_two_lines = render_screen_lines()
+            page_two_screen = "\n".join(page_two_lines)
+            page_two_album_line = next((line for line in page_two_lines if "Zoolook" in line), "")
+            self.assertIn("page=2/2", page_two_screen, msg=page_two_screen)
+            self.assertIn("Jean-Michel Jarre", page_two_album_line, msg=page_two_screen)
+            self.assertNotIn("AERO", page_two_screen, msg=page_two_screen)
+
+            os.write(master_fd, b"q")
+            read_until(b"Quit application?")
+            os.write(master_fd, b"y")
+
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and proc.poll() is None:
+                r, _, _ = select.select([master_fd], [], [], 0.1)
+                if not r:
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError as exc:
+                    if exc.errno == errno.EIO:
+                        break
+                    raise
+                if not chunk:
+                    break
+                output.extend(chunk)
+            if proc.poll() is None:
+                proc.kill()
+            rc = proc.wait(timeout=1.0)
+        finally:
+            os.close(master_fd)
+
+        clean = self._strip_ansi(output.decode("utf-8", errors="replace"))
+        self.assertEqual(rc, 0, msg=clean)
 
     def test_multi_album_recode_keeps_single_live_status_line(self) -> None:
         album1_dir = self.tmpdir / "library" / "Pink Floyd" / "1983 - The Final Cut"

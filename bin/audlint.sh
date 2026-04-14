@@ -3679,6 +3679,102 @@ transfer_year_for_source() {
   printf '%s' "$resolved_year"
 }
 
+transfer_size_included_for_file() {
+  local file_path="$1"
+  local base_name lowered
+  base_name="$(basename "$file_path")"
+  case "$base_name" in
+  .audlint_inspect_cache.json | .any2flac_truepeak_cache.tsv | .dff2flac_truepeak_cache.tsv | .sox_album_done | .sox_album_profile)
+    return 1
+    ;;
+  esac
+
+  lowered="$(lower_text "$base_name")"
+  case "$lowered" in
+  cover.jpg | cover.jpeg)
+    return 0
+    ;;
+  *.jpg | *.jpeg | *.png | *.gif | *.webp | *.bmp | *.tif | *.tiff)
+    return 1
+    ;;
+  esac
+
+  return 0
+}
+
+transfer_payload_size_bytes_for_dir() {
+  local dir_path="$1"
+  local total_bytes=0
+  local file_path file_bytes
+
+  [[ -d "$dir_path" ]] || {
+    printf '0'
+    return 0
+  }
+
+  while IFS= read -r -d '' file_path; do
+    transfer_size_included_for_file "$file_path" || continue
+    file_bytes="$(stat_size_bytes "$file_path" 2>/dev/null || true)"
+    [[ "$file_bytes" =~ ^[0-9]+$ ]] || continue
+    total_bytes=$((total_bytes + file_bytes))
+  done < <(find "$dir_path" -type f -print0 2>/dev/null)
+
+  printf '%s' "$total_bytes"
+}
+
+transfer_payload_total_size_bytes_for_manifest() {
+  local manifest_file="$1"
+  local total_bytes=0
+  local artist album year source_path dest_dir dir_bytes
+
+  [[ -f "$manifest_file" ]] || {
+    printf '0'
+    return 0
+  }
+
+  while IFS=$'\x1f' read -r artist album year source_path dest_dir; do
+    [[ -n "$source_path" ]] || continue
+    dir_bytes="$(transfer_payload_size_bytes_for_dir "$source_path" || true)"
+    [[ "$dir_bytes" =~ ^[0-9]+$ ]] || dir_bytes=0
+    total_bytes=$((total_bytes + dir_bytes))
+  done < "$manifest_file"
+
+  printf '%s' "$total_bytes"
+}
+
+transfer_human_size_label() {
+  local bytes="${1:-0}"
+  local -a units=("b" "Kb" "Mb" "Gb" "Tb")
+  local unit_idx=0
+  local unit_size=1
+  local whole frac
+
+  [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+
+  while ((bytes >= unit_size * 1024)) && ((unit_idx < ${#units[@]} - 1)); do
+    unit_size=$((unit_size * 1024))
+    unit_idx=$((unit_idx + 1))
+  done
+
+  if ((unit_idx == 0)); then
+    printf '%s%s' "$bytes" "${units[$unit_idx]}"
+    return 0
+  fi
+
+  whole=$((bytes / unit_size))
+  frac=$((((bytes % unit_size) * 10 + unit_size / 2) / unit_size))
+  if ((frac >= 10)); then
+    whole=$((whole + 1))
+    frac=0
+  fi
+
+  if ((whole >= 100 || frac == 0)); then
+    printf '%s%s' "$whole" "${units[$unit_idx]}"
+  else
+    printf '%s.%s%s' "$whole" "$frac" "${units[$unit_idx]}"
+  fi
+}
+
 run_transfer_for_row_ids() {
   local selected_ids=("$@")
   local transfer_log="${LIBRARY_BROWSER_TRANSFER_LOG:-/tmp/library_browser_transfer.last.log}"
@@ -3849,7 +3945,11 @@ run_transfer_manifest() {
   local manifest_file="$1"
   local transfer_log="$2"
   local selected_count="$3"
+  local total_size_bytes total_size_label
   local runner_script
+  total_size_bytes="$(transfer_payload_total_size_bytes_for_manifest "$manifest_file" || true)"
+  [[ "$total_size_bytes" =~ ^[0-9]+$ ]] || total_size_bytes=0
+  total_size_label="$(transfer_human_size_label "$total_size_bytes")"
   runner_script="$(mktemp "${TMPDIR:-/tmp}/library_browser_transfer.XXXXXX" 2>/dev/null || true)"
   if [[ -z "$runner_script" ]]; then
     rm -f "$manifest_file"
@@ -3867,6 +3967,7 @@ rsync_bin="$2"
 sync_bin="$3"
 player_path="$4"
 log_file="${5:-}"
+total_size_label="${6:-}"
 title_row="${VIRTWIN_TITLE_ROW:-}"
 term_cols="${VIRTWIN_TERM_COLS:-0}"
 log_note() {
@@ -3882,10 +3983,14 @@ virtwin_status_set() {
   local year="$4"
   local album="$5"
   local action="${6:-transferring...}"
+  local size_prefix=""
   [[ "$title_row" =~ ^[0-9]+$ ]] || return 0
   [[ "$term_cols" =~ ^[0-9]+$ ]] || return 0
   ((term_cols > 0)) || return 0
-  local text="${idx} of ${total} | ${artist} - ${year} - ${album} | ${action}"
+  if [[ -n "$total_size_label" ]]; then
+    size_prefix="${total_size_label} | "
+  fi
+  local text="${size_prefix}${idx} of ${total} | ${artist} - ${year} - ${album} | ${action}"
   text="${text//$'\n'/ }"
   text="${text//$'\r'/ }"
   local max_len="$term_cols"
@@ -3899,11 +4004,17 @@ virtwin_status_set() {
   ((col < 1)) && col=1
   local rendered="$text"
   if [[ -z "${NO_COLOR:-}" ]]; then
-    local part1 part2 part3
+    local part0 part1 part2 part3
+    part0="$total_size_label"
     part1="${idx} of ${total}"
     part2="${artist} - ${year} - ${album}"
     part3="${action}"
-    rendered=$'\033[1;38;2;77;163;255m'"$part1"$'\033[0m'
+    rendered=""
+    if [[ -n "$part0" ]]; then
+      rendered=$'\033[1;38;2;255;212;107m'"$part0"$'\033[0m'
+      rendered+=$'\033[1;38;2;255;177;74m | \033[0m'
+    fi
+    rendered+=$'\033[1;38;2;77;163;255m'"$part1"$'\033[0m'
     rendered+=$'\033[1;38;2;111;141;255m | \033[0m'
     rendered+=$'\033[1;38;2;142;109;245m'"$part2"$'\033[0m'
     rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
@@ -3975,6 +4086,7 @@ EOF
 
   if [[ -n "$transfer_log" ]]; then
     printf '[%s] runner=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$runner_script" >>"$transfer_log" 2>/dev/null || true
+    printf '[%s] total_size_bytes=%s total_size_label=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$total_size_bytes" "$total_size_label" >>"$transfer_log" 2>/dev/null || true
   fi
 
   local transfer_ok=0
@@ -3982,11 +4094,11 @@ EOF
   local first_title=""
   if IFS=$'\x1f' read -r first_artist first_album first_year _first_source _first_dest <"$manifest_file"; then
     if [[ -n "${first_artist:-}" ]]; then
-      first_title="1 of ${selected_count} | ${first_artist} - ${first_year} - ${first_album} | transferring..."
+      first_title="${total_size_label} | 1 of ${selected_count} | ${first_artist} - ${first_year} - ${first_album} | transferring..."
     fi
   fi
   if VIRTWIN_RIGHT_TITLE="$first_title" virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "transfer-player" \
-    "$runner_script" "$manifest_file" "$RSYNC_BIN" "$SYNC_BIN" "$MEDIA_PLAYER_PATH" "$transfer_log"; then
+    "$runner_script" "$manifest_file" "$RSYNC_BIN" "$SYNC_BIN" "$MEDIA_PLAYER_PATH" "$transfer_log" "$total_size_label"; then
     transfer_ok=1
     if [[ -n "$transfer_log" ]]; then
       printf '[%s] transfer rc=0\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$transfer_log" 2>/dev/null || true

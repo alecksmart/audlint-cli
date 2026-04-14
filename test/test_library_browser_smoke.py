@@ -1389,14 +1389,14 @@ printf 'qty_compare_stub\\n'
     def test_transfer_keeps_canonical_cover_and_excludes_other_picture_files_from_rsync(self) -> None:
         album_dir = self.tmpdir / "library" / "Dire Straits" / "1985 - Brothers In Arms"
         album_dir.mkdir(parents=True, exist_ok=True)
-        (album_dir / "01. So Far Away.flac").write_text("stub", encoding="utf-8")
-        (album_dir / ".sox_album_profile").write_text("cache", encoding="utf-8")
-        (album_dir / ".sox_album_done").write_text("done", encoding="utf-8")
-        (album_dir / ".any2flac_truepeak_cache.tsv").write_text("cache", encoding="utf-8")
-        (album_dir / ".audlint_inspect_cache.json").write_text("{}", encoding="utf-8")
-        (album_dir / "cover.jpg").write_text("jpg", encoding="utf-8")
-        (album_dir / "front.jpg").write_text("jpg", encoding="utf-8")
-        (album_dir / "cover.png").write_text("png", encoding="utf-8")
+        (album_dir / "01. So Far Away.flac").write_bytes(b"s" * 2048)
+        (album_dir / ".sox_album_profile").write_bytes(b"p" * 64)
+        (album_dir / ".sox_album_done").write_bytes(b"d" * 32)
+        (album_dir / ".any2flac_truepeak_cache.tsv").write_bytes(b"t" * 128)
+        (album_dir / ".audlint_inspect_cache.json").write_bytes(b"i" * 96)
+        (album_dir / "cover.jpg").write_bytes(b"c" * 512)
+        (album_dir / "front.jpg").write_bytes(b"f" * 1024)
+        (album_dir / "cover.png").write_bytes(b"p" * 2048)
 
         player_dir = self.tmpdir / "player"
         player_dir.mkdir(parents=True, exist_ok=True)
@@ -1516,7 +1516,16 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertTrue(sync_calls_log.exists(), msg=clean)
         self.assertIn("sync", sync_calls_log.read_text(encoding="utf-8"))
         self.assertTrue(transfer_log.exists(), msg=clean)
-        self.assertIn("transfer rc=0", transfer_log.read_text(encoding="utf-8"))
+        transfer_text = transfer_log.read_text(encoding="utf-8")
+        self.assertIn("total_size_bytes=2560 total_size_label=2.5Kb", transfer_text)
+        self.assertIn("transfer rc=0", transfer_text)
+        screen_text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+        screen_text = screen_text.replace("\x1b7", "").replace("\x1b8", "")
+        self.assertIn(
+            "2.5Kb | 1 of 1 | Dire Straits - 1985 - Brothers In Arms | transferring...",
+            screen_text,
+            msg=screen_text,
+        )
 
     def test_transfer_snapshots_visible_filtered_page_before_selection(self) -> None:
         player_dir = self.tmpdir / "player"

@@ -57,6 +57,7 @@ SEARCH_QUERY=""
 NO_COLOR="${NO_COLOR:-}"
 USE_COLOR=false
 ROW_ACTION_MODE=""
+ROW_ACTION_ROWS_RAW_SNAPSHOT=""
 QUIT_CONFIRM_MODE=0
 ACTION_MESSAGE=""
 DB_WRITABLE=true
@@ -1783,6 +1784,11 @@ row_action_prompt_for_mode() {
   esac
   selection_hint="$(row_action_selection_hint_for_mode "$1")"
   format_row_action_prompt "$action_label" "$selection_hint"
+}
+
+prime_row_action_snapshot() {
+  local rows_raw="${1-}"
+  ROW_ACTION_ROWS_RAW_SNAPSHOT="$rows_raw"
 }
 
 extract_target_profile_from_recode() {
@@ -4964,6 +4970,12 @@ while true; do
     PAGE=1
   fi
 
+  snapshot_rows_raw=""
+  if [[ -n "$ROW_ACTION_MODE" && -n "$ROW_ACTION_ROWS_RAW_SNAPSHOT" ]]; then
+    snapshot_rows_raw="$ROW_ACTION_ROWS_RAW_SNAPSHOT"
+    ROW_ACTION_ROWS_RAW_SNAPSHOT=""
+  fi
+
   rows_raw=""
   if [[ "$PENDING_NAV" == "next" || "$PENDING_NAV" == "prev" ]]; then
     if keyset_checked_enabled_for_state; then
@@ -5003,8 +5015,10 @@ while true; do
   fi
 
   offset=$(((PAGE - 1) * PAGE_SIZE))
-  if [[ -z "$rows_raw" ]]; then
-  rows_raw="$(fetch_rows_raw "$WHERE_SQL" "$ORDER_SQL" "LIMIT $PAGE_SIZE OFFSET $offset")"
+  if [[ -n "$snapshot_rows_raw" ]]; then
+    rows_raw="$snapshot_rows_raw"
+  elif [[ -z "$rows_raw" ]]; then
+    rows_raw="$(fetch_rows_raw "$WHERE_SQL" "$ORDER_SQL" "LIMIT $PAGE_SIZE OFFSET $offset")"
   fi
   rows="$(parse_rows_raw "$rows_raw")"
   rows="$(decorate_rows_for_sort_column "$rows" "$SORT_KEY")"
@@ -5360,6 +5374,7 @@ while true; do
     ;;
   r)
     if [[ "$DB_WRITABLE" == true ]]; then
+      prime_row_action_snapshot "$rows_raw"
       ROW_ACTION_MODE="mark_rarity"
     else
       ACTION_MESSAGE="DB is read-only; mutation actions are disabled."
@@ -5369,6 +5384,7 @@ while true; do
     if [[ "$DB_WRITABLE" != true ]]; then
       ACTION_MESSAGE="DB is read-only; mutation actions are disabled."
     elif [[ "$FILTER_RARITY_ONLY" == "1" ]]; then
+      prime_row_action_snapshot "$rows_raw"
       ROW_ACTION_MODE="unmark_rarity"
     else
       ACTION_MESSAGE="Unmark is available only in Rarities view."
@@ -5376,6 +5392,7 @@ while true; do
     ;;
   x)
     if [[ "$DB_WRITABLE" == true ]]; then
+      prime_row_action_snapshot "$rows_raw"
       ROW_ACTION_MODE="delete"
     else
       ACTION_MESSAGE="DB is read-only; mutation actions are disabled."
@@ -5400,6 +5417,7 @@ while true; do
     elif ! show_flac_action; then
       ACTION_MESSAGE="FLAC recode is available only in Recode view (needs_recode plus DTS replacements). Press e first."
     else
+      prime_row_action_snapshot "$rows_raw"
       ROW_ACTION_MODE="recode_flac"
     fi
     ;;
@@ -5407,6 +5425,7 @@ while true; do
     if ! show_transfer_action; then
       ACTION_MESSAGE="Transfer unavailable: AUDL_MEDIA_PLAYER_PATH is missing or not writable."
     else
+      prime_row_action_snapshot "$rows_raw"
       ROW_ACTION_MODE="transfer"
     fi
     ;;
@@ -5416,10 +5435,12 @@ while true; do
     elif ! show_lyrics_action; then
       ACTION_MESSAGE="Lyrics unavailable: lyrics_seek.sh not found ($LYRICS_SEEK_BIN)."
     else
+      prime_row_action_snapshot "$rows_raw"
       ROW_ACTION_MODE="lyrics_seek"
     fi
     ;;
   i)
+    prime_row_action_snapshot "$rows_raw"
     ROW_ACTION_MODE="album_analysis"
     ;;
   m)

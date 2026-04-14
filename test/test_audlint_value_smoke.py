@@ -114,6 +114,33 @@ EOF
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Got low confidence in fast test, running exact mode...", proc.stderr)
 
+    def test_value_surfaces_consistent_family_even_when_not_fake(self) -> None:
+        _write_exec(
+            self.bin_dir / "audlint-analyze.sh",
+            f"""\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            album_dir="${{@: -1}}"
+            cat > "$album_dir/.sox_album_profile" <<'EOF'
+TARGET_SR=96000
+TARGET_BITS=24
+ALBUM_FAKE_UPSCALE=0
+ALBUM_HAS_FAKE_UPSCALE_TRACKS=0
+ALBUM_FAMILY_SR=48000
+ALBUM_DECISION=keep_source
+EOF
+            printf '96000/24\\n'
+            """,
+        )
+
+        proc = self._run([str(self.album_dir)])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["fakeUpscale"])
+        self.assertEqual(payload["familySampleRateHz"], 48000)
+        self.assertEqual(payload["analyzeDecision"], "keep_source")
+
     def test_value_surfaces_dr14meter_failure_output(self) -> None:
         _write_exec(
             self.bin_dir / "dr14meter",

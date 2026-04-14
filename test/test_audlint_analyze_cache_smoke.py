@@ -189,7 +189,7 @@ EOF
         self.assertTrue(done_path.exists())
 
         profile_text = profile_path.read_text(encoding="utf-8")
-        self.assertIn("RULESET=v6-auto", profile_text)
+        self.assertIn("RULESET=v8-auto", profile_text)
         self.assertIn("REQUESTED_ANALYSIS_MODE=auto", profile_text)
         self.assertIn("ANALYSIS_MODE=exact", profile_text)
         self.assertIn("AUTO_EXACT_FALLBACK=1", profile_text)
@@ -210,6 +210,21 @@ EOF
         third = self._run()
         self.assertEqual(third.returncode, 0, msg=third.stderr + "\n" + third.stdout)
         self.assertEqual(third.stdout.strip(), "44100/16")
+
+    def test_cache_refresh_failure_does_not_abort_analysis(self) -> None:
+        first = self._run()
+        self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)
+
+        original_mode = self.album_dir.stat().st_mode
+        try:
+            self.album_dir.chmod(0o555)
+            second = self._run(extra_env={"AUDLINT_ANALYZE_MAX_WINDOWS": "13"})
+        finally:
+            self.album_dir.chmod(original_mode)
+
+        self.assertEqual(second.returncode, 0, msg=second.stderr + "\n" + second.stdout)
+        self.assertEqual(second.stdout.strip(), "44100/16")
+        self.assertIn("Warning: could not update analyzer cache:", second.stderr)
 
     def test_decode_timeout_falls_back_from_hanging_sox_to_ffmpeg(self) -> None:
         _write_exec(
@@ -487,7 +502,7 @@ EOF
         self.assertEqual(second.stdout.strip(), "44100/16")
 
         profile_text = (self.album_dir / ".sox_album_profile").read_text(encoding="utf-8")
-        self.assertIn("RULESET=v6-exact", profile_text)
+        self.assertIn("RULESET=v8-exact", profile_text)
         self.assertIn("REQUESTED_ANALYSIS_MODE=exact", profile_text)
         self.assertIn("ANALYSIS_MODE=exact", profile_text)
         self.assertIn("AUTO_EXACT_FALLBACK=0", profile_text)

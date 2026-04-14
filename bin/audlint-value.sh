@@ -10,7 +10,7 @@
 #   {
 #     "recodeTo":          "48000/24",   raw SR/bits from audlint-analyze
 #     "fakeUpscale":       true,         audlint-analyze fake-upscale verdict
-#     "familySampleRateHz":48000,        resolved 44.1k/48k family when fake
+#     "familySampleRateHz":48000,        resolved 44.1k/48k family when consistent
 #     "analyzeDecision":   "downgrade_fake_upscale",
 #     "drTotal":           9,            DR14 album total
 #     "grade":             "B",          mastering grade (S/A/B/C/F)
@@ -81,7 +81,7 @@ Print DR14 dynamic range + recode target analysis as JSON.
 Output fields:
   recodeTo          — target profile from spectral analysis e.g. "48000/24"
   fakeUpscale       — whether audlint-analyze marked the album as fake upscale
-  familySampleRateHz — resolved 44.1k / 48k family when fake (or null)
+  familySampleRateHz — resolved 44.1k / 48k family when tracks agree (or null)
   analyzeDecision   — audlint-analyze decision summary
   drTotal           — DR14 album total (integer)
   grade             — mastering grade: S / A / B / C / F
@@ -217,6 +217,30 @@ analyze_decision_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_DECISION" || true)
 [[ "$fake_upscale_raw" =~ ^(0|1)$ ]] || fake_upscale_raw="0"
 [[ "$has_fake_tracks_raw" =~ ^(0|1)$ ]] || has_fake_tracks_raw="0"
 [[ "$family_sr_raw" =~ ^[0-9]+$ ]] || family_sr_raw=""
+
+if [[ -z "$analyze_decision_raw" ]]; then
+  analyze_json="$("$AUDLINT_ANALYZE_BIN" --json "$ALBUM_DIR")"
+  analyze_meta="$("$PYTHON_BIN" - "$analyze_json" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+family = payload.get("album_family_sr")
+print("1" if payload.get("album_fake_upscale") else "0")
+print("1" if payload.get("album_has_fake_upscale_tracks") else "0")
+print("" if family is None else str(family))
+print(payload.get("album_decision", "keep_source"))
+PY
+  )"
+  {
+    IFS= read -r fake_upscale_json
+    IFS= read -r has_fake_tracks_json
+    IFS= read -r family_sr_json
+    IFS= read -r analyze_decision_json
+  } <<< "$analyze_meta"
+  [[ "$fake_upscale_json" =~ ^(0|1)$ ]] && fake_upscale_raw="$fake_upscale_json"
+  [[ "$has_fake_tracks_json" =~ ^(0|1)$ ]] && has_fake_tracks_raw="$has_fake_tracks_json"
+  [[ "$family_sr_json" =~ ^[0-9]+$ ]] && family_sr_raw="$family_sr_json"
+  [[ -n "$analyze_decision_json" ]] && analyze_decision_raw="$analyze_decision_json"
+fi
 
 # ── Step 2: DR14 measurement ───────────────────────────────────────────────
 tmp_out="$(mktemp -t audvalue_dr14.XXXXXX)"

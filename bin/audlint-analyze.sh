@@ -54,7 +54,7 @@ bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 deps_ensure_common_path
 
-SCRIPT_RULESET_BASE="v6"
+SCRIPT_RULESET_BASE="v8"
 HEADROOM_HZ="${AUDLINT_ANALYZE_HEADROOM_HZ:-500}"
 THRESH_REL_DB="${AUDLINT_ANALYZE_THRESH_REL_DB:--55}"
 WINDOW_SEC="${AUDLINT_ANALYZE_WINDOW_SEC:-8}"
@@ -168,6 +168,46 @@ fi
 PROFILE_FILE="$ALBUM_DIR/.sox_album_profile"
 DONE_FILE="$ALBUM_DIR/.sox_album_done"
 
+warn_cache_write_failure() {
+  local target="$1"
+  printf 'Warning: could not update analyzer cache: %s\n' "$target" >&2
+}
+
+write_profile_cache_file() {
+  local tmp_profile
+  tmp_profile="$(mktemp -t audlint_profile.XXXXXX)" || return 1
+  cat >"$tmp_profile" <<EOF
+RULESET=$SCRIPT_RULESET
+REQUESTED_ANALYSIS_MODE=$REQUESTED_ANALYSIS_MODE_EFFECTIVE
+ANALYSIS_MODE=$ANALYSIS_MODE
+AUTO_EXACT_FALLBACK=$AUTO_EXACT_FALLBACK
+ALBUM_CONFIDENCE=$ALBUM_CONFIDENCE
+TARGET_SR=$TARGET_SR
+TARGET_BITS=$TARGET_BITS
+ALBUM_FAKE_UPSCALE=$ALBUM_FAKE_UPSCALE
+ALBUM_HAS_FAKE_UPSCALE_TRACKS=$ALBUM_HAS_FAKE_UPSCALE_TRACKS
+ALBUM_FAMILY_SR=$ALBUM_FAMILY_SR
+ALBUM_DECISION=$ALBUM_DECISION
+SOURCE_FINGERPRINT=$CURRENT_SOURCE_FINGERPRINT
+CONFIG_FINGERPRINT=$CURRENT_CONFIG_FINGERPRINT
+FINGERPRINT_MODE=$FINGERPRINT_MODE
+EOF
+  if ! mv -f "$tmp_profile" "$PROFILE_FILE" 2>/dev/null; then
+    rm -f "$tmp_profile"
+    return 1
+  fi
+  return 0
+}
+
+update_done_marker_file() {
+  if album_matches_target_profile "$TARGET_SR" "$TARGET_BITS"; then
+    { : >"$DONE_FILE"; } 2>/dev/null || return 1
+  else
+    rm -f "$DONE_FILE" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
 compute_source_fingerprint() {
   "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" source-fingerprint "$ALBUM_DIR" "$FINGERPRINT_SAMPLE_BYTES" "${FILES[@]}"
 }
@@ -274,27 +314,12 @@ if [[ "$AUTO_EXACT_FALLBACK" == "1" ]]; then
   echo "Got low confidence in fast test, running exact mode..." >&2
 fi
 
-cat >"$PROFILE_FILE" <<EOF
-RULESET=$SCRIPT_RULESET
-REQUESTED_ANALYSIS_MODE=$REQUESTED_ANALYSIS_MODE_EFFECTIVE
-ANALYSIS_MODE=$ANALYSIS_MODE
-AUTO_EXACT_FALLBACK=$AUTO_EXACT_FALLBACK
-ALBUM_CONFIDENCE=$ALBUM_CONFIDENCE
-TARGET_SR=$TARGET_SR
-TARGET_BITS=$TARGET_BITS
-ALBUM_FAKE_UPSCALE=$ALBUM_FAKE_UPSCALE
-ALBUM_HAS_FAKE_UPSCALE_TRACKS=$ALBUM_HAS_FAKE_UPSCALE_TRACKS
-ALBUM_FAMILY_SR=$ALBUM_FAMILY_SR
-ALBUM_DECISION=$ALBUM_DECISION
-SOURCE_FINGERPRINT=$CURRENT_SOURCE_FINGERPRINT
-CONFIG_FINGERPRINT=$CURRENT_CONFIG_FINGERPRINT
-FINGERPRINT_MODE=$FINGERPRINT_MODE
-EOF
+if ! write_profile_cache_file; then
+  warn_cache_write_failure "$PROFILE_FILE"
+fi
 
-if album_matches_target_profile "$TARGET_SR" "$TARGET_BITS"; then
-  : > "$DONE_FILE"
-else
-  rm -f "$DONE_FILE"
+if ! update_done_marker_file; then
+  warn_cache_write_failure "$DONE_FILE"
 fi
 
 if [[ "$OUTPUT_MODE" == "json" ]]; then

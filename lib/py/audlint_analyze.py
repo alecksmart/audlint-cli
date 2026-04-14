@@ -30,6 +30,7 @@ STUDIO_48_FAMILY_SR_HZ = 48000
 CD_NYQUIST_HZ = 22050.0
 STUDIO_48_NYQUIST_HZ = 24000.0
 NEAR_48_FAMILY_RATIO = 0.88
+SAME_FAMILY_DOWNGRADE_MIN_RATIO = 0.72
 CD_FAMILY_TARGETS_HZ = (44100, 88200, 176400)
 STUDIO_48_FAMILY_TARGETS_HZ = (48000, 96000, 192000)
 EXACT_MIN_WINDOWS = 24
@@ -1703,6 +1704,17 @@ def source_family_sr(sr_in: float | int | None) -> int | None:
     return None
 
 
+def consistent_album_family_sr(tracks: list[dict[str, object]]) -> int | None:
+    families = sorted(
+        {
+            int(track["standard_family_sr"])
+            for track in tracks
+            if track.get("standard_family_sr") is not None
+        }
+    )
+    return families[0] if len(families) == 1 else None
+
+
 def effective_cutoff_hz(cutoff_hz: float | None, headroom_hz: int) -> float | None:
     if cutoff_hz is None:
         return None
@@ -1715,6 +1727,53 @@ def family_target_ladder_hz(family_sr: int | None) -> tuple[int, ...]:
     if family_sr == STUDIO_48_FAMILY_SR_HZ:
         return STUDIO_48_FAMILY_TARGETS_HZ
     return ()
+
+
+def should_guard_low_confidence_downgrade(
+    decision_confidence: str | None,
+    decision_reason: str | None,
+    fallback_reason: object | None,
+) -> bool:
+    if decision_confidence != "low":
+        return False
+    reasons = {
+        str(decision_reason or "").strip(),
+        str(fallback_reason or "").strip(),
+    }
+    return any(
+        reason in {
+            "fallback_due_to_disagreement",
+            "fallback_due_to_family_inconsistency",
+            "fallback_due_to_boundary_ambiguity",
+        }
+        for reason in reasons
+        if reason
+    )
+
+
+def should_guard_same_family_rung_downgrade(
+    effective_hz: float | None,
+    source_sr: int,
+    source_family: int | None,
+    standard_family: int | None,
+    selected_target_sr: int | None,
+) -> bool:
+    if effective_hz is None or selected_target_sr is None:
+        return False
+    if source_family is None or standard_family is None or source_family != standard_family:
+        return False
+    if selected_target_sr >= source_sr:
+        return False
+    ceiling_candidates = family_target_ladder_hz(source_family)
+    if not ceiling_candidates:
+        return False
+    family_ceiling_sr = int(ceiling_candidates[-1])
+    if source_sr > family_ceiling_sr:
+        return False
+    target_nyquist_hz = float(selected_target_sr) / 2.0
+    if target_nyquist_hz <= 0:
+        return False
+    return (float(effective_hz) / target_nyquist_hz) < SAME_FAMILY_DOWNGRADE_MIN_RATIO
 
 
 def classify_standard_family_sr(cutoff_hz: float | None, sr_in: float, headroom_hz: int) -> int | None:
@@ -1775,6 +1834,18 @@ def resolve_recode_decision(
 
     if fake_upscale:
         allow_fake_upscale = True if decision_context is None else bool(decision_context.get("allow_fake_upscale", True))
+        if should_guard_low_confidence_downgrade(decision_confidence, decision_reason, fallback_reason):
+            allow_fake_upscale = False
+            downgrade_guarded = True
+            standard_family = source_family
+            if decision_reason in {None, "", "fallback_due_to_disagreement", "fallback_due_to_family_inconsistency", "fallback_due_to_boundary_ambiguity"}:
+                decision_reason = "guard_low_confidence_downgrade"
+        elif should_guard_same_family_rung_downgrade(effective, source_sr, source_family, standard_family, selected_target_sr):
+            allow_fake_upscale = False
+            downgrade_guarded = True
+            standard_family = source_family
+            if decision_reason in {None, ""}:
+                decision_reason = "guard_same_family_midband_rolloff"
         if allow_fake_upscale:
             decision = "downgrade_fake_upscale"
         else:
@@ -1951,7 +2022,7 @@ def cmd_analyze(argv: list[str]) -> int:
     )
     album_has_fake_upscale_tracks = any(bool(track.get("fake_upscale")) for track in tracks)
     album_fake_upscale = album_has_fake_upscale_tracks
-    album_family_sr = fake_track_families[0] if len(fake_track_families) == 1 else None
+    album_family_sr = consistent_album_family_sr(tracks)
     album_decision = "keep_source"
     if any(track.get("decision") == "downgrade_fake_upscale" for track in tracks):
         album_decision = "downgrade_fake_upscale"

@@ -239,6 +239,39 @@ class AudlintAnalyzeLogicTests(unittest.TestCase):
         self.assertFalse(decision["fake_upscale"])
         self.assertEqual(decision["target_sr"], 192000)
 
+    def test_same_family_midband_rolloff_keeps_192k_source(self) -> None:
+        decision = audlint_analyze.resolve_recode_decision(
+            29898.5625,
+            192000.0,
+            500,
+            {
+                "decision_confidence": "high",
+                "decision_reason": "accepted_by_consistency",
+                "allow_fake_upscale": True,
+            },
+        )
+        self.assertEqual(decision["standard_family_sr"], 48000)
+        self.assertFalse(decision["fake_upscale"])
+        self.assertEqual(decision["target_sr"], 192000)
+        self.assertTrue(decision["downgrade_guarded"])
+
+    def test_low_confidence_large_downgrade_keeps_source_family(self) -> None:
+        decision = audlint_analyze.resolve_recode_decision(
+            4738.625,
+            192000.0,
+            500,
+            {
+                "decision_confidence": "low",
+                "decision_reason": "fallback_due_to_disagreement",
+                "fallback_reason": "fallback_due_to_disagreement",
+                "allow_fake_upscale": True,
+            },
+        )
+        self.assertEqual(decision["standard_family_sr"], 48000)
+        self.assertFalse(decision["fake_upscale"])
+        self.assertEqual(decision["target_sr"], 192000)
+        self.assertTrue(decision["downgrade_guarded"])
+
     def test_genuine_ultrahires_caps_to_192k_ceiling(self) -> None:
         decision = audlint_analyze.resolve_recode_decision(110000.0, 384000.0, 500)
         self.assertEqual(decision["source_family_sr"], 48000)
@@ -252,6 +285,24 @@ class AudlintAnalyzeLogicTests(unittest.TestCase):
         self.assertFalse(decision["fake_upscale"])
         self.assertEqual(decision["target_sr"], 176400)
         self.assertEqual(decision["decision"], "cap_highres_ceiling")
+
+    def test_consistent_album_family_sr_returns_single_family(self) -> None:
+        family = audlint_analyze.consistent_album_family_sr(
+            [
+                {"standard_family_sr": 48000, "fake_upscale": False},
+                {"standard_family_sr": 48000, "fake_upscale": False},
+            ]
+        )
+        self.assertEqual(family, 48000)
+
+    def test_consistent_album_family_sr_returns_none_for_mixed_families(self) -> None:
+        family = audlint_analyze.consistent_album_family_sr(
+            [
+                {"standard_family_sr": 44100, "fake_upscale": True},
+                {"standard_family_sr": 48000, "fake_upscale": False},
+            ]
+        )
+        self.assertIsNone(family)
 
 
 if __name__ == "__main__":

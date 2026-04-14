@@ -1527,7 +1527,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         screen_text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
         screen_text = screen_text.replace("\x1b7", "").replace("\x1b8", "")
         self.assertIn(
-            "2.5Kb | 1 of 1 | Dire Straits - 1985 - Brothers In Arms | transferring...",
+            "1 of 1 | Dire Straits - 1985 - Brothers In Arms | transferring 2.5Kb...",
             screen_text,
             msg=screen_text,
         )

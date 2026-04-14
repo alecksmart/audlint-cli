@@ -3983,14 +3983,19 @@ virtwin_status_set() {
   local year="$4"
   local album="$5"
   local action="${6:-transferring...}"
-  local size_prefix=""
+  local size_suffix=""
   [[ "$title_row" =~ ^[0-9]+$ ]] || return 0
   [[ "$term_cols" =~ ^[0-9]+$ ]] || return 0
   ((term_cols > 0)) || return 0
   if [[ -n "$total_size_label" ]]; then
-    size_prefix="${total_size_label} | "
+    size_suffix=" | transferring ${total_size_label}..."
+    action=""
   fi
-  local text="${size_prefix}${idx} of ${total} | ${artist} - ${year} - ${album} | ${action}"
+  local text="${idx} of ${total} | ${artist} - ${year} - ${album}"
+  if [[ -n "$action" ]]; then
+    text+=" | ${action}"
+  fi
+  text+="${size_suffix}"
   text="${text//$'\n'/ }"
   text="${text//$'\r'/ }"
   local max_len="$term_cols"
@@ -4004,21 +4009,21 @@ virtwin_status_set() {
   ((col < 1)) && col=1
   local rendered="$text"
   if [[ -z "${NO_COLOR:-}" ]]; then
-    local part0 part1 part2 part3
-    part0="$total_size_label"
+    local part1 part2
     part1="${idx} of ${total}"
     part2="${artist} - ${year} - ${album}"
-    part3="${action}"
     rendered=""
-    if [[ -n "$part0" ]]; then
-      rendered=$'\033[1;38;2;255;212;107m'"$part0"$'\033[0m'
-      rendered+=$'\033[1;38;2;255;177;74m | \033[0m'
-    fi
     rendered+=$'\033[1;38;2;77;163;255m'"$part1"$'\033[0m'
     rendered+=$'\033[1;38;2;111;141;255m | \033[0m'
     rendered+=$'\033[1;38;2;142;109;245m'"$part2"$'\033[0m'
-    rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
-    rendered+=$'\033[1;38;2;208;179;255m'"$part3"$'\033[0m'
+    if [[ -n "$action" ]]; then
+      rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
+      rendered+=$'\033[1;38;2;208;179;255m'"$action"$'\033[0m'
+    fi
+    if [[ -n "$size_suffix" ]]; then
+      rendered+=$'\033[1;38;2;179;140;255m | \033[0m'
+      rendered+=$'\033[1;38;2;208;179;255m'"transferring ${total_size_label}..."$'\033[0m'
+    fi
   fi
   # Use DEC save/restore here; CSI s/u leaves duplicated title rows in some
   # terminal/tab environments when live status updates are emitted.
@@ -4090,7 +4095,7 @@ EOF
   local first_title=""
   if IFS=$'\x1f' read -r first_artist first_album first_year _first_source _first_dest <"$manifest_file"; then
     if [[ -n "${first_artist:-}" ]]; then
-      first_title="${total_size_label} | 1 of ${selected_count} | ${first_artist} - ${first_year} - ${first_album} | transferring..."
+      first_title="1 of ${selected_count} | ${first_artist} - ${first_year} - ${first_album} | transferring ${total_size_label}..."
     fi
   fi
   if VIRTWIN_RIGHT_TITLE="$first_title" virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "transfer-player" \

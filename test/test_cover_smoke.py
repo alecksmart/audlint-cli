@@ -169,7 +169,7 @@ EOF
         (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
         (self.album_dir / "front.jpg").write_text("jpg", encoding="utf-8")
 
-        proc = self._run(["--yes"])
+        proc = self._run(["--yes", "--cleanup-extra-sidecars"])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertTrue((self.album_dir / "cover.jpg").exists())
         self.assertFalse((self.album_dir / "cover.png").exists())
@@ -180,6 +180,34 @@ EOF
         cache = (self.album_dir / ".audlint_album_art").read_text(encoding="utf-8")
         self.assertIn("STATUS=ok", cache)
         self.assertIn("SOURCE=sidecar:cover.png", cache)
+
+    def test_cover_album_preserves_extra_sidecars_without_cleanup_flag(self) -> None:
+        (self.album_dir / "01.flac").write_text("", encoding="utf-8")
+        (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
+        (self.album_dir / "front.jpg").write_text("jpg", encoding="utf-8")
+
+        proc = self._run(["--yes"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((self.album_dir / "cover.jpg").exists())
+        self.assertTrue((self.album_dir / "cover.png").exists())
+        self.assertTrue((self.album_dir / "front.jpg").exists())
+        self.assertIn("sidecars cleared=0", proc.stdout)
+
+    def test_cover_album_cleanup_flag_uses_distinct_cache_fingerprint(self) -> None:
+        (self.album_dir / "01.flac").write_text("", encoding="utf-8")
+        (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
+        (self.album_dir / "front.jpg").write_text("jpg", encoding="utf-8")
+
+        first = self._run(["--yes"])
+        self.assertEqual(first.returncode, 0, msg=first.stderr + "\n" + first.stdout)
+        self.assertTrue((self.album_dir / "cover.png").exists())
+        self.assertTrue((self.album_dir / "front.jpg").exists())
+
+        second = self._run(["--yes", "--cleanup-extra-sidecars"])
+        self.assertEqual(second.returncode, 0, msg=second.stderr + "\n" + second.stdout)
+        self.assertFalse((self.album_dir / "cover.png").exists())
+        self.assertFalse((self.album_dir / "front.jpg").exists())
+        self.assertIn("sidecars cleared=2", second.stdout)
 
     def test_cover_album_uses_embedded_art_when_no_sidecar_exists(self) -> None:
         (self.album_dir / "01-single.flac").write_text("", encoding="utf-8")
@@ -259,7 +287,7 @@ class CoverSeekSmokeTests(unittest.TestCase):
         self.assertTrue(self.cover_log.exists())
         lines = self.cover_log.read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(len(lines), 2)
-        self.assertTrue(all("--summary-only --dry-run --yes ." in line for line in lines), msg=lines)
+        self.assertTrue(all("--summary-only --cleanup-extra-sidecars --dry-run --yes ." in line for line in lines), msg=lines)
 
 
 if __name__ == "__main__":

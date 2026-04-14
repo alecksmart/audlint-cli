@@ -40,6 +40,7 @@ TARGET_DIR="."
 AUTO_YES=false
 DRY_RUN=false
 SUMMARY_ONLY=false
+CLEANUP_EXTRA_SIDECARS=false
 
 show_help() {
   cat <<EOF
@@ -48,18 +49,20 @@ Quick use:
   $(basename "$0") -y
   $(basename "$0") --dry-run /abs/path/to/album
 
-Usage: $(basename "$0") [TARGET_DIR] [--dry-run] [--yes] [--summary-only]
+Usage: $(basename "$0") [TARGET_DIR] [--dry-run] [--yes] [--summary-only] [--cleanup-extra-sidecars]
 
 Options:
   --dry-run       Show the normalized album-art result without writing files.
   -y, --yes       Skip confirmation prompt.
   --summary-only  Print only the final 1-line art status.
+  --cleanup-extra-sidecars
+                  Remove extra cover/folder/front sidecars after writing cover.jpg.
   -h, --help      Show this help.
 
 Behavior:
   - Picks one canonical cover source from cover/folder/front sidecars or embedded art.
   - Normalizes it to cover.jpg as a JPEG no larger than AUDL_ARTWORK_MAX_DIM.
-  - Removes extra cover-like sidecars in the album folder.
+  - Preserves extra cover-like sidecars unless --cleanup-extra-sidecars is passed.
   - Rewrites tracks so each file keeps one consistent embedded cover.
 EOF
 }
@@ -75,6 +78,9 @@ while [[ $# -gt 0 ]]; do
   --summary-only)
     SUMMARY_ONLY=true
     AUTO_YES=true
+    ;;
+  --cleanup-extra-sidecars)
+    CLEANUP_EXTRA_SIDECARS=true
     ;;
   -h | --help)
     show_help
@@ -101,7 +107,8 @@ fi
 if [[ "$SUMMARY_ONLY" != true ]]; then
   printf '%s\n' "$(ui_wrap "$BLUE" "Album Art Standardization")"
   printf 'Target: %s\n' "$TARGET_DIR"
-  printf 'Policy: %s, JPEG, max=%spx\n' "$(artwork_sidecar_name)" "$(artwork_max_dim)"
+  printf 'Policy: %s, JPEG, max=%spx, cleanup_extra_sidecars=%s\n' \
+    "$(artwork_sidecar_name)" "$(artwork_max_dim)" "$CLEANUP_EXTRA_SIDECARS"
   printf -- '-----------\n'
 fi
 
@@ -134,7 +141,12 @@ if [[ "$DRY_RUN" == true ]]; then
   mode="dry-run"
 fi
 
-if artwork_standardize_album "$TARGET_DIR" "$mode"; then
+cleanup_extra_sidecars_flag=0
+if [[ "$CLEANUP_EXTRA_SIDECARS" == true ]]; then
+  cleanup_extra_sidecars_flag=1
+fi
+
+if artwork_standardize_album "$TARGET_DIR" "$mode" "$cleanup_extra_sidecars_flag"; then
   printf '%s\n' "$(artwork_status_summary_colored)"
   exit 0
 fi

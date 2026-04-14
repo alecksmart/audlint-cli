@@ -285,7 +285,7 @@ EOF
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
         cover_log = (self.tmpdir / "cover.log").read_text(encoding="utf-8")
-        self.assertIn("--summary-only --yes", cover_log)
+        self.assertIn("--summary-only --yes --cleanup-extra-sidecars", cover_log)
 
     def test_exact_is_not_supported_in_any2flac(self) -> None:
         src = self.album_dir / "01-hr.wav"

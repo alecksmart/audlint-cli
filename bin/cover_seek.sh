@@ -58,6 +58,7 @@ Options:
 Behavior:
   - Walks subdirectories from the current directory.
   - Runs cover_album.sh for folders that contain audio files.
+  - Applies --cleanup-extra-sidecars for internal album-fix runs.
 EOF
 }
 
@@ -93,7 +94,7 @@ echo "------------------------------------------------"
 
 run_album_if_present() {
   local dir="$1"
-  local -a args=(--summary-only)
+  local -a args=(--summary-only --cleanup-extra-sidecars)
   if audio_has_files "$dir"; then
     echo -e "\n${BLUE}>>> ALBUM DETECTED: $dir${RESET}"
     (

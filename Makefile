@@ -9,6 +9,7 @@ INSTALLABLE_SCRIPTS := $(sort $(notdir $(wildcard bin/*.sh)))
 INSTALLABLE_ALIASES := \
 	auz:audlint-analyze.sh \
 	auv:audlint-value.sh \
+	aua:cover_album.sh \
 	auq:qty_compare.sh \
 	aus:audlint-spectre.sh
 LEGACY_ALIAS_TRASH := aul
@@ -22,7 +23,7 @@ SHELLCHECK_OPTS ?= -e SC2004,SC2015,SC2029,SC2034,SC2162,SC2178,SC2181,SC2221,SC
 help:
 	@printf "%s\n" \
 		"Targets:" \
-		"  install      Symlink bin/*.sh scripts + aliases (auz/auv/auq/aus) into PREFIX ($(PREFIX))" \
+		"  install      Symlink bin/*.sh scripts + aliases (auz/auv/aua/auq/aus) into PREFIX ($(PREFIX))" \
 		"  uninstall    Remove installed script + alias symlinks from PREFIX ($(PREFIX))" \
 		"  relink       Recreate symlinks in PREFIX" \
 		"  install-env  Generate .env via install.sh" \

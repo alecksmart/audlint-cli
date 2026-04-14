@@ -135,6 +135,7 @@ Optional development tools:
 Installed convenience aliases:
 - `auz` -> `audlint-analyze.sh`
 - `auv` -> `audlint-value.sh`
+- `aua` -> `cover_album.sh`
 - `auq` -> `qty_compare.sh`
 - `aus` -> `audlint-spectre.sh`
 

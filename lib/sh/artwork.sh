@@ -323,7 +323,9 @@ artwork_render_canonical_cover_from_embedded() {
 artwork_config_fingerprint() {
   local max_dim="$1"
   local quality="$2"
-  printf 'sidecar=%s|max=%s|quality=%s\n' "$(artwork_sidecar_name)" "$max_dim" "$quality" | cksum | awk '{print $1 "-" $2}'
+  local cleanup_extra_sidecars="${3:-0}"
+  printf 'sidecar=%s|max=%s|quality=%s|cleanup_extra_sidecars=%s\n' \
+    "$(artwork_sidecar_name)" "$max_dim" "$quality" "$cleanup_extra_sidecars" | cksum | awk '{print $1 "-" $2}'
 }
 
 artwork_source_fingerprint() {
@@ -477,6 +479,7 @@ artwork_remove_extra_sidecars() {
 artwork_standardize_album() {
   local album_dir="$1"
   local mode="${2:-apply}"
+  local cleanup_extra_sidecars="${3:-0}"
   local dry_run=0
   local max_dim quality sidecar_name canonical_cover source_fp config_fp
   local tmp_dir normalized_cover dims width height
@@ -522,7 +525,7 @@ artwork_standardize_album() {
   max_dim="$(artwork_max_dim)"
   quality="$(artwork_jpeg_quality)"
   source_fp="$(artwork_source_fingerprint "$album_dir")"
-  config_fp="$(artwork_config_fingerprint "$max_dim" "$quality")"
+  config_fp="$(artwork_config_fingerprint "$max_dim" "$quality" "$cleanup_extra_sidecars")"
 
   if ((dry_run == 0)) && artwork_cache_is_current "$album_dir" "$source_fp" "$config_fp"; then
     artwork_load_last_result_from_cache "$album_dir"
@@ -577,9 +580,11 @@ artwork_standardize_album() {
     [[ -z "$fail_name" ]] && fail_name="$(basename "$track")"
   done
 
-  remove_count="$(artwork_remove_extra_sidecars "$album_dir" "$canonical_cover" "$dry_run")"
-  [[ "$remove_count" =~ ^[0-9]+$ ]] || remove_count=0
-  ARTWORK_LAST_EXTRA_SIDECARS_CLEARED="$remove_count"
+  if [[ "$cleanup_extra_sidecars" == "1" ]]; then
+    remove_count="$(artwork_remove_extra_sidecars "$album_dir" "$canonical_cover" "$dry_run")"
+    [[ "$remove_count" =~ ^[0-9]+$ ]] || remove_count=0
+    ARTWORK_LAST_EXTRA_SIDECARS_CLEARED="$remove_count"
+  fi
 
   if ((dry_run == 0)); then
     mkdir -p "$album_dir"
@@ -611,7 +616,7 @@ artwork_run_cover_album_postprocess() {
   local default_bin="${2:-}"
   local dry_run="${3:-0}"
   local cover_bin="${AUDLINT_COVER_ALBUM_BIN:-${COVER_ALBUM_BIN:-$default_bin}}"
-  local -a args=(--summary-only --yes)
+  local -a args=(--summary-only --yes --cleanup-extra-sidecars)
   local output=""
   local rc=0
 

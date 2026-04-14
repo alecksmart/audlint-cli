@@ -177,7 +177,7 @@ From the main browser, press `[m]` to open **Maintenance**.
 
 - Manual reads: choose `[m] Run Maintenance` to run one `audlint-task.sh` pass immediately and append the scan output to the task log.
 - Scheduled reads: choose `[i] Install Cron` to install a managed crontab entry that runs the same task automatically on your configured interval.
-- Album art cleanup: choose `[a] Album Art` inside Maintenance for a walkthrough that normalizes each album to one canonical `cover.jpg`, clears duplicate embedded pictures, rewrites a consistent cover across tracks (including proper Ogg/Opus picture tags when `vorbiscomment` is installed), auto-fetches missing art when none exists locally, and ends long batch runs with a failed-albums summary.
+- Album art cleanup: choose `[a] Album Art` inside Maintenance for a walkthrough that normalizes each album to one canonical `cover.jpg`, clears duplicate embedded pictures, rewrites a consistent cover across tracks (including proper Ogg/Vorbis tags via `vorbiscomment` and Opus tags via `opustags` when available), auto-fetches missing art when none exists locally, and ends long batch runs with a failed-albums summary.
 
 This is how the browser keeps its library state fresh: either by on-demand maintenance runs, or by letting cron refresh the scan queue in the background.
 If `AUDL_PARANOIA_MODE=1`, audlint also requires a backup path and snapshots an album's track files there before destructive write operations.

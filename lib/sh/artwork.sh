@@ -987,6 +987,25 @@ artwork_embed_cover_vorbiscomment() {
   return 1
 }
 
+artwork_embed_cover_opustags() {
+  local media_path="$1"
+  local cover_path="$2"
+  local cover_input_dir cover_input_path
+
+  if ! artwork_prepare_tool_cover_input "$cover_path" cover_input_dir cover_input_path; then
+    cover_input_dir=""
+    cover_input_path="$cover_path"
+  fi
+
+  if opustags -i --set-cover "$cover_input_path" "$media_path" >/dev/null 2>&1; then
+    rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
+  return 1
+}
+
 artwork_prepare_tool_cover_input() {
   local source_cover="$1"
   local out_dir_var="${2:-}"
@@ -1047,15 +1066,26 @@ artwork_embed_cover_for_track() {
     fi
     artwork_embed_cover_ffmpeg "$media_path" "$cover_path"
     ;;
-  opus:* | vorbis:* | *:ogg | *:opus)
+  opus:*)
+    if declare -F has_bin >/dev/null 2>&1 && has_bin opustags; then
+      if artwork_embed_cover_opustags "$media_path" "$cover_path"; then
+        return 0
+      fi
+      ARTWORK_LAST_ERROR="opustags failed to write Opus artwork"
+      return 1
+    fi
+    ARTWORK_LAST_ERROR="opustags not found (required for Opus artwork embedding)"
+    return 1
+    ;;
+  vorbis:* | *:ogg)
     if declare -F has_bin >/dev/null 2>&1 && has_bin vorbiscomment; then
       if artwork_embed_cover_vorbiscomment "$media_path" "$cover_path"; then
         return 0
       fi
-      ARTWORK_LAST_ERROR="vorbiscomment failed to write Ogg/Opus artwork"
+      ARTWORK_LAST_ERROR="vorbiscomment failed to write Ogg/Vorbis artwork"
       return 1
     fi
-    ARTWORK_LAST_ERROR="vorbiscomment not found (required for Ogg/Opus artwork embedding)"
+    ARTWORK_LAST_ERROR="vorbiscomment not found (required for Ogg/Vorbis artwork embedding)"
     return 1
     ;;
   alac:* | aac:* | *:m4a | *:mp4)

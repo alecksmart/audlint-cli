@@ -732,7 +732,7 @@ EOF
         self.assertTrue((self.album_dir / "cover.jpg").exists())
         self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
 
-    def test_cover_album_embeds_opus_art_via_vorbiscomment_picture_tag(self) -> None:
+    def test_cover_album_embeds_opus_art_via_opustags(self) -> None:
         ffprobe_log = self.tmpdir / "ffprobe.log"
         _write_exec(
             self.bin_dir / "ffprobe",
@@ -821,32 +821,15 @@ EOF
                 """
             ),
         )
-        vorbis_log = self.tmpdir / "vorbiscomment.log"
-        vorbis_stdin = self.tmpdir / "vorbiscomment.stdin"
+        opustags_log = self.tmpdir / "opustags.log"
         _write_exec(
-            self.bin_dir / "vorbiscomment",
+            self.bin_dir / "opustags",
             textwrap.dedent(
                 f"""\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                printf '%s\\n' "$*" >> "{vorbis_log}"
-                if [[ "${{1:-}}" == "-l" ]]; then
-                  cat <<'EOF'
-TITLE=Stub Title
-METADATA_BLOCK_PICTURE=old-picture
-COVERART=legacy-cover
-COVERARTMIME=image/jpeg
-ALBUM=Stub Album
-EOF
-                  exit 0
-                fi
-                if [[ "${{1:-}}" == "-w" ]]; then
-                  out="${{@: -1}}"
-                  cat > "{vorbis_stdin}"
-                  : > "$out"
-                  exit 0
-                fi
-                exit 1
+                printf '%s\\n' "$*" >> "{opustags_log}"
+                exit 0
                 """
             ),
         )
@@ -857,17 +840,13 @@ EOF
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertTrue((self.album_dir / "cover.jpg").exists())
         self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
-        self.assertTrue(vorbis_stdin.exists())
-        tag_lines = vorbis_stdin.read_text(encoding="utf-8").splitlines()
-        picture_lines = [line for line in tag_lines if line.startswith("METADATA_BLOCK_PICTURE=")]
-        self.assertEqual(len(picture_lines), 1, msg=tag_lines)
-        self.assertNotIn("METADATA_BLOCK_PICTURE=old-picture", tag_lines)
-        self.assertTrue(all(not line.startswith("COVERART=") for line in tag_lines), msg=tag_lines)
-        self.assertTrue(all(not line.startswith("COVERARTMIME=") for line in tag_lines), msg=tag_lines)
+        opustags_args = (self.tmpdir / "opustags.log").read_text(encoding="utf-8")
+        self.assertIn("-i --set-cover", opustags_args)
+        self.assertIn("cover.jpg", opustags_args)
         ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
         self.assertNotIn("attached_pic", ffmpeg_log)
 
-    def test_cover_album_reports_missing_vorbiscomment_for_opus_artwork(self) -> None:
+    def test_cover_album_reports_missing_opustags_for_opus_artwork(self) -> None:
         ffprobe_log = self.tmpdir / "ffprobe.log"
         _write_exec(
             self.bin_dir / "ffprobe",
@@ -943,10 +922,13 @@ EOF
         (self.album_dir / "01-noart.opus").write_text("", encoding="utf-8")
         (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
 
-        proc = self._run(["--yes", "--cleanup-extra-sidecars"])
+        proc = self._run(
+            ["--yes", "--cleanup-extra-sidecars"],
+            extra_env={"PATH": f"{self.bin_dir}{os.pathsep}/opt/homebrew/bin:/usr/bin:/bin"},
+        )
         self.assertNotEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertTrue((self.album_dir / "cover.jpg").exists())
-        self.assertIn("vorbiscomment not found (required for Ogg/Opus artwork embedding)", proc.stdout)
+        self.assertIn("opustags not found (required for Opus artwork embedding)", proc.stdout)
         ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
         self.assertNotIn("attached_pic", ffmpeg_log)
 

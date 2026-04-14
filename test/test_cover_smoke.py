@@ -867,6 +867,89 @@ EOF
         ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
         self.assertNotIn("attached_pic", ffmpeg_log)
 
+    def test_cover_album_reports_missing_vorbiscomment_for_opus_artwork(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{ffprobe_log}"
+                args="$*"
+                input="${{@: -1}}"
+                base="$(basename "$input")"
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=opus
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=48000
+bits_per_raw_sample=0
+bits_per_sample=0
+sample_fmt=fltp
+bit_rate=192000
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=192000
+TAG:album_artist=
+TAG:artist=Stub Artist
+TAG:title=Stub Title
+TAG:album=Stub Album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v -show_entries stream=index"* ]]; then
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v:0 -show_entries stream=codec_name,width,height"* ]]; then
+                  case "$base" in
+                    cover.jpg ) cat <<'EOF'
+codec_name=mjpeg
+width=600
+height=600
+EOF
+                      ;;
+                    *.png ) cat <<'EOF'
+codec_name=png
+width=1400
+height=1400
+EOF
+                      ;;
+                  esac
+                  exit 0
+                fi
+
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "opus"
+                  exit 0
+                fi
+
+                exit 0
+                """
+            ),
+        )
+        (self.album_dir / "01-noart.opus").write_text("", encoding="utf-8")
+        (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
+
+        proc = self._run(["--yes", "--cleanup-extra-sidecars"])
+        self.assertNotEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((self.album_dir / "cover.jpg").exists())
+        self.assertIn("vorbiscomment not found (required for Ogg/Opus artwork embedding)", proc.stdout)
+        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
+        self.assertNotIn("attached_pic", ffmpeg_log)
+
     def test_cover_album_dry_run_reports_plan_without_writing(self) -> None:
         (self.album_dir / "01.flac").write_text("", encoding="utf-8")
         (self.album_dir / "cover.png").write_text("png", encoding="utf-8")

@@ -1052,8 +1052,11 @@ artwork_embed_cover_for_track() {
       if artwork_embed_cover_vorbiscomment "$media_path" "$cover_path"; then
         return 0
       fi
+      ARTWORK_LAST_ERROR="vorbiscomment failed to write Ogg/Opus artwork"
+      return 1
     fi
-    artwork_embed_cover_ffmpeg "$media_path" "$cover_path"
+    ARTWORK_LAST_ERROR="vorbiscomment not found (required for Ogg/Opus artwork embedding)"
+    return 1
     ;;
   alac:* | aac:* | *:m4a | *:mp4)
     if declare -F has_bin >/dev/null 2>&1 && has_bin AtomicParsley; then
@@ -1105,7 +1108,7 @@ artwork_standardize_album() {
   local max_dim quality sidecar_name canonical_cover source_fp config_fp min_fetch_dim
   local tmp_dir normalized_cover width height final_min_dim
   local -a audio_files=()
-  local track embed_count fail_name=""
+  local track embed_count fail_name="" fail_reason=""
   local remove_count=0
 
   artwork_reset_last_result
@@ -1197,6 +1200,7 @@ artwork_standardize_album() {
     fi
   fi
 
+  ARTWORK_LAST_ERROR=""
   for track in "${audio_files[@]}"; do
     embed_count="$(artwork_probe_media_art_count "$track" || true)"
     [[ "$embed_count" =~ ^[0-9]+$ ]] || embed_count=0
@@ -1207,12 +1211,14 @@ artwork_standardize_album() {
       ARTWORK_LAST_TRACKS_OK=$((ARTWORK_LAST_TRACKS_OK + 1))
       continue
     fi
+    ARTWORK_LAST_ERROR=""
     if artwork_embed_cover_for_track "$track" "$normalized_cover"; then
       ARTWORK_LAST_TRACKS_OK=$((ARTWORK_LAST_TRACKS_OK + 1))
       continue
     fi
     ARTWORK_LAST_TRACKS_FAILED=$((ARTWORK_LAST_TRACKS_FAILED + 1))
     [[ -z "$fail_name" ]] && fail_name="$(basename "$track")"
+    [[ -z "$fail_reason" && -n "${ARTWORK_LAST_ERROR:-}" ]] && fail_reason="$ARTWORK_LAST_ERROR"
   done
 
   if [[ "$cleanup_extra_sidecars" == "1" ]]; then
@@ -1232,6 +1238,9 @@ artwork_standardize_album() {
   if ((ARTWORK_LAST_TRACKS_FAILED > 0)); then
     ARTWORK_LAST_STATUS="error"
     ARTWORK_LAST_ERROR="failed to write embedded art for ${ARTWORK_LAST_TRACKS_FAILED}/${ARTWORK_LAST_TRACKS_TOTAL} track(s); first failure=${fail_name:-unknown}"
+    if [[ -n "$fail_reason" ]]; then
+      ARTWORK_LAST_ERROR="${ARTWORK_LAST_ERROR}; ${fail_reason}"
+    fi
   elif ((dry_run == 1)); then
     ARTWORK_LAST_STATUS="dry-run"
   elif [[ -n "${ARTWORK_LAST_WARNING:-}" ]]; then

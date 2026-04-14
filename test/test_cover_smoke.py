@@ -379,10 +379,41 @@ class CoverSeekSmokeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Starting Album Art Seek", proc.stdout)
         self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+        self.assertIn("Album-art scan complete. albums=2 ok=2 failed=0", proc.stdout)
         self.assertTrue(self.cover_log.exists())
         lines = self.cover_log.read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(len(lines), 2)
         self.assertTrue(all("--summary-only --cleanup-extra-sidecars --dry-run --yes ." in line for line in lines), msg=lines)
+
+    def test_cover_seek_prints_failed_summary_at_end(self) -> None:
+        _write_exec(
+            self.bin_dir / "cover_album.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s|%s\\n' "$(pwd)" "$*" >> "{self.cover_log}"
+                if [[ "$(pwd)" == *"Album B" ]]; then
+                  printf 'Art: ERROR | missing art fetch found no confident MusicBrainz match for Artist B - Album B\\n'
+                  exit 1
+                fi
+                printf 'Art: OK | cover.jpg | JPEG 600x600 | embedded 1/1 | sidecars cleared=0 | extra embeds cleared=0\\n'
+                """
+            ),
+        )
+
+        album_a = self.root_dir / "Artist A" / "2001 - Album A"
+        album_b = self.root_dir / "Artist B" / "2002 - Album B"
+        album_a.mkdir(parents=True, exist_ok=True)
+        album_b.mkdir(parents=True, exist_ok=True)
+        (album_a / "01.flac").write_text("", encoding="utf-8")
+        (album_b / "01.flac").write_text("", encoding="utf-8")
+
+        proc = self._run(["--yes", "--fetch-missing-art"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Album-art scan complete. albums=2 ok=1 failed=1", proc.stdout)
+        self.assertIn("Failed albums:", proc.stdout)
+        self.assertIn("./Artist B/2002 - Album B | Art: ERROR | missing art fetch found no confident MusicBrainz match for Artist B - Album B", proc.stdout)
 
 
 if __name__ == "__main__":

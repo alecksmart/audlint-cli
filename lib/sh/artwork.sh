@@ -634,7 +634,7 @@ artwork_try_fetch_cover_from_remote() {
       --data "fmt=json" \
       --data "limit=10" \
       -o "$search_json" \
-      "https://musicbrainz.org/ws/2/release"; then
+      "https://musicbrainz.org/ws/2/release" 2>/dev/null; then
       continue
     fi
     if IFS=$'\t' read -r release_id release_group_id matched_title matched_artist matched_year matched_score < <(
@@ -657,7 +657,7 @@ artwork_try_fetch_cover_from_remote() {
     "https://coverartarchive.org/release/${release_id}/front"; do
     fetched_image="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_image.XXXXXX" 2>/dev/null || true)"
     [[ -n "$fetched_image" ]] || continue
-    if curl -fsSL -A "$user_agent" -L -o "$fetched_image" "$candidate_url" \
+    if curl -fsSL -A "$user_agent" -L -o "$fetched_image" "$candidate_url" 2>/dev/null \
       && artwork_render_canonical_cover_from_image "$fetched_image" "$out_cover" "$max_dim" "$quality"; then
       rm -f "$search_json" "$fetched_image"
       ARTWORK_LAST_SOURCE="fetched:musicbrainz:release:${release_id}"
@@ -672,7 +672,7 @@ artwork_try_fetch_cover_from_remote() {
       "https://coverartarchive.org/release-group/${release_group_id}/front"; do
       fetched_image="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_image.XXXXXX" 2>/dev/null || true)"
       [[ -n "$fetched_image" ]] || continue
-      if curl -fsSL -A "$user_agent" -L -o "$fetched_image" "$candidate_url" \
+      if curl -fsSL -A "$user_agent" -L -o "$fetched_image" "$candidate_url" 2>/dev/null \
         && artwork_render_canonical_cover_from_image "$fetched_image" "$out_cover" "$max_dim" "$quality"; then
         rm -f "$search_json" "$fetched_image"
         ARTWORK_LAST_SOURCE="fetched:musicbrainz:release-group:${release_group_id}"

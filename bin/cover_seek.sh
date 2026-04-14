@@ -8,6 +8,10 @@ trap 'printf "\n\n[!] Cover seeker terminated by user.\n"; exit 1' INT
 AUTO_YES=false
 DRY_RUN=false
 FETCH_MISSING_ART=false
+ALBUM_COUNT=0
+ALBUM_OK_COUNT=0
+ALBUM_FAILED_COUNT=0
+declare -a FAILED_SUMMARY_LINES=()
 
 BOOTSTRAP_SOURCE="${BASH_SOURCE[0]}"
 if command -v realpath >/dev/null 2>&1; then
@@ -98,19 +102,47 @@ echo "${BLUE}Starting Album Art Seek...${RESET}"
 echo "${BLUE}Target:${RESET} $(pwd)"
 echo "------------------------------------------------"
 
+extract_art_summary_from_log() {
+  local log_file="$1"
+  local line=""
+  local art_line=""
+  while IFS= read -r line; do
+    case "$line" in
+    *"Art:"*)
+      art_line="Art:${line#*Art:}"
+      ;;
+    esac
+  done <"$log_file"
+  printf '%s' "$art_line"
+}
+
 run_album_if_present() {
   local dir="$1"
   local -a args=(--summary-only --cleanup-extra-sidecars)
+  local output_file=""
+  local rc=0
+  local art_summary=""
   if audio_has_files "$dir"; then
+    ALBUM_COUNT=$((ALBUM_COUNT + 1))
     echo -e "\n${BLUE}>>> ALBUM DETECTED: $dir${RESET}"
+    output_file="$(mktemp "${TMPDIR:-/tmp}/cover_seek_album.XXXXXX" 2>/dev/null || true)"
     (
       cd "$dir" || exit 2
       [[ "$DRY_RUN" == true ]] && args+=(--dry-run)
       [[ "$FETCH_MISSING_ART" == true ]] && args+=(--fetch-missing-art)
       [[ "$AUTO_YES" == true ]] && args+=(--yes)
-      "$COVER_ALBUM_BIN" "${args[@]}" .
-    )
-    return $?
+      "$COVER_ALBUM_BIN" "${args[@]}" . 2>&1 | tee "$output_file"
+    ) || rc=$?
+    art_summary="$(extract_art_summary_from_log "$output_file")"
+    rm -f "$output_file"
+    if ((rc == 0)); then
+      ALBUM_OK_COUNT=$((ALBUM_OK_COUNT + 1))
+    else
+      ALBUM_FAILED_COUNT=$((ALBUM_FAILED_COUNT + 1))
+      [[ -n "$art_summary" ]] || art_summary="Art: ERROR | album processing failed"
+      FAILED_SUMMARY_LINES+=("$dir | $art_summary")
+    fi
+    return "$rc"
   fi
   return 1
 }
@@ -130,4 +162,12 @@ if ! seek_walk_dirs "." walk_dir "before-recode"; then
 fi
 
 echo -e "\n------------------------------------------------"
-echo "${GREEN}Album-art scan complete.${RESET}"
+if ((ALBUM_FAILED_COUNT > 0)); then
+  echo "${YELLOW}Album-art scan complete. albums=${ALBUM_COUNT} ok=${ALBUM_OK_COUNT} failed=${ALBUM_FAILED_COUNT}${RESET}"
+  echo "${YELLOW}Failed albums:${RESET}"
+  for line in "${FAILED_SUMMARY_LINES[@]}"; do
+    echo "  - $line"
+  done
+else
+  echo "${GREEN}Album-art scan complete. albums=${ALBUM_COUNT} ok=${ALBUM_OK_COUNT} failed=0${RESET}"
+fi

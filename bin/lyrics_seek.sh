@@ -80,6 +80,8 @@ echo "${BLUE}Starting Lyrics Seek...${RESET}"
 echo "${BLUE}Target:${RESET} $(pwd)"
 echo "------------------------------------------------"
 
+ALBUM_FAILURES=0
+
 run_album_if_present() {
   local dir="$1"
   if audio_has_files "$dir"; then
@@ -97,6 +99,9 @@ run_album_if_present() {
     if [[ $RESULT -gt 128 ]]; then
       echo -e "\n${YELLOW}Stopping Seeker.${RESET}"
       return "$RESULT"
+    fi
+    if [[ $RESULT -ne 0 ]]; then
+      ALBUM_FAILURES=$((ALBUM_FAILURES + 1))
     fi
     return 0
   fi
@@ -120,4 +125,8 @@ if ! seek_walk_dirs "." walk_dir "before-recode"; then
 fi
 
 echo -e "\n------------------------------------------------"
+if ((ALBUM_FAILURES > 0)); then
+  echo "${YELLOW}Lyrics scan complete with failures.${RESET}"
+  exit 1
+fi
 echo "${GREEN}Lyrics scan complete.${RESET}"

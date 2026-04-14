@@ -116,6 +116,93 @@ class LyricsSmokeTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("2001 - Album|-y", lines[0])
 
+    def test_lyrics_album_returns_nonzero_when_embed_fails(self) -> None:
+        album = self.tmpdir / "album"
+        album.mkdir()
+        (album / "01 - Song.flac").write_text("", encoding="utf-8")
+        db_path = self.tmpdir / "library.sqlite"
+
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                args="$*"
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=flac
+[/STREAM]
+[FORMAT]
+duration=123.0
+TAG:artist=Test Artist
+TAG:title=Test Song
+TAG:album=Test Album
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(self.bin_dir / "curl", "#!/usr/bin/env bash\nprintf '%s\\n' '[{\"syncedLyrics\":\"[00:00.00]Hello world\"}]'\n")
+        _write_exec(self.bin_dir / "jq", "#!/usr/bin/env bash\nprintf '%s' '[00:00.00]Hello world'\n")
+        _write_exec(
+            self.bin_dir / "metaflac",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                if [[ "$*" == *"--show-tag=LYRICS"* ]]; then
+                  exit 0
+                fi
+                exit 1
+                """
+            ),
+        )
+
+        env = {**self.env, "AUDL_DB_PATH": str(db_path)}
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album, env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Embed failed: 01 - Song.flac", proc.stdout)
+
+    def test_lyrics_seek_returns_nonzero_after_any_album_failure(self) -> None:
+        root = self.tmpdir / "library"
+        album_fail = root / "Artist A" / "2001 - Fail"
+        album_ok = root / "Artist B" / "2002 - Ok"
+        album_fail.mkdir(parents=True)
+        album_ok.mkdir(parents=True)
+        (album_fail / "01.flac").write_text("", encoding="utf-8")
+        (album_ok / "01.flac").write_text("", encoding="utf-8")
+
+        seek_log = self.tmpdir / "seek-fail.log"
+        stub = self.bin_dir / "lyrics_album.sh"
+        _write_exec(
+            stub,
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                printf "%s|%s\\n" "$(pwd)" "$*" >> "{seek_log}"
+                case "$(basename "$(pwd)")" in
+                  "2001 - Fail") exit 1 ;;
+                  *) exit 0 ;;
+                esac
+                """
+            ),
+        )
+
+        env = {**self.env, "LYRICS_ALBUM_BIN": str(stub)}
+        proc = self._run(LYRICS_SEEK, ["-y"], cwd=root, env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue(seek_log.exists(), msg=proc.stderr + "\n" + proc.stdout)
+        lines = seek_log.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("2001 - Fail|-y", lines[0])
+        self.assertIn("2002 - Ok|-y", lines[1])
+        self.assertIn("Lyrics scan complete with failures.", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

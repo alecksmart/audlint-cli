@@ -175,6 +175,8 @@ album_quality_db_backup "$LIBRARY_DB" || {
 lyrics_db_init "$LIBRARY_DB"
 
 NOW_TS=$(date +%s)
+TRACKS_WITH_LYRICS=0
+TRACKS_FAILED=0
 for f in "${FILES[@]}"; do
   audio_ffprobe_meta_prime "$f"
   CODEC="$(audio_codec_name "$f" || true)"
@@ -228,6 +230,7 @@ for f in "${FILES[@]}"; do
   fi
 
   if [ "$HAS_LYRICS_TAG" = true ]; then
+    TRACKS_WITH_LYRICS=$((TRACKS_WITH_LYRICS + 1))
     echo "${BLUE}[LYRICS]${RESET} Tag exists; skip: $f"
     continue
   fi
@@ -299,8 +302,10 @@ for f in "${FILES[@]}"; do
   fi
 
   if [ "$EMBED_OK" = true ]; then
+    TRACKS_WITH_LYRICS=$((TRACKS_WITH_LYRICS + 1))
     echo "${GREEN}[LYRICS]${RESET} Embedded: $f"
   else
+    TRACKS_FAILED=$((TRACKS_FAILED + 1))
     echo "${YELLOW}[LYRICS]${RESET} Embed failed: $f"
   fi
 done
@@ -308,3 +313,13 @@ done
 rm -f "$LYRICS_LIST"
 rm -f "$LYRICS_TMP"
 rm -f "$LYRICS_PLAIN_TMP"
+
+if ((TRACKS_FAILED > 0)); then
+  exit 1
+fi
+
+if ((TRACKS_WITH_LYRICS == 0)); then
+  exit 1
+fi
+
+exit 0

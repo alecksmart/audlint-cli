@@ -4069,10 +4069,6 @@ while IFS=$'\x1f' read -r artist album year source_path dest_dir; do
   printf '[%s] %s - %s (%s)\n' "$album_count" "$artist" "$album" "$year"
   printf 'source: %s\n' "$source_path"
   printf 'dest:   %s\n' "$dest_dir"
-  if [[ -e "$dest_dir" ]]; then
-    printf 'deleting existing destination: %s\n' "$dest_dir"
-    rm -rf "$dest_dir"
-  fi
   mkdir -p "$(dirname "$dest_dir")"
   "$rsync_bin" "${rsync_args[@]}" "$source_path"/ "$dest_dir"/
   printf '\n'

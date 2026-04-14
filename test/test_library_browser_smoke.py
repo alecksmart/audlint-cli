@@ -1400,6 +1400,9 @@ printf 'qty_compare_stub\\n'
 
         player_dir = self.tmpdir / "player"
         player_dir.mkdir(parents=True, exist_ok=True)
+        existing_dest_dir = player_dir / "D" / "Dire Straits" / "1985 - Brothers In Arms"
+        existing_dest_dir.mkdir(parents=True, exist_ok=True)
+        (existing_dest_dir / "already-there.txt").write_text("keep me until rsync decides", encoding="utf-8")
         rsync_args_log = self.tmpdir / "rsync-args.log"
         transfer_log = self.tmpdir / "transfer.log"
         sync_calls_log = self.tmpdir / "sync-calls.log"
@@ -1513,12 +1516,14 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertIn("--include=[cC][oO][vV][eE][rR].[jJ][pP][gG]", args_text)
         self.assertIn("--exclude=*.[jJ][pP][gG]", args_text)
         self.assertIn("--exclude=*.[pP][nN][gG]", args_text)
+        self.assertIn("--delete", args_text)
         self.assertTrue(sync_calls_log.exists(), msg=clean)
         self.assertIn("sync", sync_calls_log.read_text(encoding="utf-8"))
         self.assertTrue(transfer_log.exists(), msg=clean)
         transfer_text = transfer_log.read_text(encoding="utf-8")
         self.assertIn("total_size_bytes=2560 total_size_label=2.5Kb", transfer_text)
         self.assertIn("transfer rc=0", transfer_text)
+        self.assertTrue((existing_dest_dir / "already-there.txt").exists(), msg=clean)
         screen_text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
         screen_text = screen_text.replace("\x1b7", "").replace("\x1b8", "")
         self.assertIn(
@@ -1526,6 +1531,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
             screen_text,
             msg=screen_text,
         )
+        self.assertNotIn("deleting existing destination", screen_text, msg=screen_text)
 
     def test_transfer_snapshots_visible_filtered_page_before_selection(self) -> None:
         player_dir = self.tmpdir / "player"

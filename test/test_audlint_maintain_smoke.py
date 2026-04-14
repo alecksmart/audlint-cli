@@ -357,6 +357,27 @@ exit 0
         self.assertTrue(self.cover_args_log.exists())
         self.assertIn("--yes --fetch-missing-art", self.cover_args_log.read_text(encoding="utf-8"))
 
+    def test_album_art_page_skips_reserved_directory_keys(self) -> None:
+        for name in ("1", "3", "5", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "_VA"):
+            (self.root_dir / name).mkdir(parents=True, exist_ok=True)
+
+        rc, out = self._run_in_pty(b"aqq")
+        clean = self._strip_ansi(out)
+        self.assertEqual(rc, 0, msg=clean)
+        self.assertIn("Album Art", clean, msg=clean)
+        self.assertIn("[d Dry Run Library Root]", clean, msg=clean)
+        self.assertIn("[r Run Library Root]", clean, msg=clean)
+        self.assertIn("[q Back]", clean, msg=clean)
+        self.assertNotRegex(clean, re.compile(r"\[d\]\s", re.MULTILINE), msg=clean)
+        self.assertNotRegex(clean, re.compile(r"\[q\]\s", re.MULTILINE), msg=clean)
+        self.assertNotRegex(clean, re.compile(r"\[r\]\s", re.MULTILINE), msg=clean)
+        self.assertIn("[a] G", clean, msg=clean)
+        self.assertIn("[b] H", clean, msg=clean)
+        self.assertIn("[c] I", clean, msg=clean)
+        self.assertIn("[e] J", clean, msg=clean)
+        self.assertIn("[p] U", clean, msg=clean)
+        self.assertIn("[s] V", clean, msg=clean)
+
 
 class AudlintMaintainRealCrontabE2ETests(unittest.TestCase):
     @classmethod

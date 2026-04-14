@@ -4159,11 +4159,11 @@ if [[ "$allow_lossy_source" == "1" ]]; then
   any2flac_lossy_args+=(--allow-lossy-source)
 fi
 printf '[1/2] Recode plan\n'
-"$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --plan-only "${any2flac_lossy_args[@]}"
+AUDL_ARTWORK_FETCH_MISSING=1 "$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --plan-only "${any2flac_lossy_args[@]}"
 printf '\n'
 virtwin_status_set "encoding..."
 printf '[2/2] Recode convert\n'
-"$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --yes "${any2flac_lossy_args[@]}"
+AUDL_ARTWORK_FETCH_MISSING=1 "$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --yes "${any2flac_lossy_args[@]}"
 printf '\nWorkflow completed successfully.\n'
 EOF
   chmod +x "$runner_script"
@@ -4313,7 +4313,7 @@ while IFS=$'\x1f' read -r row_id artist album year source_path target_profile al
     any2flac_lossy_args+=(--allow-lossy-source)
   fi
   printf '[1/2] Recode plan\n'
-  if ! "$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --plan-only "${any2flac_lossy_args[@]}"; then
+  if ! AUDL_ARTWORK_FETCH_MISSING=1 "$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --plan-only "${any2flac_lossy_args[@]}"; then
     rc=$?
     printf 'FAIL\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1fplan failed (exit %s)\n' \
       "$batch_index" "$row_id" "$artist" "$album" "$year" "$source_path" "$rc" >>"$results_file"
@@ -4324,7 +4324,7 @@ while IFS=$'\x1f' read -r row_id artist album year source_path target_profile al
   printf '\n'
   virtwin_status_set "$batch_index" "$batch_total" "$artist" "$year" "$album" "encoding..."
   printf '[2/2] Recode convert\n'
-  if ! "$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --yes "${any2flac_lossy_args[@]}"; then
+  if ! AUDL_ARTWORK_FETCH_MISSING=1 "$any2flac_bin" --profile "$target_profile" --dir "$source_path" --with-boost --yes "${any2flac_lossy_args[@]}"; then
     rc=$?
     printf 'FAIL\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1fconvert failed (exit %s)\n' \
       "$batch_index" "$row_id" "$artist" "$album" "$year" "$source_path" "$rc" >>"$results_file"

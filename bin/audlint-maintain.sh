@@ -335,9 +335,9 @@ run_album_art_for_dir() {
   (
     cd "$selected_dir" || exit 2
     if [[ "$dry_run" == "1" ]]; then
-      "$AUDLINT_COVER_SEEK_BIN" --dry-run --yes
+      "$AUDLINT_COVER_SEEK_BIN" --dry-run --yes --fetch-missing-art
     else
-      "$AUDLINT_COVER_SEEK_BIN" --yes
+      "$AUDLINT_COVER_SEEK_BIN" --yes --fetch-missing-art
     fi
   ) || rc=$?
 
@@ -495,6 +495,7 @@ album_art_page() {
   printf '  - keeps one canonical cover.jpg sidecar per album\n'
   printf '  - normalizes art to JPEG at the configured max dimension\n'
   printf '  - clears extra embedded pictures and re-embeds one consistent cover per track\n'
+  printf '  - fetches missing art automatically when no local source exists\n'
   printf '\n'
   printf '%s\n' "$(hint_button d "Dry Run Library Root")"
   printf '%s\n' "$(hint_button r "Run Library Root")"

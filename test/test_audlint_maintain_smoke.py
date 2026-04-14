@@ -337,7 +337,7 @@ exit 0
         self.assertTrue(self.cover_cwd_log.exists())
         self.assertIn(str(self.root_dir), self.cover_cwd_log.read_text(encoding="utf-8"))
         self.assertTrue(self.cover_args_log.exists())
-        self.assertIn("--dry-run --yes", self.cover_args_log.read_text(encoding="utf-8"))
+        self.assertIn("--dry-run --yes --fetch-missing-art", self.cover_args_log.read_text(encoding="utf-8"))
 
     def test_album_art_page_runs_selected_directory(self) -> None:
         first = self.root_dir / "Artist A"
@@ -354,6 +354,8 @@ exit 0
         self.assertIn("Album art completed.", clean, msg=clean)
         self.assertTrue(self.cover_cwd_log.exists())
         self.assertIn(str(first), self.cover_cwd_log.read_text(encoding="utf-8"))
+        self.assertTrue(self.cover_args_log.exists())
+        self.assertIn("--yes --fetch-missing-art", self.cover_args_log.read_text(encoding="utf-8"))
 
 
 class AudlintMaintainRealCrontabE2ETests(unittest.TestCase):

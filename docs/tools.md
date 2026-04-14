@@ -9,8 +9,8 @@
 | `bin/boost_album.sh` | Bake headroom gain into a FLAC or lossy album in-place; handles Opus/Ogg cover edge cases |
 | `bin/boost_seek.sh` | Walk library and invoke `boost_album.sh` on qualifying albums |
 | `bin/clear_tags.sh` | Clear lyrics tags and cached lyrics DB entries for files in the current folder |
-| `bin/cover_album.sh` | Standardize one album to a single player-safe `cover.jpg`, clear duplicate embedded art, and rewrite a consistent cover across tracks |
-| `bin/cover_seek.sh` | Walk albums and invoke `cover_album.sh` to normalize artwork library-wide |
+| `bin/cover_album.sh` | Standardize one album to a single player-safe `cover.jpg`, optionally fetch missing art, clear duplicate embedded art, and rewrite a consistent cover across tracks |
+| `bin/cover_seek.sh` | Walk albums and invoke `cover_album.sh` to normalize artwork library-wide, including optional missing-art fetches |
 | `bin/cue2flac.sh` | Split a high-res audio file into per-track FLACs using a .cue sheet (FLAC/WAV/WV/APE/DSF/DFF); `--check-upscale` uses album-wide `audlint-analyze` target selection across all referenced sources |
 | `bin/dff2flac.sh` | Convert a folder of DFF files into tagged FLACs using a sidecar .cue file |
 | `bin/qty_compare.sh` | Compare two albums side-by-side: per-track DR14 grades and overall mastering grade |

@@ -7,6 +7,7 @@ trap 'printf "\n\n[!] Cover seeker terminated by user.\n"; exit 1' INT
 
 AUTO_YES=false
 DRY_RUN=false
+FETCH_MISSING_ART=false
 
 BOOTSTRAP_SOURCE="${BASH_SOURCE[0]}"
 if command -v realpath >/dev/null 2>&1; then
@@ -48,10 +49,12 @@ Quick use:
   $(basename "$0") -y
   $(basename "$0") --dry-run
 
-Usage: $(basename "$0") [--dry-run] [-y|--yes]
+Usage: $(basename "$0") [--dry-run] [--fetch-missing-art] [-y|--yes]
 
 Options:
   --dry-run  Show what would be normalized without writing files.
+  --fetch-missing-art
+             Download missing album art when no local source exists.
   -y, --yes  Skip confirmation in child album runs.
   -h, --help Show this help message.
 
@@ -66,6 +69,9 @@ while [[ $# -gt 0 ]]; do
   case "${1:-}" in
   --dry-run)
     DRY_RUN=true
+    ;;
+  --fetch-missing-art)
+    FETCH_MISSING_ART=true
     ;;
   -y | --yes)
     AUTO_YES=true
@@ -100,6 +106,7 @@ run_album_if_present() {
     (
       cd "$dir" || exit 2
       [[ "$DRY_RUN" == true ]] && args+=(--dry-run)
+      [[ "$FETCH_MISSING_ART" == true ]] && args+=(--fetch-missing-art)
       [[ "$AUTO_YES" == true ]] && args+=(--yes)
       "$COVER_ALBUM_BIN" "${args[@]}" .
     )

@@ -41,6 +41,11 @@ AUTO_YES=false
 DRY_RUN=false
 SUMMARY_ONLY=false
 CLEANUP_EXTRA_SIDECARS=false
+FETCH_MISSING_ART=false
+
+if artwork_fetch_missing_enabled; then
+  FETCH_MISSING_ART=true
+fi
 
 show_help() {
   cat <<EOF
@@ -49,7 +54,7 @@ Quick use:
   $(basename "$0") -y
   $(basename "$0") --dry-run /abs/path/to/album
 
-Usage: $(basename "$0") [TARGET_DIR] [--dry-run] [--yes] [--summary-only] [--cleanup-extra-sidecars]
+Usage: $(basename "$0") [TARGET_DIR] [--dry-run] [--yes] [--summary-only] [--cleanup-extra-sidecars] [--fetch-missing-art]
 
 Options:
   --dry-run       Show the normalized album-art result without writing files.
@@ -57,10 +62,13 @@ Options:
   --summary-only  Print only the final 1-line art status.
   --cleanup-extra-sidecars
                   Remove extra cover/folder/front sidecars after writing cover.jpg.
+  --fetch-missing-art
+                  Download missing album art from MusicBrainz / Cover Art Archive when no local art exists.
   -h, --help      Show this help.
 
 Behavior:
   - Picks one canonical cover source from cover/folder/front sidecars or embedded art.
+  - Optionally fetches missing art when no local source exists.
   - Normalizes it to cover.jpg as a JPEG no larger than AUDL_ARTWORK_MAX_DIM.
   - Preserves extra cover-like sidecars unless --cleanup-extra-sidecars is passed.
   - Rewrites tracks so each file keeps one consistent embedded cover.
@@ -81,6 +89,9 @@ while [[ $# -gt 0 ]]; do
     ;;
   --cleanup-extra-sidecars)
     CLEANUP_EXTRA_SIDECARS=true
+    ;;
+  --fetch-missing-art)
+    FETCH_MISSING_ART=true
     ;;
   -h | --help)
     show_help
@@ -107,8 +118,8 @@ fi
 if [[ "$SUMMARY_ONLY" != true ]]; then
   printf '%s\n' "$(ui_wrap "$BLUE" "Album Art Standardization")"
   printf 'Target: %s\n' "$TARGET_DIR"
-  printf 'Policy: %s, JPEG, max=%spx, cleanup_extra_sidecars=%s\n' \
-    "$(artwork_sidecar_name)" "$(artwork_max_dim)" "$CLEANUP_EXTRA_SIDECARS"
+  printf 'Policy: %s, JPEG, max=%spx, cleanup_extra_sidecars=%s, fetch_missing_art=%s\n' \
+    "$(artwork_sidecar_name)" "$(artwork_max_dim)" "$CLEANUP_EXTRA_SIDECARS" "$FETCH_MISSING_ART"
   printf -- '-----------\n'
 fi
 
@@ -145,8 +156,12 @@ cleanup_extra_sidecars_flag=0
 if [[ "$CLEANUP_EXTRA_SIDECARS" == true ]]; then
   cleanup_extra_sidecars_flag=1
 fi
+fetch_missing_art_flag=0
+if [[ "$FETCH_MISSING_ART" == true ]]; then
+  fetch_missing_art_flag=1
+fi
 
-if artwork_standardize_album "$TARGET_DIR" "$mode" "$cleanup_extra_sidecars_flag"; then
+if artwork_standardize_album "$TARGET_DIR" "$mode" "$cleanup_extra_sidecars_flag" "$fetch_missing_art_flag"; then
   printf '%s\n' "$(artwork_status_summary_colored)"
   exit 0
 fi

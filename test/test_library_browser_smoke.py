@@ -1525,12 +1525,14 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         album2_dir.mkdir(parents=True, exist_ok=True)
         (album1_dir / "01. The Post War Dream.flac").write_text("stub", encoding="utf-8")
         (album2_dir / "01. Astronomy Domine.flac").write_text("stub", encoding="utf-8")
+        fetch_env_log = self.tmpdir / "any2flac-fetch.log"
 
         any2flac_stub = self.bin_dir / "any2flac-stub"
         _write_exec(
             any2flac_stub,
-            """#!/usr/bin/env bash
+            f"""#!/usr/bin/env bash
 set -euo pipefail
+printf 'fetch=%s args=%s\\n' "${{AUDL_ARTWORK_FETCH_MISSING:-}}" "$*" >> "{fetch_env_log}"
 work_dir=""
 plan_only=0
 while [[ $# -gt 0 ]]; do
@@ -1663,6 +1665,9 @@ fi
             title_band,
             msg="\n".join(screen),
         )
+        self.assertTrue(fetch_env_log.exists())
+        fetch_lines = fetch_env_log.read_text(encoding="utf-8").strip().splitlines()
+        self.assertTrue(any("fetch=1" in line for line in fetch_lines), msg=fetch_lines)
 
 
 if __name__ == "__main__":

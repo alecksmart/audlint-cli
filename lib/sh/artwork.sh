@@ -60,6 +60,13 @@ artwork_auto_enabled() {
   esac
 }
 
+artwork_fetch_missing_enabled() {
+  case "${AUDL_ARTWORK_FETCH_MISSING:-0}" in
+  1 | true | TRUE | yes | YES | on | ON) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 artwork_sidecar_name() {
   printf 'cover.jpg'
 }
@@ -96,6 +103,14 @@ artwork_jpeg_quality() {
     return 0
   fi
   printf '4'
+}
+
+artwork_fetch_user_agent() {
+  printf '%s' "${AUDL_ARTWORK_FETCH_USER_AGENT:-audlint-cli/1.0 (local use; set AUDL_ARTWORK_FETCH_USER_AGENT for contact info)}"
+}
+
+artwork_trim_text() {
+  printf '%s' "${1:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 artwork_cache_file_path() {
@@ -360,11 +375,299 @@ artwork_cache_is_current() {
   [[ "$status" == "ok" && "$src_fp" == "$cached_src" && "$cfg_fp" == "$cached_cfg" ]]
 }
 
+artwork_guess_album_identity() {
+  local album_dir="$1"
+  local out_artist_var="$2"
+  local out_album_var="$3"
+  local out_year_var="$4"
+  local -n out_artist_ref="$out_artist_var"
+  local -n out_album_ref="$out_album_var"
+  local -n out_year_ref="$out_year_var"
+  local -a audio_files=()
+  local first_track=""
+  local guessed_artist=""
+  local guessed_album=""
+  local guessed_year=""
+  local album_dir_name=""
+  local parent_dir_name=""
+
+  audio_collect_files "$album_dir" audio_files
+  if ((${#audio_files[@]} > 0)); then
+    first_track="${audio_files[0]}"
+    audio_ffprobe_meta_prime "$first_track"
+    guessed_artist="$(artwork_trim_text "$(audio_probe_tag_value "$first_track" "album_artist")")"
+    [[ -n "$guessed_artist" ]] || guessed_artist="$(artwork_trim_text "$(audio_probe_tag_value "$first_track" "artist")")"
+    guessed_album="$(artwork_trim_text "$(audio_probe_tag_value "$first_track" "album")")"
+  fi
+
+  album_dir_name="$(basename "$album_dir")"
+  if [[ "$album_dir_name" =~ ^([12][0-9]{3})[[:space:]]*-[[:space:]]*(.+)$ ]]; then
+    [[ -n "$guessed_year" ]] || guessed_year="${BASH_REMATCH[1]}"
+    [[ -n "$guessed_album" ]] || guessed_album="$(artwork_trim_text "${BASH_REMATCH[2]}")"
+  elif [[ -z "$guessed_album" ]]; then
+    guessed_album="$(artwork_trim_text "$album_dir_name")"
+  fi
+
+  parent_dir_name="$(basename "$(dirname "$album_dir")")"
+  if [[ -z "$guessed_artist" && -n "$parent_dir_name" && "$parent_dir_name" != "." && "$parent_dir_name" != "/" ]]; then
+    guessed_artist="$(artwork_trim_text "$parent_dir_name")"
+  fi
+
+  out_artist_ref="$guessed_artist"
+  out_album_ref="$guessed_album"
+  out_year_ref="$guessed_year"
+}
+
+artwork_rate_limit_musicbrainz() {
+  local stamp_file="${TMPDIR:-/tmp}/audlint_artwork_musicbrainz_last_request"
+  local now last delay
+  now="$(date +%s 2>/dev/null || printf '0')"
+  [[ "$now" =~ ^[0-9]+$ ]] || now=0
+  if [[ -f "$stamp_file" ]]; then
+    last="$(cat "$stamp_file" 2>/dev/null || printf '0')"
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    delay=$((1 - (now - last)))
+    if ((delay > 0)); then
+      sleep "$delay"
+    fi
+  fi
+  printf '%s\n' "$(date +%s 2>/dev/null || printf '0')" >"$stamp_file" 2>/dev/null || true
+}
+
+artwork_pick_musicbrainz_candidate() {
+  local json_path="$1"
+  local artist="$2"
+  local album="$3"
+  local year="${4:-}"
+  local py_bin="${AUDL_PYTHON_BIN:-python3}"
+
+  command -v "$py_bin" >/dev/null 2>&1 || return 1
+
+  "$py_bin" - "$json_path" "$artist" "$album" "$year" <<'PY'
+import json
+import re
+import sys
+
+json_path, query_artist, query_album, query_year = sys.argv[1:5]
+
+
+def norm(text: str) -> str:
+    text = (text or "").casefold()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def artist_credit_name(release: dict) -> str:
+    parts: list[str] = []
+    for item in release.get("artist-credit") or []:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            parts.append(name)
+            continue
+        artist = item.get("artist") or {}
+        artist_name = artist.get("name")
+        if isinstance(artist_name, str) and artist_name:
+            parts.append(artist_name)
+    return "".join(parts)
+
+
+def safe_year(value: str) -> str:
+    match = re.match(r"^([12][0-9]{3})", value or "")
+    return match.group(1) if match else ""
+
+
+try:
+    with open(json_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except Exception:
+    sys.exit(1)
+
+query_artist_n = norm(query_artist)
+query_album_n = norm(query_album)
+query_year_n = safe_year(query_year)
+best = None
+best_score = -1
+
+for release in payload.get("releases") or []:
+    if not isinstance(release, dict):
+        continue
+    release_id = str(release.get("id") or "").strip()
+    if not release_id:
+        continue
+    title = str(release.get("title") or "")
+    date = str(release.get("date") or "")
+    rel_year = safe_year(date)
+    rel_artist = artist_credit_name(release)
+    rel_group_id = str((release.get("release-group") or {}).get("id") or "").strip()
+    try:
+        mb_score = int(str(release.get("score") or "0"))
+    except ValueError:
+        mb_score = 0
+
+    title_n = norm(title)
+    artist_n = norm(rel_artist)
+    title_exact = bool(query_album_n) and title_n == query_album_n
+    artist_match = bool(query_artist_n) and (
+        artist_n == query_artist_n
+        or query_artist_n in artist_n
+        or artist_n in query_artist_n
+    )
+    year_match = bool(query_year_n) and rel_year == query_year_n
+
+    score = 0
+    if title_exact:
+        score += 120
+    elif query_album_n and (query_album_n in title_n or title_n in query_album_n):
+        score += 40
+
+    if artist_match:
+        score += 80
+
+    if year_match:
+        score += 20
+    elif query_year_n and rel_year and rel_year != query_year_n:
+        score -= 40
+
+    score += max(0, min(mb_score, 100)) // 5
+
+    if title_exact and artist_match:
+        score += 30
+
+    if score > best_score:
+        best_score = score
+        best = (release_id, rel_group_id, title, rel_artist, rel_year, score, title_exact, artist_match)
+
+if not best:
+    sys.exit(1)
+
+release_id, rel_group_id, title, rel_artist, rel_year, score, title_exact, artist_match = best
+if not (title_exact and artist_match):
+    sys.exit(2)
+if query_year_n and rel_year and rel_year != query_year_n:
+    sys.exit(3)
+
+print("\t".join([release_id, rel_group_id, title, rel_artist, rel_year, str(score)]))
+PY
+}
+
+artwork_try_fetch_cover_from_remote() {
+  local album_dir="$1"
+  local out_cover="$2"
+  local max_dim="$3"
+  local quality="$4"
+  local artist=""
+  local album=""
+  local year=""
+  local query=""
+  local user_agent=""
+  local search_json=""
+  local fetched_image=""
+  local release_id=""
+  local release_group_id=""
+  local matched_title=""
+  local matched_artist=""
+  local matched_year=""
+  local matched_score=""
+  local candidate_url=""
+  local rc=0
+
+  artwork_guess_album_identity "$album_dir" artist album year
+  if [[ -z "$artist" || -z "$album" ]]; then
+    ARTWORK_LAST_ERROR="missing art fetch skipped: album artist/title could not be resolved"
+    return 1
+  fi
+
+  if declare -F has_bin >/dev/null 2>&1; then
+    has_bin curl || {
+      ARTWORK_LAST_ERROR="missing art fetch requires curl"
+      return 1
+    }
+  fi
+  if ! command -v "${AUDL_PYTHON_BIN:-python3}" >/dev/null 2>&1; then
+    ARTWORK_LAST_ERROR="missing art fetch requires ${AUDL_PYTHON_BIN:-python3}"
+    return 1
+  fi
+
+  query="release:${album} AND artist:${artist}"
+  if [[ -n "$year" ]]; then
+    query="${query} AND date:${year}*"
+  fi
+  user_agent="$(artwork_fetch_user_agent)"
+  search_json="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_search.XXXXXX" 2>/dev/null || true)"
+  fetched_image="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_image.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$search_json" || -z "$fetched_image" ]]; then
+    rm -f "$search_json" "$fetched_image"
+    ARTWORK_LAST_ERROR="missing art fetch failed: could not create temporary files"
+    return 1
+  fi
+
+  artwork_rate_limit_musicbrainz
+  if ! curl -fsSL -A "$user_agent" --get \
+    --data-urlencode "query=$query" \
+    --data "fmt=json" \
+    --data "limit=10" \
+    -o "$search_json" \
+    "https://musicbrainz.org/ws/2/release"; then
+    rm -f "$search_json" "$fetched_image"
+    ARTWORK_LAST_ERROR="missing art fetch failed: MusicBrainz search request failed"
+    return 1
+  fi
+
+  if ! IFS=$'\t' read -r release_id release_group_id matched_title matched_artist matched_year matched_score < <(
+    artwork_pick_musicbrainz_candidate "$search_json" "$artist" "$album" "$year"
+  ); then
+    rm -f "$search_json" "$fetched_image"
+    ARTWORK_LAST_ERROR="missing art fetch found no confident MusicBrainz match for ${artist} - ${album}"
+    return 1
+  fi
+
+  rm -f "$fetched_image"
+  for candidate_url in \
+    "https://coverartarchive.org/release/${release_id}/front-500" \
+    "https://coverartarchive.org/release/${release_id}/front"; do
+    fetched_image="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_image.XXXXXX" 2>/dev/null || true)"
+    [[ -n "$fetched_image" ]] || continue
+    if curl -fsSL -A "$user_agent" -L -o "$fetched_image" "$candidate_url" \
+      && artwork_render_canonical_cover_from_image "$fetched_image" "$out_cover" "$max_dim" "$quality"; then
+      rm -f "$search_json" "$fetched_image"
+      ARTWORK_LAST_SOURCE="fetched:musicbrainz:release:${release_id}"
+      return 0
+    fi
+    rm -f "$fetched_image"
+  done
+
+  if [[ -n "$release_group_id" ]]; then
+    for candidate_url in \
+      "https://coverartarchive.org/release-group/${release_group_id}/front-500" \
+      "https://coverartarchive.org/release-group/${release_group_id}/front"; do
+      fetched_image="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_image.XXXXXX" 2>/dev/null || true)"
+      [[ -n "$fetched_image" ]] || continue
+      if curl -fsSL -A "$user_agent" -L -o "$fetched_image" "$candidate_url" \
+        && artwork_render_canonical_cover_from_image "$fetched_image" "$out_cover" "$max_dim" "$quality"; then
+        rm -f "$search_json" "$fetched_image"
+        ARTWORK_LAST_SOURCE="fetched:musicbrainz:release-group:${release_group_id}"
+        return 0
+      fi
+      rm -f "$fetched_image"
+    done
+  fi
+
+  rm -f "$search_json" "$fetched_image"
+  ARTWORK_LAST_ERROR="missing art fetch failed: no downloadable front cover found for ${artist} - ${album}"
+  return 1
+}
+
 artwork_pick_source() {
   local album_dir="$1"
   local out_cover="$2"
   local max_dim="$3"
   local quality="$4"
+  local fetch_missing="${5:-0}"
   local -a cover_files=()
   local -a audio_files=()
   local candidate track count
@@ -388,6 +691,12 @@ artwork_pick_source() {
       return 0
     fi
   done
+
+  if [[ "$fetch_missing" == "1" ]]; then
+    if artwork_try_fetch_cover_from_remote "$album_dir" "$out_cover" "$max_dim" "$quality"; then
+      return 0
+    fi
+  fi
 
   return 1
 }
@@ -480,6 +789,7 @@ artwork_standardize_album() {
   local album_dir="$1"
   local mode="${2:-apply}"
   local cleanup_extra_sidecars="${3:-0}"
+  local fetch_missing="${4:-0}"
   local dry_run=0
   local max_dim quality sidecar_name canonical_cover source_fp config_fp
   local tmp_dir normalized_cover dims width height
@@ -540,10 +850,16 @@ artwork_standardize_album() {
   }
   normalized_cover="$tmp_dir/cover.jpg"
 
-  if ! artwork_pick_source "$album_dir" "$normalized_cover" "$max_dim" "$quality"; then
+  if ! artwork_pick_source "$album_dir" "$normalized_cover" "$max_dim" "$quality" "$fetch_missing"; then
     rm -rf "$tmp_dir"
     ARTWORK_LAST_STATUS="error"
-    ARTWORK_LAST_ERROR="no sidecar or embedded art source found"
+    if [[ -z "${ARTWORK_LAST_ERROR:-}" ]]; then
+      if [[ "$fetch_missing" == "1" ]]; then
+        ARTWORK_LAST_ERROR="no sidecar, embedded, or fetched art source found"
+      else
+        ARTWORK_LAST_ERROR="no sidecar or embedded art source found"
+      fi
+    fi
     ARTWORK_LAST_SOURCE_FINGERPRINT="$source_fp"
     ARTWORK_LAST_CONFIG_FINGERPRINT="$config_fp"
     if ((dry_run == 0)); then
@@ -632,6 +948,9 @@ artwork_run_cover_album_postprocess() {
 
   if [[ "$dry_run" == "1" ]]; then
     args+=(--dry-run)
+  fi
+  if artwork_fetch_missing_enabled; then
+    args+=(--fetch-missing-art)
   fi
 
   output="$("$cover_bin" "${args[@]}" "$album_dir" 2>&1)" || rc=$?

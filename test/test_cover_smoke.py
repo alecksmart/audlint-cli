@@ -149,6 +149,55 @@ EOF
             self.bin_dir / "tput",
             "#!/usr/bin/env bash\nexit 0\n",
         )
+        curl_log = self.tmpdir / "curl.log"
+        _write_exec(
+            self.bin_dir / "curl",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{curl_log}"
+                out=""
+                url=""
+                while [[ $# -gt 0 ]]; do
+                  case "${{1:-}}" in
+                    -o)
+                      shift || true
+                      out="${{1:-}}"
+                      ;;
+                    http://*|https://*)
+                      url="${{1:-}}"
+                      ;;
+                  esac
+                  shift || true
+                done
+
+                case "$url" in
+                  *musicbrainz.org/ws/2/release*)
+                    cat <<'EOF' > "${{out:-/dev/stdout}}"
+{{"releases":[{{"id":"rel-123","title":"Stub Album","date":"2001-01-01","artist-credit":[{{"name":"Stub Artist"}}],"release-group":{{"id":"rg-123"}},"score":"100"}}]}}
+EOF
+                    ;;
+                  *coverartarchive.org/release/rel-123/front-500*)
+                    printf 'img' > "${{out:-/dev/stdout}}"
+                    ;;
+                  *coverartarchive.org/release/rel-123/front*)
+                    printf 'img' > "${{out:-/dev/stdout}}"
+                    ;;
+                  *coverartarchive.org/release-group/rg-123/front-500*)
+                    printf 'img' > "${{out:-/dev/stdout}}"
+                    ;;
+                  *coverartarchive.org/release-group/rg-123/front*)
+                    printf 'img' > "${{out:-/dev/stdout}}"
+                    ;;
+                  *)
+                    exit 1
+                    ;;
+                esac
+                exit 0
+                """
+            ),
+        )
 
     def _run(self, args) -> subprocess.CompletedProcess:
         env = os.environ.copy()
@@ -216,6 +265,19 @@ EOF
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertTrue((self.album_dir / "cover.jpg").exists())
         self.assertIn("source=embedded:01-single.flac", proc.stdout)
+
+    def test_cover_album_fetches_missing_art_when_enabled(self) -> None:
+        fetch_album = self.tmpdir / "Stub Artist" / "2001 - Stub Album"
+        fetch_album.mkdir(parents=True, exist_ok=True)
+        (fetch_album / "01-noart.flac").write_text("", encoding="utf-8")
+
+        proc = self._run(["--yes", "--fetch-missing-art", str(fetch_album)])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((fetch_album / "cover.jpg").exists())
+        self.assertIn("source=fetched:musicbrainz:release:rel-123", proc.stdout)
+        curl_log = (self.tmpdir / "curl.log").read_text(encoding="utf-8")
+        self.assertIn("musicbrainz.org/ws/2/release", curl_log)
+        self.assertIn("coverartarchive.org/release/rel-123/front-500", curl_log)
 
     def test_cover_album_dry_run_reports_plan_without_writing(self) -> None:
         (self.album_dir / "01.flac").write_text("", encoding="utf-8")

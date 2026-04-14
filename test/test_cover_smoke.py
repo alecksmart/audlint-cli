@@ -499,6 +499,141 @@ EOF
         self.assertTrue((self.album_dir / "cover.jpg").exists())
         self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
 
+    def test_cover_album_embeds_opus_art_via_vorbiscomment_picture_tag(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{ffprobe_log}"
+                args="$*"
+                input="${{@: -1}}"
+                base="$(basename "$input")"
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=opus
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=48000
+bits_per_raw_sample=0
+bits_per_sample=0
+sample_fmt=fltp
+bit_rate=192000
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=192000
+TAG:album_artist=
+TAG:artist=Stub Artist
+TAG:title=Stub Title
+TAG:album=Stub Album
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v -show_entries stream=index"* ]]; then
+                  case "$base" in
+                    *noart* ) exit 0 ;;
+                    *single* ) printf 'index=1\\n'; exit 0 ;;
+                    * )
+                      printf 'index=1\\nindex=2\\n'
+                      exit 0
+                      ;;
+                  esac
+                fi
+
+                if [[ "$args" == *"-select_streams v:0 -show_entries stream=codec_name,width,height"* ]]; then
+                  case "$base" in
+                    cover.jpg ) cat <<'EOF'
+codec_name=mjpeg
+width=600
+height=600
+EOF
+                      ;;
+                    *.png ) cat <<'EOF'
+codec_name=png
+width=1400
+height=1400
+EOF
+                      ;;
+                    *.jpeg|*.jpg ) cat <<'EOF'
+codec_name=mjpeg
+width=1400
+height=1400
+EOF
+                      ;;
+                    *.opus )
+                      exit 0
+                      ;;
+                  esac
+                  exit 0
+                fi
+
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "opus"
+                  exit 0
+                fi
+
+                exit 0
+                """
+            ),
+        )
+        vorbis_log = self.tmpdir / "vorbiscomment.log"
+        vorbis_stdin = self.tmpdir / "vorbiscomment.stdin"
+        _write_exec(
+            self.bin_dir / "vorbiscomment",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{vorbis_log}"
+                if [[ "${{1:-}}" == "-l" ]]; then
+                  cat <<'EOF'
+TITLE=Stub Title
+METADATA_BLOCK_PICTURE=old-picture
+COVERART=legacy-cover
+COVERARTMIME=image/jpeg
+ALBUM=Stub Album
+EOF
+                  exit 0
+                fi
+                if [[ "${{1:-}}" == "-w" ]]; then
+                  out="${{@: -1}}"
+                  cat > "{vorbis_stdin}"
+                  : > "$out"
+                  exit 0
+                fi
+                exit 1
+                """
+            ),
+        )
+        (self.album_dir / "01-noart.opus").write_text("", encoding="utf-8")
+        (self.album_dir / "cover.png").write_text("png", encoding="utf-8")
+
+        proc = self._run(["--yes", "--cleanup-extra-sidecars"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((self.album_dir / "cover.jpg").exists())
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+        self.assertTrue(vorbis_stdin.exists())
+        tag_lines = vorbis_stdin.read_text(encoding="utf-8").splitlines()
+        picture_lines = [line for line in tag_lines if line.startswith("METADATA_BLOCK_PICTURE=")]
+        self.assertEqual(len(picture_lines), 1, msg=tag_lines)
+        self.assertNotIn("METADATA_BLOCK_PICTURE=old-picture", tag_lines)
+        self.assertTrue(all(not line.startswith("COVERART=") for line in tag_lines), msg=tag_lines)
+        self.assertTrue(all(not line.startswith("COVERARTMIME=") for line in tag_lines), msg=tag_lines)
+        ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
+        self.assertNotIn("attached_pic", ffmpeg_log)
+
     def test_cover_album_dry_run_reports_plan_without_writing(self) -> None:
         (self.album_dir / "01.flac").write_text("", encoding="utf-8")
         (self.album_dir / "cover.png").write_text("png", encoding="utf-8")

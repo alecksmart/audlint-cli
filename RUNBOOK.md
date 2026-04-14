@@ -490,6 +490,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - missing-art fetch uses MusicBrainz + Cover Art Archive, with quoted fielded queries first, then relaxed fallbacks when the strict query misses
      - expected Cover Art Archive fallback `404` probes are now suppressed so successful fetches do not spam batch logs
      - per-tool embed attempts now get isolated temp cover inputs so M4A/ffmpeg fallback failures cannot delete the master normalized `cover.jpg`
+     - Ogg / Opus artwork embedding is now first-class via `vorbiscomment` `METADATA_BLOCK_PICTURE` writes before falling back to the generic ffmpeg attached-pic path
      - `cover_seek.sh` now ends long runs with an `albums=... ok=... failed=...` summary plus one-line failed album entries
    - Validation:
       - `python3 -m unittest discover -s test -p 'test_cover_smoke.py'` passes

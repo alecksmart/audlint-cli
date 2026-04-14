@@ -848,6 +848,109 @@ artwork_embed_cover_ffmpeg() {
   return 1
 }
 
+artwork_cover_mime_type() {
+  local in="${1:-}"
+  local lowered
+  lowered="$(printf '%s' "$in" | tr '[:upper:]' '[:lower:]')"
+  case "$lowered" in
+  *.jpg | *.jpeg) printf 'image/jpeg' ;;
+  *.png) printf 'image/png' ;;
+  *.gif) printf 'image/gif' ;;
+  *.bmp) printf 'image/bmp' ;;
+  *.webp) printf 'image/webp' ;;
+  *.tif | *.tiff) printf 'image/tiff' ;;
+  *) printf 'image/jpeg' ;;
+  esac
+}
+
+artwork_build_vorbis_picture_base64() {
+  local cover_path="$1"
+  local mime_type="${2:-image/jpeg}"
+  local width="${3:-0}"
+  local height="${4:-0}"
+  local data_size="${5:-0}"
+  local py_bin="${AUDL_PYTHON_BIN:-python3}"
+
+  command -v "$py_bin" >/dev/null 2>&1 || return 1
+  [[ "$width" =~ ^[0-9]+$ ]] || width=0
+  [[ "$height" =~ ^[0-9]+$ ]] || height=0
+  [[ "$data_size" =~ ^[0-9]+$ ]] || data_size=0
+
+  "$py_bin" - "$cover_path" "$mime_type" "$width" "$height" "$data_size" <<'PY'
+import base64
+import struct
+import sys
+
+cover_path, mime_type, width_raw, height_raw, data_size_raw = sys.argv[1:6]
+width = int(width_raw or 0)
+height = int(height_raw or 0)
+data_size = int(data_size_raw or 0)
+
+with open(cover_path, "rb") as fh:
+    payload = fh.read()
+
+if data_size <= 0:
+    data_size = len(payload)
+
+picture_block = b"".join(
+    [
+        struct.pack(">I", 3),
+        struct.pack(">I", len(mime_type)),
+        mime_type.encode("utf-8"),
+        struct.pack(">I", 0),
+        struct.pack(">I", width),
+        struct.pack(">I", height),
+        struct.pack(">I", 0),
+        struct.pack(">I", 0),
+        struct.pack(">I", data_size),
+        payload,
+    ]
+)
+sys.stdout.write(base64.b64encode(picture_block).decode("ascii"))
+PY
+}
+
+artwork_embed_cover_vorbiscomment() {
+  local media_path="$1"
+  local cover_path="$2"
+  local ext tmp_dir tmp_file picture_value cover_input_dir cover_input_path
+  local width=0 height=0 cover_size=0 mime_type
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/artwork_vorbis.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$tmp_dir" ]] || return 1
+  ext="${media_path##*.}"
+  tmp_file="$tmp_dir/output.${ext}"
+
+  if ! artwork_prepare_tool_cover_input "$cover_path" cover_input_dir cover_input_path; then
+    cover_input_dir=""
+    cover_input_path="$cover_path"
+  fi
+
+  artwork_probe_cover_dimensions "$cover_input_path" width height
+  cover_size="$(stat_size_bytes "$cover_input_path" 2>/dev/null || true)"
+  if [[ ! "$cover_size" =~ ^[0-9]+$ ]]; then
+    cover_size="$(wc -c <"$cover_input_path" 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  [[ "$cover_size" =~ ^[0-9]+$ ]] || cover_size=0
+  mime_type="$(artwork_cover_mime_type "$cover_input_path")"
+  picture_value="$(artwork_build_vorbis_picture_base64 "$cover_input_path" "$mime_type" "$width" "$height" "$cover_size")" || {
+    rm -rf "$tmp_dir" "${cover_input_dir:-}" >/dev/null 2>&1 || true
+    return 1
+  }
+
+  if {
+    vorbiscomment -l "$media_path" 2>/dev/null | grep -viE '^(METADATA_BLOCK_PICTURE|COVERART|COVERARTMIME)=' || true
+    printf 'METADATA_BLOCK_PICTURE=%s\n' "$picture_value"
+  } | vorbiscomment -w -c - "$media_path" "$tmp_file" >/dev/null 2>&1; then
+    mv -f "$tmp_file" "$media_path"
+    rm -rf "$tmp_dir" "${cover_input_dir:-}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  rm -rf "$tmp_dir" "${cover_input_dir:-}" >/dev/null 2>&1 || true
+  return 1
+}
+
 artwork_prepare_tool_cover_input() {
   local source_cover="$1"
   local out_dir_var="${2:-}"
@@ -905,6 +1008,14 @@ artwork_embed_cover_for_track() {
         return 0
       fi
       rm -rf "${cover_input_dir:-}" >/dev/null 2>&1 || true
+    fi
+    artwork_embed_cover_ffmpeg "$media_path" "$cover_path"
+    ;;
+  opus:* | vorbis:* | *:ogg | *:opus)
+    if declare -F has_bin >/dev/null 2>&1 && has_bin vorbiscomment; then
+      if artwork_embed_cover_vorbiscomment "$media_path" "$cover_path"; then
+        return 0
+      fi
     fi
     artwork_embed_cover_ffmpeg "$media_path" "$cover_path"
     ;;

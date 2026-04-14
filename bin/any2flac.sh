@@ -34,6 +34,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/profile.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 # shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/artwork.sh"
+# shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/secure_backup.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
@@ -61,6 +63,7 @@ APPLY_BOOST=0
 BOOST_SAFETY_MARGIN_DB="$(audio_auto_boost_target_true_peak_db)"
 BOOST_MIN_APPLY_DB="$(audio_auto_boost_min_apply_db)"
 AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$BOOTSTRAP_DIR/audlint-analyze.sh}"
+AUDLINT_COVER_ALBUM_BIN="${AUDLINT_COVER_ALBUM_BIN:-$BOOTSTRAP_DIR/cover_album.sh}"
 
 show_help() {
   cat <<'EOF_HELP'
@@ -637,3 +640,5 @@ if ((DRY_RUN == 1)); then
 else
   printf 'Completed: %s file(s) converted to %s.\n' "$(ui_value_text "$converted")" "$(ui_value_text "$TARGET_SR_LABEL")"
 fi
+
+artwork_run_cover_album_postprocess "$WORK_DIR" "$AUDLINT_COVER_ALBUM_BIN" "$DRY_RUN" || true

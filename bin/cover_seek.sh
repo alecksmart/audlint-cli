@@ -34,7 +34,7 @@ source "$BOOTSTRAP_DIR/../lib/sh/seek.sh"
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 ui_init_colors
 
-COVER_ALBUM_BIN="${COVER_ALBUM_BIN:-$SCRIPT_DIR/cover_album.sh}"
+COVER_ALBUM_BIN="${AUDLINT_COVER_ALBUM_BIN:-${COVER_ALBUM_BIN:-$SCRIPT_DIR/cover_album.sh}}"
 if [[ ! -x "$COVER_ALBUM_BIN" ]]; then
   if ! COVER_ALBUM_BIN="$(command -v cover_album.sh 2>/dev/null)"; then
     COVER_ALBUM_BIN=""

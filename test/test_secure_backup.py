@@ -56,7 +56,7 @@ class SecureBackupTests(unittest.TestCase):
             backup_album = backup_root / "M" / "Madonna" / "1984 - Like A Virgin"
             self.assertTrue((backup_album / "01 - Material Girl.flac").is_file())
             self.assertTrue((backup_album / "02 - Angel.mp3").is_file())
-            self.assertFalse((backup_album / "cover.jpg").exists())
+            self.assertTrue((backup_album / "cover.jpg").is_file())
 
     def test_existing_backup_dir_is_single_source_of_truth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

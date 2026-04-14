@@ -605,3 +605,33 @@ artwork_standardize_album() {
 
   [[ "$ARTWORK_LAST_STATUS" != "error" ]]
 }
+
+artwork_run_cover_album_postprocess() {
+  local album_dir="$1"
+  local default_bin="${2:-}"
+  local dry_run="${3:-0}"
+  local cover_bin="${AUDLINT_COVER_ALBUM_BIN:-${COVER_ALBUM_BIN:-$default_bin}}"
+  local -a args=(--summary-only --yes)
+  local output=""
+  local rc=0
+
+  artwork_auto_enabled || return 0
+
+  if [[ -z "$cover_bin" || ! -x "$cover_bin" ]]; then
+    artwork_reset_last_result
+    ARTWORK_LAST_STATUS="error"
+    ARTWORK_LAST_ERROR="cover_album.sh not executable (${cover_bin:-missing})"
+    printf '%s\n' "$(artwork_status_summary_colored)"
+    return 1
+  fi
+
+  if [[ "$dry_run" == "1" ]]; then
+    args+=(--dry-run)
+  fi
+
+  output="$("$cover_bin" "${args[@]}" "$album_dir" 2>&1)" || rc=$?
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output"
+  fi
+  return "$rc"
+}

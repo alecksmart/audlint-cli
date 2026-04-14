@@ -197,11 +197,23 @@ EOF
                 """
             ),
         )
+        _write_exec(
+            self.bin_dir / "cover_album.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s|%s\\n' "$(pwd)" "$*" >> "{self.tmpdir / 'cover.log'}"
+                printf 'Art: OK | cover.jpg | JPEG 600x600 | embedded 1/1 | sidecars cleared=0 | extra embeds cleared=0\\n'
+                """
+            ),
+        )
 
     def _run(self, args, extra_env=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["NO_COLOR"] = "1"
+        env["AUDL_ARTWORK_AUTO"] = "0"
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -250,6 +262,19 @@ EOF
         self.assertIn("gain", sox_log)
         ffmpeg_log = (self.tmpdir / "ffmpeg.log").read_text(encoding="utf-8")
         self.assertNotIn("volumedetect", ffmpeg_log)
+
+    def test_cover_postprocess_runs_after_dff_encode(self) -> None:
+        proc = self._run(
+            [],
+            extra_env={
+                "AUDL_ARTWORK_AUTO": "1",
+                "AUDLINT_COVER_ALBUM_BIN": str(self.bin_dir / "cover_album.sh"),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+        cover_log = (self.tmpdir / "cover.log").read_text(encoding="utf-8")
+        self.assertIn("--summary-only --yes", cover_log)
 
     def test_hot_source_applies_negative_gain(self) -> None:
         proc = self._run([], extra_env={"STUB_TRUE_PEAK": "0.1"})

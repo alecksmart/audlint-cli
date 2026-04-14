@@ -219,12 +219,24 @@ EOF
                 """
             ),
         )
+        _write_exec(
+            self.bin_dir / "cover_album.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s|%s\\n' "$(pwd)" "$*" >> "{self.tmpdir / 'cover.log'}"
+                printf 'Art: OK | cover.jpg | JPEG 600x600 | embedded 3/3 | sidecars cleared=0 | extra embeds cleared=0\\n'
+                """
+            ),
+        )
 
     def _run(self, args, extra_env=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["NO_COLOR"] = "1"
         env["AUDL_CUE2FLAC_OUTPUT_DIR"] = str(self.output_root)
+        env["AUDL_ARTWORK_AUTO"] = "0"
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -271,6 +283,19 @@ EOF
 
         flac_files = sorted(self.output_root.rglob("*.flac"))
         self.assertEqual(len(flac_files), 3, msg=f"Found files: {flac_files}")
+
+    def test_cover_postprocess_runs_after_split(self) -> None:
+        proc = self._run(
+            ["--yes"],
+            extra_env={
+                "AUDL_ARTWORK_AUTO": "1",
+                "AUDLINT_COVER_ALBUM_BIN": str(self.bin_dir / "cover_album.sh"),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+        cover_log = (self.tmpdir / "cover.log").read_text(encoding="utf-8")
+        self.assertIn("--summary-only --yes", cover_log)
 
     # -------------------------------------------------------------------------
     # Test: INDEX 1 (without leading zero) is accepted as INDEX 01

@@ -26,11 +26,14 @@ source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/artwork.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 ui_init_colors
 
 AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$BOOTSTRAP_DIR/audlint-analyze.sh}"
+AUDLINT_COVER_ALBUM_BIN="${AUDLINT_COVER_ALBUM_BIN:-$BOOTSTRAP_DIR/cover_album.sh}"
 
 require_bins ffmpeg ffprobe >/dev/null || exit 2
 
@@ -283,6 +286,8 @@ for idx in "${!dff_files[@]}"; do
     ((jobs_running -= 1))
   fi
 done
+
+artwork_run_cover_album_postprocess "$OUTPUT_DIR" "$AUDLINT_COVER_ALBUM_BIN" "$DRY_RUN" || true
 while ((jobs_running > 0)); do
   wait -n || true
   ((jobs_running -= 1))

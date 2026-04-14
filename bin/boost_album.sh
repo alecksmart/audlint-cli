@@ -31,6 +31,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/encoder.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/table.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/secure_backup.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/artwork.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$REPO_ROOT/.env" "$SCRIPT_DIR/.env" || true
@@ -39,6 +41,7 @@ ui_init_colors
 # 1. Setup
 AUTO_YES=false
 USE_LOUDNORM=false
+AUDLINT_COVER_ALBUM_BIN="${AUDLINT_COVER_ALBUM_BIN:-$SCRIPT_DIR/cover_album.sh}"
 
 show_help() {
   cat <<EOF
@@ -587,6 +590,8 @@ if [ "$ANY_FAILURES" = true ]; then
 else
     rm -f "$FAIL_SUMMARY"
 fi
+
+artwork_run_cover_album_postprocess "." "$AUDLINT_COVER_ALBUM_BIN" "0" || true
 rm -f "$FAIL_FILE"
 rm -f "$LOUDNORM_FILE"
 rm -f "$CUE_FILE"

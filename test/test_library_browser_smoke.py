@@ -1386,7 +1386,7 @@ printf 'qty_compare_stub\\n'
         )
         self.assertIn("[x Remove] | [Q Compare]", clean)
 
-    def test_transfer_excludes_cache_and_picture_files_from_rsync(self) -> None:
+    def test_transfer_keeps_canonical_cover_and_excludes_other_picture_files_from_rsync(self) -> None:
         album_dir = self.tmpdir / "library" / "Dire Straits" / "1985 - Brothers In Arms"
         album_dir.mkdir(parents=True, exist_ok=True)
         (album_dir / "01. So Far Away.flac").write_text("stub", encoding="utf-8")
@@ -1394,6 +1394,7 @@ printf 'qty_compare_stub\\n'
         (album_dir / ".sox_album_done").write_text("done", encoding="utf-8")
         (album_dir / ".any2flac_truepeak_cache.tsv").write_text("cache", encoding="utf-8")
         (album_dir / ".audlint_inspect_cache.json").write_text("{}", encoding="utf-8")
+        (album_dir / "cover.jpg").write_text("jpg", encoding="utf-8")
         (album_dir / "front.jpg").write_text("jpg", encoding="utf-8")
         (album_dir / "cover.png").write_text("png", encoding="utf-8")
 
@@ -1509,6 +1510,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertIn("--exclude=.any2flac_truepeak_cache.tsv", args_text)
         self.assertIn("--exclude=.sox_album_done", args_text)
         self.assertIn("--exclude=.sox_album_profile", args_text)
+        self.assertIn("--include=[cC][oO][vV][eE][rR].[jJ][pP][gG]", args_text)
         self.assertIn("--exclude=*.[jJ][pP][gG]", args_text)
         self.assertIn("--exclude=*.[pP][nN][gG]", args_text)
         self.assertTrue(sync_calls_log.exists(), msg=clean)

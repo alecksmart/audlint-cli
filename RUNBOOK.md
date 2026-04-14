@@ -75,20 +75,20 @@ Makefile       single project Makefile
 - `qty_compare.sh`, `spectre.sh`
 - `sync_music.sh`
 - `any2flac.sh`, `dff2flac.sh`, `cue2flac.sh`
-- `boost_album.sh`, `boost_seek.sh`
+- `boost_album.sh`, `boost_seek.sh`, `cover_album.sh`, `cover_seek.sh`
 - `lyrics_seek.sh`, `lyrics_album.sh`
 - `tag_writer.sh`, `clear_tags.sh`
 
 ## Shared Libraries (`lib/`)
 
-Shell: `audio.sh`, `bootstrap.sh`, `codec_caps.sh`, `deps.sh`, `encoder.sh`, `env.sh`, `ffprobe.sh`, `profile.sh`, `python.sh`, `rich.sh`, `secure_backup.sh`, `seek.sh`, `sqlite.sh`, `table.sh`, `ui.sh`, `util.sh`, `virtwin.sh`
+Shell: `artwork.sh`, `audio.sh`, `bootstrap.sh`, `codec_caps.sh`, `deps.sh`, `encoder.sh`, `env.sh`, `ffprobe.sh`, `profile.sh`, `python.sh`, `rich.sh`, `secure_backup.sh`, `seek.sh`, `sqlite.sh`, `table.sh`, `ui.sh`, `util.sh`, `virtwin.sh`
 Python: `dr_grade.py`, `genre_lookup.py`, `profile_norm.py`, `rich_table.py`, `spectre_image.py`
 
 ## Validation Baseline
 
-- `make bash5-check` — passes (`88/88`)
-- `make test` — passes: core `240` (`skipped=1`) + legacy `67`
-- `python3 -m unittest discover -s test -p 'test_*.py'` — last known pass before this refactor: `216` tests, `skipped=1`
+- `make bash5-check` — passes (`94/94`)
+- `make test` — passes: core `249` (`skipped=1`) + legacy `68`
+- `python3 -m unittest discover -s test -p 'test_*.py'` — current standalone core pass: `249` tests, `skipped=1`
 - `make fmt-check` — passes
 - `make lint` — passes
 - Docker distro harnesses — last known pass: Debian 12, Ubuntu 24.04, Fedora 41
@@ -459,6 +459,39 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
    - It skips existing outputs unless `--force` is provided and uses bounded ffmpeg worker parallelism.
    - Validation:
      - `python3 test/test_audlint_dataset_smoke.py` passes
+     - `make lint` passes
+     - `make bash5-check` passes
+     - `make test` passes
+
+27. Album-art standardization and maintenance workflow (2026-04-14):
+   - Added dedicated artwork tooling:
+     - `bin/cover_album.sh`
+     - `bin/cover_seek.sh`
+     - shared `lib/sh/artwork.sh`
+   - Album-art policy is now explicit and player-safe:
+     - pick one canonical source from cover/folder/front sidecars or embedded art
+     - normalize it to a single `cover.jpg` JPEG at the configured max dimension
+     - clear extra cover-like sidecars
+     - clear duplicate embedded pictures and re-embed one consistent cover per track
+     - cache a one-line album-art summary in `.audlint_album_art`
+   - Encoder / rewrite flows now hook into the artwork policy and surface a final one-line `Art: ...` status summary:
+     - `any2flac.sh`
+     - `cue2flac.sh`
+     - `dff2flac.sh`
+     - `boost_album.sh`
+   - Browser and file-movement integration:
+     - `audlint-maintain.sh` now has an `[a Album Art]` walkthrough page for dry runs and subtree/library-wide fixes
+     - player transfer keeps canonical `cover.jpg` / `cover.jpeg` sidecars while still excluding other image clutter
+     - secure backup now includes canonical cover-like sidecars alongside album audio before destructive writes
+   - Validation:
+     - `python3 -m unittest discover -s test -p 'test_cover_smoke.py'` passes
+     - `python3 -m unittest discover -s test -p 'test_any2flac_smoke.py'` passes
+     - `python3 -m unittest discover -s test -p 'test_cue2flac_smoke.py'` passes
+     - `python3 -m unittest discover -s test -p 'test_dff2flac_smoke.py'` passes
+     - `python3 -m unittest discover -s test -p 'test_audlint_maintain_smoke.py'` passes
+     - `python3 -m unittest discover -s test -p 'test_secure_backup.py'` passes
+     - `python3 -m unittest discover -s test -p 'test_library_browser_smoke.py'` passes
+     - `python3 -m unittest discover -s test/legacy -p 'test_legacy_boost_audio_cli_smoke.py'` passes
      - `make lint` passes
      - `make bash5-check` passes
      - `make test` passes

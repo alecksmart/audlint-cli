@@ -11,7 +11,7 @@
 - Interactive library browser with filters, album inspection, compare album directories, and maintenance controls
 - Album and track analysis driven by DR, true peak, codec/profile detection, and spectral checks
 - Recode decision support shared across the browser, maintenance scans, and conversion tools
-- Utility scripts for CUE splitting, FLAC conversion, gain application, lyrics fetching, sync, and spectrogram generation
+- Utility scripts for CUE splitting, FLAC conversion, gain application, album-art normalization, lyrics fetching, sync, and spectrogram generation
 
 ## What it does
 
@@ -114,6 +114,11 @@ If `dr14meter` is installed with `--user`, ensure your user bin directory is on 
 `spectre.sh` (audio spectrogram generation) requires:
 - `ffmpeg`, `ffprobe`
 
+Optional format helpers:
+
+- `eyeD3` — preferred for MP3 tag and embedded-art rewrites
+- `AtomicParsley` — preferred for M4A/ALAC tag and embedded-art rewrites
+
 Optional development tools:
 
 - `shellcheck` (used by `make lint`)
@@ -171,6 +176,7 @@ From the main browser, press `[m]` to open **Maintenance**.
 
 - Manual reads: choose `[m] Run Maintenance` to run one `audlint-task.sh` pass immediately and append the scan output to the task log.
 - Scheduled reads: choose `[i] Install Cron` to install a managed crontab entry that runs the same task automatically on your configured interval.
+- Album art cleanup: choose `[a] Album Art` inside Maintenance for a walkthrough that normalizes each album to one canonical `cover.jpg`, clears duplicate embedded pictures, and rewrites a consistent cover across tracks.
 
 This is how the browser keeps its library state fresh: either by on-demand maintenance runs, or by letting cron refresh the scan queue in the background.
 If `AUDL_PARANOIA_MODE=1`, audlint also requires a backup path and snapshots an album's track files there before destructive write operations.

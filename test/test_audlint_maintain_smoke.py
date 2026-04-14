@@ -42,8 +42,11 @@ class AudlintMaintainSmokeTests(unittest.TestCase):
         self.task_log = self.tmpdir / "maintain.log"
         self.boost_cwd_log = self.tmpdir / "boost-cwd.log"
         self.boost_args_log = self.tmpdir / "boost-args.log"
+        self.cover_cwd_log = self.tmpdir / "cover-cwd.log"
+        self.cover_args_log = self.tmpdir / "cover-args.log"
         self.task_bin = self.bin_dir / "audlint-task.sh"
         self.boost_seek_bin = self.bin_dir / "boost_seek.sh"
+        self.cover_seek_bin = self.bin_dir / "cover_seek.sh"
 
         _write_exec(
             self.bin_dir / "crontab",
@@ -86,6 +89,16 @@ echo "$*" >> "${BOOST_SEEK_ARGS_LOG:?}"
 exit 0
 """,
         )
+        _write_exec(
+            self.cover_seek_bin,
+            """#!/usr/bin/env bash
+set -euo pipefail
+pwd >> "${COVER_SEEK_CWD_LOG:?}"
+echo "$*" >> "${COVER_SEEK_ARGS_LOG:?}"
+printf 'Art: OK | cover.jpg | JPEG 600x600 | embedded 1/1 | sidecars cleared=0 | extra embeds cleared=0\n'
+exit 0
+""",
+        )
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -105,8 +118,11 @@ exit 0
                 "AUDL_TASK_LOG_PATH": str(self.task_log),
                 "AUDL_CRON_INTERVAL_MIN": "20",
                 "AUDLINT_BOOST_SEEK_BIN": str(self.boost_seek_bin),
+                "AUDLINT_COVER_SEEK_BIN": str(self.cover_seek_bin),
                 "BOOST_SEEK_CWD_LOG": str(self.boost_cwd_log),
                 "BOOST_SEEK_ARGS_LOG": str(self.boost_args_log),
+                "COVER_SEEK_CWD_LOG": str(self.cover_cwd_log),
+                "COVER_SEEK_ARGS_LOG": str(self.cover_args_log),
             }
         )
         if extra_env:
@@ -169,6 +185,7 @@ exit 0
         self.assertEqual(rc, 0, msg=clean)
         self.assertIn("[m Run Maintenance]", clean, msg=clean)
         self.assertIn("[i Install Cron]", clean, msg=clean)
+        self.assertIn("[a Album Art]", clean, msg=clean)
         self.assertIn("[b Boost Gain]", clean, msg=clean)
         self.assertIn("[l View Log]", clean, msg=clean)
         self.assertNotIn("[t Clear Player Files]", clean, msg=clean)
@@ -190,6 +207,7 @@ exit 0
         clean = self._strip_ansi(out)
         self.assertEqual(rc, 0, msg=clean)
         self.assertIn("[u Uninstall Cron]", clean, msg=clean)
+        self.assertIn("[a Album Art]", clean, msg=clean)
         self.assertIn("[b Boost Gain]", clean, msg=clean)
         self.assertIn("[l View Log]", clean, msg=clean)
         self.assertNotIn("[t Clear Player Files]", clean, msg=clean)
@@ -306,6 +324,36 @@ exit 0
         self.assertEqual(rc, 0, msg=clean)
         option_lines = [line for line in clean.splitlines() if "[1]" in line or "[2]" in line]
         self.assertTrue(any("[1]" in line and "[2]" in line for line in option_lines), msg=clean)
+
+    def test_album_art_page_runs_library_root_dry_run(self) -> None:
+        (self.root_dir / "Artist A" / "2001 - Album A").mkdir(parents=True, exist_ok=True)
+
+        rc, out = self._run_in_pty(b"adxq")
+        clean = self._strip_ansi(out)
+        self.assertEqual(rc, 0, msg=clean)
+        self.assertIn("Album Art", clean, msg=clean)
+        self.assertIn("Walkthrough:", clean, msg=clean)
+        self.assertIn("Album art dry run completed.", clean, msg=clean)
+        self.assertTrue(self.cover_cwd_log.exists())
+        self.assertIn(str(self.root_dir), self.cover_cwd_log.read_text(encoding="utf-8"))
+        self.assertTrue(self.cover_args_log.exists())
+        self.assertIn("--dry-run --yes", self.cover_args_log.read_text(encoding="utf-8"))
+
+    def test_album_art_page_runs_selected_directory(self) -> None:
+        first = self.root_dir / "Artist A"
+        second = self.root_dir / "Artist B"
+        first.mkdir(parents=True, exist_ok=True)
+        second.mkdir(parents=True, exist_ok=True)
+
+        rc, out = self._run_in_pty(b"a1x")
+        clean = self._strip_ansi(out)
+        self.assertEqual(rc, 0, msg=clean)
+        self.assertIn("Album Art", clean, msg=clean)
+        self.assertIn("[1] Artist A", clean, msg=clean)
+        self.assertIn("[2] Artist B", clean, msg=clean)
+        self.assertIn("Album art completed.", clean, msg=clean)
+        self.assertTrue(self.cover_cwd_log.exists())
+        self.assertIn(str(first), self.cover_cwd_log.read_text(encoding="utf-8"))
 
 
 class AudlintMaintainRealCrontabE2ETests(unittest.TestCase):

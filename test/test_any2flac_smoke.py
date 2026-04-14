@@ -204,12 +204,24 @@ EOF
                 """
             ),
         )
+        _write_exec(
+            self.bin_dir / "cover_album.sh",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s|%s\\n' "$(pwd)" "$*" >> "{self.tmpdir / 'cover.log'}"
+                printf 'Art: OK | cover.jpg | JPEG 600x600 | embedded 1/1 | sidecars cleared=0 | extra embeds cleared=0\\n'
+                """
+            ),
+        )
 
     def _run(self, args, extra_env=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["NO_COLOR"] = "1"
         env["AUDLINT_ANALYZE_BIN"] = str(self.bin_dir / "audlint-analyze.sh")
+        env["AUDL_ARTWORK_AUTO"] = "0"
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
@@ -258,6 +270,22 @@ EOF
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Auto profile: 48000/24", proc.stdout)
         self.assertIn("Boost mode: enabled", proc.stdout)
+
+    def test_cover_postprocess_runs_after_conversion(self) -> None:
+        src = self.album_dir / "01-hr.wav"
+        src.write_text("", encoding="utf-8")
+
+        proc = self._run(
+            ["48/24", "--yes"],
+            extra_env={
+                "AUDL_ARTWORK_AUTO": "1",
+                "AUDLINT_COVER_ALBUM_BIN": str(self.bin_dir / "cover_album.sh"),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+        cover_log = (self.tmpdir / "cover.log").read_text(encoding="utf-8")
+        self.assertIn("--summary-only --yes", cover_log)
 
     def test_exact_is_not_supported_in_any2flac(self) -> None:
         src = self.album_dir / "01-hr.wav"

@@ -31,6 +31,7 @@ AUDLINT_TASK_LOG="${AUDL_TASK_LOG_PATH:-$HOME/audlint-task.log}"
 AUDLINT_LIBRARY_ROOT="${AUDLINT_LIBRARY_ROOT:-${LIBRARY_ROOT:-${AUDL_PATH:-}}}"
 AUDLINT_CRON_INTERVAL_MIN="${AUDL_CRON_INTERVAL_MIN:-20}"
 AUDLINT_BOOST_SEEK_BIN="${AUDLINT_BOOST_SEEK_BIN:-$SCRIPT_DIR/boost_seek.sh}"
+AUDLINT_COVER_SEEK_BIN="${AUDLINT_COVER_SEEK_BIN:-$SCRIPT_DIR/cover_seek.sh}"
 MEDIA_PLAYER_PATH="${AUDL_MEDIA_PLAYER_PATH:-}"
 NO_COLOR="${NO_COLOR:-}"
 USE_COLOR=false
@@ -321,6 +322,34 @@ run_boost_gain_for_dir() {
   pause_with_result "Boost gain failed (exit $rc)."
 }
 
+run_album_art_for_dir() {
+  local selected_dir="$1"
+  local dry_run="${2:-0}"
+  if [[ ! -x "$AUDLINT_COVER_SEEK_BIN" ]]; then
+    pause_with_result "Album art failed: cover_seek not executable ($AUDLINT_COVER_SEEK_BIN)."
+  fi
+
+  printf 'Album Art target: %s\n' "$selected_dir"
+  printf -- '-----------\n'
+  local rc=0
+  (
+    cd "$selected_dir" || exit 2
+    if [[ "$dry_run" == "1" ]]; then
+      "$AUDLINT_COVER_SEEK_BIN" --dry-run --yes
+    else
+      "$AUDLINT_COVER_SEEK_BIN" --yes
+    fi
+  ) || rc=$?
+
+  if ((rc == 0)); then
+    if [[ "$dry_run" == "1" ]]; then
+      pause_with_result "Album art dry run completed."
+    fi
+    pause_with_result "Album art completed."
+  fi
+  pause_with_result "Album art failed (exit $rc)."
+}
+
 confirm_clear_player_files_prompt() {
   local prompt_text='Clear all player files? [y Clear, n Cancel] > '
   local choice=""
@@ -449,6 +478,80 @@ boost_gain_page() {
   run_boost_gain_for_dir "${picked[$sel_idx]}"
 }
 
+album_art_page() {
+  if [[ -z "$AUDLINT_LIBRARY_ROOT" || ! -d "$AUDLINT_LIBRARY_ROOT" ]]; then
+    pause_with_result "Album art failed: AUDLINT_LIBRARY_ROOT is missing or invalid."
+  fi
+  local -a dirs=()
+  while IFS= read -r -d '' dir; do
+    dirs+=("$dir")
+  done < <(find "$AUDLINT_LIBRARY_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | LC_ALL=C sort -z)
+
+  printf '\033[2J\033[H'
+  printf '%s\n' "$(paint "$C_TITLE" "Album Art")"
+  printf -- '%s\n' "$(paint "$C_TITLE" "---------")"
+  printf '%s %s\n\n' "$(paint "$C_LABEL" "Library Root:")" "$(paint "$C_VALUE" "$AUDLINT_LIBRARY_ROOT")"
+  printf 'Walkthrough:\n'
+  printf '  - keeps one canonical cover.jpg sidecar per album\n'
+  printf '  - normalizes art to JPEG at the configured max dimension\n'
+  printf '  - clears extra embedded pictures and re-embeds one consistent cover per track\n'
+  printf '\n'
+  printf '%s\n' "$(hint_button d "Dry Run Library Root")"
+  printf '%s\n' "$(hint_button r "Run Library Root")"
+  if ((${#dirs[@]} > 0)); then
+    printf '\n'
+    local max_choices=35
+    local show_count="${#dirs[@]}"
+    if ((show_count > max_choices)); then
+      show_count="$max_choices"
+    fi
+    local -a picked=()
+    local idx
+    for ((idx=0; idx<show_count; idx++)); do
+      picked+=("${dirs[$idx]}")
+    done
+    print_boost_choice_grid picked "$show_count"
+    if ((${#dirs[@]} > max_choices)); then
+      printf '\nShowing first %d directories (of %d).\n' "$max_choices" "${#dirs[@]}"
+    fi
+    printf '\nSelect a directory key to run only that subtree.\n'
+  fi
+  printf '%s\n' "$(hint_button q "Back")"
+  printf '\n'
+
+  local sel=""
+  ui_prompt_key "choice > " sel 1 1 || sel="q"
+  sel="${sel,,}"
+
+  case "$sel" in
+  q)
+    return 0
+    ;;
+  d)
+    run_album_art_for_dir "$AUDLINT_LIBRARY_ROOT" 1
+    ;;
+  r)
+    run_album_art_for_dir "$AUDLINT_LIBRARY_ROOT" 0
+    ;;
+  *)
+    local max_sel="${#dirs[@]}"
+    if ((max_sel > 35)); then
+      max_sel=35
+    fi
+    local sel_idx=""
+    sel_idx="$(menu_choice_index_from_key "$sel" "$max_sel" || true)"
+    if [[ ! "$sel_idx" =~ ^[0-9]+$ || "$sel_idx" == "0" ]]; then
+      return 0
+    fi
+    sel_idx=$((sel_idx - 1))
+    if ((sel_idx < 0 || sel_idx >= max_sel)); then
+      return 0
+    fi
+    run_album_art_for_dir "${dirs[$sel_idx]}" 0
+    ;;
+  esac
+}
+
 print_menu() {
   local cron_state="$1"
   local player_ready="$2"
@@ -470,6 +573,7 @@ print_menu() {
   if [[ "$player_ready" == "yes" ]]; then
     printf '%s\n' "$(hint_button t "Clear Player Files")"
   fi
+  printf '%s\n' "$(hint_button a "Album Art")"
   printf '%s\n' "$(hint_button b "Boost Gain")"
   printf '%s\n' "$(hint_button l "View Log")"
   printf '%s\n' "$(hint_button q "Exit to Main Window")"
@@ -509,6 +613,9 @@ main() {
         pause_with_result "Uninstall skipped: cron is not installed."
       fi
       uninstall_cron_block
+      ;;
+    a)
+      album_art_page
       ;;
     b)
       boost_gain_page

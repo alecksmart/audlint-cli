@@ -33,6 +33,7 @@ class BoostCliSmokeTests(unittest.TestCase):
         self.env_base["PATH"] = f"{self.bin_dir}{os.pathsep}{self.env_base.get('PATH', '')}"
         self.env_base["TERM"] = "xterm"
         self.env_base["RICH_TABLE_CMD"] = str(self.table_stub)
+        self.env_base["AUDL_ARTWORK_AUTO"] = "0"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -42,6 +43,17 @@ class BoostCliSmokeTests(unittest.TestCase):
         _write_exec(self.bin_dir / "ffmpeg", "#!/bin/bash\nexit 0\n")
         _write_exec(self.bin_dir / "ffprobe", "#!/bin/bash\nexit 0\n")
         _write_exec(self.bin_dir / "bc", "#!/bin/bash\nexit 0\n")
+        _write_exec(
+            self.bin_dir / "cover_album.sh",
+            textwrap.dedent(
+                f"""\
+                #!/bin/bash
+                printf "%s|%s\\n" "$(pwd)" "$*" >> "{self.tmpdir / 'cover.log'}"
+                printf "Art: OK | cover.jpg | JPEG 600x600 | embedded 1/1 | sidecars cleared=0 | extra embeds cleared=0\\n"
+                exit 0
+                """
+            ),
+        )
 
     def _run(self, script: Path, args, cwd: Path, env=None) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -194,6 +206,103 @@ class BoostCliSmokeTests(unittest.TestCase):
         self.assertRegex(proc.stdout, r"Net Gain:\s+\+0?\.5 dB")
         self.assertTrue(track.exists())
         self.assertTrue((album / "before-recode" / "01.flac").exists())
+
+    def test_boost_album_runs_cover_postprocess(self) -> None:
+        album = self.tmpdir / "album_art"
+        album.mkdir(parents=True, exist_ok=True)
+        track = album / "01.flac"
+        track.write_text("", encoding="utf-8")
+
+        real_bc = shutil.which("bc") or "/usr/bin/bc"
+        _write_exec(self.bin_dir / "bc", f"#!/bin/bash\nexec '{real_bc}' \"$@\"\n")
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args="$*"
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bits_per_raw_sample"* ]]; then
+                  echo "24"
+                  exit 0
+                fi
+                if [[ "$args" == *"stream=bit_rate"* ]]; then
+                  echo "900000"
+                  exit 0
+                fi
+                if [[ "$args" == *"format_tags=CUESHEET"* ]]; then
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "ffmpeg",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                if [[ "$*" == *"volumedetect"* ]]; then
+                  echo "[Parsed_volumedetect_0 @ 0x0] max_volume: -2.0 dB" >&2
+                  exit 0
+                fi
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "sox",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                args=("$@")
+                positionals=()
+                i=0
+                while (( i < ${#args[@]} )); do
+                  case "${args[$i]}" in
+                    -b|-r|-c|-e|-t|-L|-R|-C|--compression) (( i += 2 )) || true ;;
+                    -*) (( i++ )) || true ;;
+                    *) positionals+=("${args[$i]}"); (( i++ )) || true ;;
+                  esac
+                done
+                out="${positionals[1]:-}"
+                mkdir -p "$(dirname "$out")"
+                : > "$out"
+                exit 0
+                """
+            ),
+        )
+        _write_exec(
+            self.bin_dir / "metaflac",
+            textwrap.dedent(
+                """\
+                #!/bin/bash
+                for arg in "$@"; do
+                  case "$arg" in
+                    --export-tags-to=*)
+                      path="${arg#--export-tags-to=}"
+                      : > "$path"
+                      ;;
+                  esac
+                done
+                exit 0
+                """
+            ),
+        )
+
+        env = {
+            **self.env_base,
+            "AUDL_ARTWORK_AUTO": "1",
+            "AUDLINT_COVER_ALBUM_BIN": str(self.bin_dir / "cover_album.sh"),
+        }
+        proc = self._run(BOOST_ALBUM, ["-y"], cwd=album, env=env)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+        cover_log = (self.tmpdir / "cover.log").read_text(encoding="utf-8")
+        self.assertIn("--summary-only --yes", cover_log)
 
     def test_boost_album_applies_negative_gain_for_hot_source(self) -> None:
         album = self.tmpdir / "album_hot"

@@ -73,6 +73,19 @@ _secure_album_has_audio_tracks() {
   \) -print -quit | grep -q .
 }
 
+_secure_album_sidecar_find_expr() {
+  printf '%s ' \
+    '-iname' 'cover.jpg' \
+    '-o' '-iname' 'cover.jpeg' \
+    '-o' '-iname' 'cover.png' \
+    '-o' '-iname' 'folder.jpg' \
+    '-o' '-iname' 'folder.jpeg' \
+    '-o' '-iname' 'folder.png' \
+    '-o' '-iname' 'front.jpg' \
+    '-o' '-iname' 'front.jpeg' \
+    '-o' '-iname' 'front.png'
+}
+
 secure_backup_album_tracks_once() {
   local album_dir="${1:-}"
   local action="${2:-write-op}"
@@ -121,6 +134,11 @@ secure_backup_album_tracks_once() {
     -o -iname '*.dsf' -o -iname '*.dff' -o -iname '*.wv' -o -iname '*.ape' \
     -o -iname '*.mp4' -o -iname '*.mp3' -o -iname '*.aac' -o -iname '*.ogg' -o -iname '*.opus' \
   \) -print0)
+
+  # shellcheck disable=SC2046  # deliberate find-expression splicing from helper
+  while IFS= read -r -d '' track; do
+    src_tracks+=("$track")
+  done < <(find "$album_abs" -maxdepth 1 -type f \( $(_secure_album_sidecar_find_expr) \) -print0)
 
   if ((${#src_tracks[@]} == 0)); then
     _secure_fail "Secure mode error: no track files found in album before $action: $album_abs"

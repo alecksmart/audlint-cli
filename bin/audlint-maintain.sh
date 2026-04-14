@@ -433,17 +433,26 @@ print_boost_choice_grid() {
   printf '\n'
 }
 
-album_art_choice_key_is_reserved() {
+choice_key_is_reserved() {
   local key="${1:-}"
-  case "${key,,}" in
-  d | q | r) return 0 ;;
-  *) return 1 ;;
-  esac
+  local reserved_csv="${2:-}"
+  local item=""
+  key="${key,,}"
+  IFS=',' read -r -a _reserved_items <<<"$reserved_csv"
+  for item in "${_reserved_items[@]}"; do
+    item="${item,,}"
+    [[ -n "$item" ]] || continue
+    if [[ "$key" == "$item" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
-album_art_build_choice_keys() {
+build_choice_keys_skipping_reserved() {
   local count="$1"
   local out_var="$2"
+  local reserved_csv="${3:-}"
   local -n out_ref="$out_var"
   local candidate_idx=1
   local candidate_key=""
@@ -451,7 +460,7 @@ album_art_build_choice_keys() {
   out_ref=()
   while ((${#out_ref[@]} < count && candidate_idx <= 35)); do
     candidate_key="$(menu_choice_label "$candidate_idx")"
-    if ! album_art_choice_key_is_reserved "$candidate_key"; then
+    if ! choice_key_is_reserved "$candidate_key" "$reserved_csv"; then
       out_ref+=("$candidate_key")
     fi
     candidate_idx=$((candidate_idx + 1))
@@ -479,18 +488,20 @@ boost_gain_page() {
   printf -- '%s\n' "$(paint "$C_TITLE" "-----------")"
   printf '%s %s\n\n' "$(paint "$C_LABEL" "Library Root:")" "$(paint "$C_VALUE" "$AUDLINT_LIBRARY_ROOT")"
 
-  local max_choices=35
+  local max_choices=34
   local show_count="${#dirs[@]}"
   if ((show_count > max_choices)); then
     show_count="$max_choices"
   fi
 
   local -a picked=()
+  local -a picked_keys=()
   local idx
   for ((idx=0; idx<show_count; idx++)); do
     picked+=("${dirs[$idx]}")
   done
-  print_boost_choice_grid picked "$show_count"
+  build_choice_keys_skipping_reserved "$show_count" picked_keys "q"
+  print_boost_choice_grid picked "$show_count" picked_keys
   if ((${#dirs[@]} > max_choices)); then
     printf '\nShowing first %d directories (of %d).\n' "$max_choices" "${#dirs[@]}"
   fi
@@ -505,11 +516,14 @@ boost_gain_page() {
   fi
 
   local sel_idx=""
-  sel_idx="$(menu_choice_index_from_key "$sel" "$show_count" || true)"
-  if [[ ! "$sel_idx" =~ ^[0-9]+$ ]]; then
+  for ((sel_idx=0; sel_idx<show_count; sel_idx++)); do
+    if [[ "${picked_keys[$sel_idx]}" == "$sel" ]]; then
+      break
+    fi
+  done
+  if ((sel_idx >= show_count)); then
     return 0
   fi
-  sel_idx=$((sel_idx - 1))
   if ((sel_idx < 0 || sel_idx >= show_count)); then
     return 0
   fi
@@ -551,7 +565,7 @@ album_art_page() {
     for ((idx=0; idx<show_count; idx++)); do
       picked+=("${dirs[$idx]}")
     done
-    album_art_build_choice_keys "$show_count" picked_keys
+    build_choice_keys_skipping_reserved "$show_count" picked_keys "d,q,r"
     print_boost_choice_grid picked "$show_count" picked_keys
     if ((${#dirs[@]} > max_choices)); then
       printf '\nShowing first %d directories (of %d).\n' "$max_choices" "${#dirs[@]}"
@@ -581,7 +595,7 @@ album_art_page() {
     if ((max_sel > 32)); then
       max_sel=32
     fi
-    album_art_build_choice_keys "$max_sel" picked_keys
+    build_choice_keys_skipping_reserved "$max_sel" picked_keys "d,q,r"
     local sel_idx=""
     for ((sel_idx=0; sel_idx<max_sel; sel_idx++)); do
       if [[ "${picked_keys[$sel_idx]}" == "$sel" ]]; then

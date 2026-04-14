@@ -325,6 +325,20 @@ exit 0
         option_lines = [line for line in clean.splitlines() if "[1]" in line or "[2]" in line]
         self.assertTrue(any("[1]" in line and "[2]" in line for line in option_lines), msg=clean)
 
+    def test_boost_gain_page_skips_reserved_cancel_key(self) -> None:
+        for name in ("1", "3", "5", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "_VA"):
+            (self.root_dir / name).mkdir(parents=True, exist_ok=True)
+
+        rc, out = self._run_in_pty(b"bqq")
+        clean = self._strip_ansi(out)
+        self.assertEqual(rc, 0, msg=clean)
+        self.assertIn("Boost Gain", clean, msg=clean)
+        self.assertIn("[q] Cancel", clean, msg=clean)
+        self.assertNotIn("[q] Q", clean, msg=clean)
+        self.assertIn("[k] Q", clean, msg=clean)
+        self.assertIn("[p] V", clean, msg=clean)
+        self.assertIn("[r] W", clean, msg=clean)
+
     def test_album_art_page_runs_library_root_dry_run(self) -> None:
         (self.root_dir / "Artist A" / "2001 - Album A").mkdir(parents=True, exist_ok=True)
 

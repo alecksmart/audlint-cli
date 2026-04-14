@@ -940,7 +940,9 @@ ${row_select_sql},
          ${keyset_album_transport_sql},
          COALESCE(year_int,0),
          id,
-         COALESCE(needs_recode,0)
+         COALESCE(needs_recode,0),
+         COALESCE(album,''),
+         COALESCE(source_path,'')
        FROM album_quality
        $where_sql
        $order_sql
@@ -966,7 +968,7 @@ reverse_lines() {
 parse_rows_raw() {
   local raw="$1"
   local out=()
-  local c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16
+  local c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18
   CURSOR_FIRST_CHECKED=""
   CURSOR_FIRST_ARTIST=""
   CURSOR_FIRST_ALBUM=""
@@ -979,8 +981,8 @@ parse_rows_raw() {
   CURSOR_LAST_ID=""
   local seen_first=0
 
-  while IFS="$ROW_RAW_SEP" read -r c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16; do
-    [[ -n "$c0$c1$c2$c3$c4$c5$c6$c7$c8$c9$c10$c11$c12$c13$c14$c15$c16" ]] || continue
+  while IFS="$ROW_RAW_SEP" read -r c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18; do
+    [[ -n "$c0$c1$c2$c3$c4$c5$c6$c7$c8$c9$c10$c11$c12$c13$c14$c15$c16$c17$c18" ]] || continue
     out+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
       "$c0" "$c1" "$c2" "$c3" "$c4" "$c5" "$c6" "$c7" "$c8" "$c9" "$c10")")
     if ((seen_first == 0)); then
@@ -3655,7 +3657,7 @@ run_transfer_for_row_ids() {
     printf '[%s] manifest=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$manifest_file" >>"$transfer_log" 2>/dev/null || true
   fi
 
-  local row_id row artist album year source_path dest_dir transfer_year
+  local row_id row artist album year source_path
   for row_id in "${selected_ids[@]}"; do
     [[ "$row_id" =~ ^[0-9]+$ ]] || continue
     row="$(
@@ -3678,23 +3680,50 @@ run_transfer_for_row_ids() {
       return 1
     fi
     IFS=$'\t' read -r artist album year source_path <<< "$row"
-    if [[ -z "$source_path" || ! -d "$source_path" ]]; then
+    if ! transfer_manifest_append_entry "$manifest_file" "$transfer_log" "$row_id" "$artist" "$album" "$year" "$source_path"; then
       rm -f "$manifest_file"
-      ACTION_MESSAGE="Transfer failed: source path unavailable for $artist - $album."
-      if [[ -n "$transfer_log" ]]; then
-        printf '[%s] abort: source missing for id=%s artist=%s album=%s path=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$artist" "$album" "${source_path:-<empty>}" >>"$transfer_log" 2>/dev/null || true
-      fi
       return 1
     fi
-    transfer_year="$(transfer_year_for_source "$source_path" "$year")"
-    [[ "$transfer_year" =~ ^[12][0-9]{3}$ ]] || transfer_year="$year"
-    dest_dir="$(player_album_dest_dir_for_source "$source_path" "$artist" "$transfer_year" "$album")"
-    if [[ -n "$transfer_log" ]]; then
-      printf '[%s] row id=%s source=%s year_db=%s year_transfer=%s dest=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$source_path" "$year" "$transfer_year" "$dest_dir" >>"$transfer_log" 2>/dev/null || true
-    fi
-    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$artist" "$album" "$transfer_year" "$source_path" "$dest_dir" >>"$manifest_file"
   done
 
+  if ! run_transfer_manifest "$manifest_file" "$transfer_log" "${#selected_ids[@]}"; then
+    return 1
+  fi
+  ACTION_MESSAGE="Transfer completed for ${#selected_ids[@]} album(s)."
+  return 0
+}
+
+transfer_manifest_append_entry() {
+  local manifest_file="$1"
+  local transfer_log="$2"
+  local row_id="$3"
+  local artist="$4"
+  local album="$5"
+  local year="$6"
+  local source_path="$7"
+  local dest_dir transfer_year
+
+  if [[ -z "$source_path" || ! -d "$source_path" ]]; then
+    ACTION_MESSAGE="Transfer failed: source path unavailable for $artist - $album."
+    if [[ -n "$transfer_log" ]]; then
+      printf '[%s] abort: source missing for id=%s artist=%s album=%s path=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$artist" "$album" "${source_path:-<empty>}" >>"$transfer_log" 2>/dev/null || true
+    fi
+    return 1
+  fi
+
+  transfer_year="$(transfer_year_for_source "$source_path" "$year")"
+  [[ "$transfer_year" =~ ^[12][0-9]{3}$ ]] || transfer_year="$year"
+  dest_dir="$(player_album_dest_dir_for_source "$source_path" "$artist" "$transfer_year" "$album")"
+  if [[ -n "$transfer_log" ]]; then
+    printf '[%s] row id=%s source=%s year_db=%s year_transfer=%s dest=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$source_path" "$year" "$transfer_year" "$dest_dir" >>"$transfer_log" 2>/dev/null || true
+  fi
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$artist" "$album" "$transfer_year" "$source_path" "$dest_dir" >>"$manifest_file"
+}
+
+run_transfer_manifest() {
+  local manifest_file="$1"
+  local transfer_log="$2"
+  local selected_count="$3"
   local runner_script
   runner_script="$(mktemp "${TMPDIR:-/tmp}/library_browser_transfer.XXXXXX" 2>/dev/null || true)"
   if [[ -z "$runner_script" ]]; then
@@ -3828,7 +3857,7 @@ EOF
   local first_title=""
   if IFS=$'\x1f' read -r first_artist first_album first_year _first_source _first_dest <"$manifest_file"; then
     if [[ -n "${first_artist:-}" ]]; then
-      first_title="1 of ${#selected_ids[@]} | ${first_artist} - ${first_year} - ${first_album} | transferring..."
+      first_title="1 of ${selected_count} | ${first_artist} - ${first_year} - ${first_album} | transferring..."
     fi
   fi
   if VIRTWIN_RIGHT_TITLE="$first_title" virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "transfer-player" \
@@ -3846,7 +3875,6 @@ EOF
   rm -f "$runner_script" "$manifest_file"
 
   if ((transfer_ok == 1)); then
-    ACTION_MESSAGE="Transfer completed for ${#selected_ids[@]} album(s)."
     return 0
   fi
   if [[ -n "$transfer_log" && -s "$transfer_log" ]]; then
@@ -3855,6 +3883,84 @@ EOF
     ACTION_MESSAGE="Transfer failed (exit $transfer_rc)."
   fi
   return 1
+}
+
+run_transfer_for_snapshot_entries() {
+  local snapshot_entries=("$@")
+  local transfer_log="${LIBRARY_BROWSER_TRANSFER_LOG:-/tmp/library_browser_transfer.last.log}"
+  local start_ids="<none>"
+  local entry row_id artist album year source_path
+  : >"$transfer_log" 2>/dev/null || transfer_log=""
+  if ((${#snapshot_entries[@]} > 0)); then
+    start_ids=""
+    for entry in "${snapshot_entries[@]}"; do
+      IFS=$'\x1f' read -r row_id artist album year source_path <<< "$entry"
+      [[ -n "$row_id" ]] || continue
+      if [[ -n "$start_ids" ]]; then
+        start_ids+=" "
+      fi
+      start_ids+="$row_id"
+    done
+    [[ -n "$start_ids" ]] || start_ids="<none>"
+  fi
+  if [[ -n "$transfer_log" ]]; then
+    printf '[%s] transfer start ids=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$start_ids" >>"$transfer_log" 2>/dev/null || true
+  fi
+  if ! show_transfer_action; then
+    ACTION_MESSAGE="Transfer unavailable: AUDL_MEDIA_PLAYER_PATH is missing or not writable."
+    if [[ -n "$transfer_log" ]]; then
+      printf '[%s] abort: AUDL_MEDIA_PLAYER_PATH unavailable/unwritable (%s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${MEDIA_PLAYER_PATH:-<empty>}" >>"$transfer_log" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  if ! command_ref_available "$RSYNC_BIN"; then
+    ACTION_MESSAGE="Transfer unavailable: rsync not found ($RSYNC_BIN)."
+    if [[ -n "$transfer_log" ]]; then
+      printf '[%s] abort: rsync unavailable (%s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RSYNC_BIN" >>"$transfer_log" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  if ! command_ref_available "$SYNC_BIN"; then
+    ACTION_MESSAGE="Transfer unavailable: sync command not found ($SYNC_BIN)."
+    if [[ -n "$transfer_log" ]]; then
+      printf '[%s] abort: sync unavailable (%s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$SYNC_BIN" >>"$transfer_log" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  if ((${#snapshot_entries[@]} == 0)); then
+    ACTION_MESSAGE="No rows selected for transfer."
+    if [[ -n "$transfer_log" ]]; then
+      printf '[%s] abort: no row ids selected\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$transfer_log" 2>/dev/null || true
+    fi
+    return 1
+  fi
+
+  local manifest_file
+  manifest_file="$(mktemp "${TMPDIR:-/tmp}/library_browser_transfer_manifest.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$manifest_file" ]]; then
+    ACTION_MESSAGE="Failed to create transfer manifest."
+    if [[ -n "$transfer_log" ]]; then
+      printf '[%s] abort: failed to create manifest\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$transfer_log" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  if [[ -n "$transfer_log" ]]; then
+    printf '[%s] manifest=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$manifest_file" >>"$transfer_log" 2>/dev/null || true
+  fi
+
+  for entry in "${snapshot_entries[@]}"; do
+    IFS=$'\x1f' read -r row_id artist album year source_path <<< "$entry"
+    if ! transfer_manifest_append_entry "$manifest_file" "$transfer_log" "$row_id" "$artist" "$album" "$year" "$source_path"; then
+      rm -f "$manifest_file"
+      return 1
+    fi
+  done
+
+  if ! run_transfer_manifest "$manifest_file" "$transfer_log" "${#snapshot_entries[@]}"; then
+    return 1
+  fi
+  ACTION_MESSAGE="Transfer completed for ${#snapshot_entries[@]} album(s)."
+  return 0
 }
 
 mark_album_has_lyrics_for_row_id() {
@@ -5023,13 +5129,14 @@ while true; do
   rows="$(parse_rows_raw "$rows_raw")"
   rows="$(decorate_rows_for_sort_column "$rows" "$SORT_KEY")"
   row_action_row_ids=()
+  row_action_transfer_entries=()
   row_selection_labels=()
   row_action_selectable_count=0
   if [[ "$INTERACTIVE" == "yes" && -n "$ROW_ACTION_MODE" ]]; then
     selectable_idx=1
-    c0="" c1="" c2="" c3="" c4="" c5="" c6="" c7="" c8="" c9="" c10="" c11="" c12="" c13="" c14="" c15="" c16=""
-    while IFS="$ROW_RAW_SEP" read -r c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16; do
-      [[ -n "$c0$c1$c2$c3$c4$c5$c6$c7$c8$c9$c10$c11$c12$c13$c14$c15$c16" ]] || continue
+    c0="" c1="" c2="" c3="" c4="" c5="" c6="" c7="" c8="" c9="" c10="" c11="" c12="" c13="" c14="" c15="" c16="" c17="" c18=""
+    while IFS="$ROW_RAW_SEP" read -r c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18; do
+      [[ -n "$c0$c1$c2$c3$c4$c5$c6$c7$c8$c9$c10$c11$c12$c13$c14$c15$c16$c17$c18" ]] || continue
       [[ "$c15" =~ ^[0-9]+$ ]] || continue
       if [[ "$ROW_ACTION_MODE" == "album_analysis" ]]; then
         if inspect_row_is_selectable "$c16" "$c9" "$c8"; then
@@ -5047,6 +5154,9 @@ while true; do
       else
         row_action_row_ids+=("$c15")
         row_selection_labels+=("$selectable_idx")
+        if [[ "$ROW_ACTION_MODE" == "transfer" ]]; then
+          row_action_transfer_entries+=("$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s' "$c15" "$c0" "$c17" "$c14" "$c18")")
+        fi
       fi
       selectable_idx=$((selectable_idx + 1))
     done <<< "$rows_raw"
@@ -5122,6 +5232,7 @@ while true; do
         continue
       fi
       selected_row_ids=()
+      selected_transfer_entries=()
       selected_indexes=()
       selected_disabled=0
       IFS=' ' read -r -a selected_indexes <<< "$selected_idx_line"
@@ -5135,6 +5246,9 @@ while true; do
             continue
           fi
           selected_row_ids+=("$selected_row_id")
+          if [[ "$ROW_ACTION_MODE" == "transfer" ]]; then
+            selected_transfer_entries+=("${row_action_transfer_entries[$row_pos]:-}")
+          fi
         fi
       done
       if [[ "$ROW_ACTION_MODE" == "album_analysis" && "$selected_disabled" == "1" ]]; then
@@ -5148,7 +5262,7 @@ while true; do
         continue
       fi
       if [[ "$ROW_ACTION_MODE" == "transfer" ]]; then
-        run_transfer_for_row_ids "${selected_row_ids[@]}" || true
+        run_transfer_for_snapshot_entries "${selected_transfer_entries[@]}" || true
         ROW_ACTION_MODE=""
         continue
       fi

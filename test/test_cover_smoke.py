@@ -277,6 +277,7 @@ EOF
         self.assertIn("source=fetched:musicbrainz:release:rel-123", proc.stdout)
         curl_log = (self.tmpdir / "curl.log").read_text(encoding="utf-8")
         self.assertIn("musicbrainz.org/ws/2/release", curl_log)
+        self.assertIn('query=release:"Stub Album" AND artist:"Stub Artist" AND date:2001*', curl_log)
         self.assertIn("coverartarchive.org/release/rel-123/front-500", curl_log)
 
     def test_cover_album_dry_run_reports_plan_without_writing(self) -> None:

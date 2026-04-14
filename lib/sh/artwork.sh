@@ -113,6 +113,10 @@ artwork_trim_text() {
   printf '%s' "${1:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+artwork_musicbrainz_escape_query_value() {
+  printf '%s' "${1:-}" | sed 's/\\/\\\\/g;s/"/\\"/g'
+}
+
 artwork_cache_file_path() {
   local target="${1:-}"
   if [[ -d "$target" ]]; then
@@ -574,7 +578,14 @@ artwork_try_fetch_cover_from_remote() {
   local matched_year=""
   local matched_score=""
   local candidate_url=""
-  local rc=0
+  local escaped_artist=""
+  local escaped_album=""
+  local query_with_year=""
+  local query_without_year=""
+  local query_freeform=""
+  local active_query=""
+  local -a search_queries=()
+  local search_ok=0
 
   artwork_guess_album_identity "$album_dir" artist album year
   if [[ -z "$artist" || -z "$album" ]]; then
@@ -593,10 +604,19 @@ artwork_try_fetch_cover_from_remote() {
     return 1
   fi
 
-  query="release:${album} AND artist:${artist}"
+  escaped_artist="$(artwork_musicbrainz_escape_query_value "$artist")"
+  escaped_album="$(artwork_musicbrainz_escape_query_value "$album")"
+  query="release:\"${escaped_album}\" AND artist:\"${escaped_artist}\""
   if [[ -n "$year" ]]; then
-    query="${query} AND date:${year}*"
+    query_with_year="${query} AND date:${year}*"
+    search_queries+=("$query_with_year")
   fi
+  query_without_year="$query"
+  query_freeform="${artist} ${album}"
+  if [[ -n "$year" ]]; then
+    query_freeform="${query_freeform} ${year}"
+  fi
+  search_queries+=("$query_without_year" "$query_freeform")
   user_agent="$(artwork_fetch_user_agent)"
   search_json="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_search.XXXXXX" 2>/dev/null || true)"
   fetched_image="$(mktemp "${TMPDIR:-/tmp}/artwork_fetch_image.XXXXXX" 2>/dev/null || true)"
@@ -606,21 +626,26 @@ artwork_try_fetch_cover_from_remote() {
     return 1
   fi
 
-  artwork_rate_limit_musicbrainz
-  if ! curl -fsSL -A "$user_agent" --get \
-    --data-urlencode "query=$query" \
-    --data "fmt=json" \
-    --data "limit=10" \
-    -o "$search_json" \
-    "https://musicbrainz.org/ws/2/release"; then
-    rm -f "$search_json" "$fetched_image"
-    ARTWORK_LAST_ERROR="missing art fetch failed: MusicBrainz search request failed"
-    return 1
-  fi
+  for active_query in "${search_queries[@]}"; do
+    [[ -n "$active_query" ]] || continue
+    artwork_rate_limit_musicbrainz
+    if ! curl -fsSL -A "$user_agent" --get \
+      --data-urlencode "query=$active_query" \
+      --data "fmt=json" \
+      --data "limit=10" \
+      -o "$search_json" \
+      "https://musicbrainz.org/ws/2/release"; then
+      continue
+    fi
+    if IFS=$'\t' read -r release_id release_group_id matched_title matched_artist matched_year matched_score < <(
+      artwork_pick_musicbrainz_candidate "$search_json" "$artist" "$album" "$year"
+    ); then
+      search_ok=1
+      break
+    fi
+  done
 
-  if ! IFS=$'\t' read -r release_id release_group_id matched_title matched_artist matched_year matched_score < <(
-    artwork_pick_musicbrainz_candidate "$search_json" "$artist" "$album" "$year"
-  ); then
+  if [[ "$search_ok" != "1" ]]; then
     rm -f "$search_json" "$fetched_image"
     ARTWORK_LAST_ERROR="missing art fetch found no confident MusicBrainz match for ${artist} - ${album}"
     return 1

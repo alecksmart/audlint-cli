@@ -21,10 +21,10 @@ Local agent runbook for `audlint-cli` — open-source release of the music libra
 
 ## Project Status
 
-- Date: 2026-03-30
+- Date: 2026-04-14
 - Project root: `/Users/alec/Projects/audlint-cli`
 - Active branch: `main`
-- Local HEAD: `89b56ab` (`refactor(analyze): decode tracks once per file`)
+- Local HEAD before this docs refresh: `f75151d` (`feat(artwork): summarize cover batch failures`)
 - Remote-tracking public release branch: `main` (tracks `origin/main`)
 - Public release status: live on GitHub
 - Latest public release commit on `origin/main`: `af1d2af` (`release: v1.2.0 (squash from bugfix/post-v1.1.0)`)
@@ -87,8 +87,8 @@ Python: `dr_grade.py`, `genre_lookup.py`, `profile_norm.py`, `rich_table.py`, `s
 ## Validation Baseline
 
 - `make bash5-check` — passes (`94/94`)
-- `make test` — passes: core `249` (`skipped=1`) + legacy `68`
-- `python3 -m unittest discover -s test -p 'test_*.py'` — current standalone core pass: `249` tests, `skipped=1`
+- `make test` — passes: core `254` (`skipped=1`) + legacy `68`
+- `python3 -m unittest discover -s test -p 'test_*.py'` — current standalone core pass: `254` tests, `skipped=1`
 - `make fmt-check` — passes
 - `make lint` — passes
 - Docker distro harnesses — last known pass: Debian 12, Ubuntu 24.04, Fedora 41
@@ -153,7 +153,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
 
 ## Roadmap
 
-### Recently completed (2026-03-05 to 2026-03-30)
+### Recently completed (2026-03-05 to 2026-04-14)
 
 1. Browser table cleanup:
    - Removed `RE` column from list view; kept `RECODE` as canonical action indicator.
@@ -483,18 +483,27 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - `audlint-maintain.sh` now has an `[a Album Art]` walkthrough page for dry runs and subtree/library-wide fixes
      - player transfer keeps canonical `cover.jpg` / `cover.jpeg` sidecars while still excluding other image clutter
      - secure backup now includes canonical cover-like sidecars alongside album audio before destructive writes
+   - Follow-up behavior hardening landed on top of the initial artwork rollout:
+     - `aua` now installs as the manual shortcut for `cover_album.sh`
+     - manual `cover_album.sh` runs preserve extra cover-like sidecars unless `--cleanup-extra-sidecars` is passed, while internal/guided flows always enable sidecar cleanup
+     - `cover_album.sh` / `cover_seek.sh` support `--fetch-missing-art`; the Maintenance `[a Album Art]` flow and browser-launched `any2flac.sh` recodes now auto-enable missing-art fetch
+     - missing-art fetch uses MusicBrainz + Cover Art Archive, with quoted fielded queries first, then relaxed fallbacks when the strict query misses
+     - expected Cover Art Archive fallback `404` probes are now suppressed so successful fetches do not spam batch logs
+     - per-tool embed attempts now get isolated temp cover inputs so M4A/ffmpeg fallback failures cannot delete the master normalized `cover.jpg`
+     - `cover_seek.sh` now ends long runs with an `albums=... ok=... failed=...` summary plus one-line failed album entries
    - Validation:
-     - `python3 -m unittest discover -s test -p 'test_cover_smoke.py'` passes
-     - `python3 -m unittest discover -s test -p 'test_any2flac_smoke.py'` passes
-     - `python3 -m unittest discover -s test -p 'test_cue2flac_smoke.py'` passes
-     - `python3 -m unittest discover -s test -p 'test_dff2flac_smoke.py'` passes
-     - `python3 -m unittest discover -s test -p 'test_audlint_maintain_smoke.py'` passes
-     - `python3 -m unittest discover -s test -p 'test_secure_backup.py'` passes
-     - `python3 -m unittest discover -s test -p 'test_library_browser_smoke.py'` passes
-     - `python3 -m unittest discover -s test/legacy -p 'test_legacy_boost_audio_cli_smoke.py'` passes
-     - `make lint` passes
-     - `make bash5-check` passes
-     - `make test` passes
+      - `python3 -m unittest discover -s test -p 'test_cover_smoke.py'` passes
+      - `python3 -m unittest discover -s test -p 'test_any2flac_smoke.py'` passes
+      - `python3 -m unittest discover -s test -p 'test_cue2flac_smoke.py'` passes
+      - `python3 -m unittest discover -s test -p 'test_dff2flac_smoke.py'` passes
+      - `python3 -m unittest discover -s test -p 'test_audlint_maintain_smoke.py'` passes
+      - `python3 -m unittest discover -s test -p 'test_secure_backup.py'` passes
+      - `python3 -m unittest discover -s test -p 'test_library_browser_smoke.py'` passes
+      - `python3 -m unittest discover -s test/legacy -p 'test_legacy_boost_audio_cli_smoke.py'` passes
+      - `python3 -m unittest discover -s test -p 'test_*.py'` passes: `254` tests, `skipped=1`
+      - `make lint` passes
+      - `make bash5-check` passes
+      - `make test` passes: core `254` (`skipped=1`) + legacy `68`
 
 ### Active
 
@@ -502,15 +511,29 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
    - Current working branch:
      - `main`
    - Local unpublished follow-ups already landed:
-     - `dae8885` `feat(value): add exact analyzer mode`
-     - `cf35e4d` `feat(analyze): auto-rerun exact on low confidence`
-     - `50479d2` `feat(analyze): surface exact fallback notice`
-     - `89b56ab` `refactor(analyze): decode tracks once per file`
-     - `b25c2a7` `feat(analyze): add hybrid strategy switcher`
-     - `6b85f56` `feat(analyze): refine hybrid decision confidence`
-     - `a0571e8` `fix(value): surface dr14meter failures`
-     - `f83d283` `fix(value): retry dr14meter int24 wav albums`
-     - `82bef83` `fix(lint): clear current shellcheck failures`
+     - analyzer / value / shell cleanup stack:
+       - `cf35e4d` `feat(analyze): auto-rerun exact on low confidence`
+       - `50479d2` `feat(analyze): surface exact fallback notice`
+       - `89b56ab` `refactor(analyze): decode tracks once per file`
+       - `b25c2a7` `feat(analyze): add hybrid strategy switcher`
+       - `6b85f56` `feat(analyze): refine hybrid decision confidence`
+       - `a0571e8` `fix(value): surface dr14meter failures`
+       - `f83d283` `fix(value): retry dr14meter int24 wav albums`
+       - `82bef83` `fix(lint): clear current shellcheck failures`
+       - `e09e689` `fix(ui): silence non-interactive tty cleanup`
+     - corpus / dataset stack:
+       - `74dcb24` `feat(analyze): add corpus regression runner`
+       - `e7bb7ca` `feat(analyze): add dataset builder`
+       - `75d7e3b` `refactor(analyze): integrate dataset builder with shared helpers`
+       - `1cee5c6` `fix(analyze): scope dataset outputs by album`
+     - artwork stack:
+       - `eef6f2c` `feat(artwork): add album cover standardization tools`
+       - `a73f7eb` `feat(artwork): integrate album cover cleanup across workflows`
+       - `9ba77e9` `feat(artwork): add aua alias and cleanup flag`
+       - `f29e2c3` `feat(artwork): fetch missing album art in guided flows`
+       - `6af1c12` `fix(artwork): quote and relax MusicBrainz fetch queries`
+       - `6446cc8` `fix(artwork): isolate temp cover inputs per embed tool`
+       - `f75151d` `feat(artwork): summarize cover batch failures`
    - Highest-signal follow-ups discovered during release validation:
      - rerun the Debian 12 / Ubuntu 24.04 / Fedora 41 Docker harnesses once the local Docker daemon is reachable again
 

@@ -11,7 +11,7 @@
 - Interactive library browser with filters, album inspection, compare album directories, and maintenance controls
 - Album and track analysis driven by DR, true peak, codec/profile detection, and spectral checks
 - Recode decision support shared across the browser, maintenance scans, and conversion tools
-- Utility scripts for CUE splitting, FLAC conversion, gain application, album-art normalization, lyrics fetching, sync, and spectrogram generation
+- Utility scripts for CUE splitting, FLAC conversion, gain application, album-art normalization/fetch, lyrics fetching, sync, and spectrogram generation
 
 ## What it does
 
@@ -177,10 +177,11 @@ From the main browser, press `[m]` to open **Maintenance**.
 
 - Manual reads: choose `[m] Run Maintenance` to run one `audlint-task.sh` pass immediately and append the scan output to the task log.
 - Scheduled reads: choose `[i] Install Cron` to install a managed crontab entry that runs the same task automatically on your configured interval.
-- Album art cleanup: choose `[a] Album Art` inside Maintenance for a walkthrough that normalizes each album to one canonical `cover.jpg`, clears duplicate embedded pictures, rewrites a consistent cover across tracks, and fetches missing art when none exists locally.
+- Album art cleanup: choose `[a] Album Art` inside Maintenance for a walkthrough that normalizes each album to one canonical `cover.jpg`, clears duplicate embedded pictures, rewrites a consistent cover across tracks, auto-fetches missing art when none exists locally, and ends long batch runs with a failed-albums summary.
 
 This is how the browser keeps its library state fresh: either by on-demand maintenance runs, or by letting cron refresh the scan queue in the background.
 If `AUDL_PARANOIA_MODE=1`, audlint also requires a backup path and snapshots an album's track files there before destructive write operations.
+Guided album-art runs launched from Maintenance auto-enable missing-art fetch, and browser-launched `any2flac.sh` recodes do the same after encode. Direct `cover_album.sh` runs keep fetch opt-in through `--fetch-missing-art` and preserve extra cover-like sidecars unless `--cleanup-extra-sidecars` is passed.
 
 ## Profile formats
 

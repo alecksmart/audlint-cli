@@ -488,6 +488,7 @@ Run `make test` before and after any meaningful change. Run `make bash5-check` w
      - manual `cover_album.sh` runs preserve extra cover-like sidecars unless `--cleanup-extra-sidecars` is passed, while internal/guided flows always enable sidecar cleanup
      - `cover_album.sh` / `cover_seek.sh` support `--fetch-missing-art`; the Maintenance `[a Album Art]` flow and browser-launched `any2flac.sh` recodes now auto-enable missing-art fetch
      - missing-art fetch uses MusicBrainz + Cover Art Archive, with quoted fielded queries first, then relaxed fallbacks when the strict query misses
+     - MusicBrainz matching now normalizes accented titles, unsorts `Lastname, Firstname` directory artists when tags are absent, and only enforces album year on the strict year-filtered query before relaxing fallback matches
      - expected Cover Art Archive fallback `404` probes are now suppressed so successful fetches do not spam batch logs
      - per-tool embed attempts now get isolated temp cover inputs so M4A/ffmpeg fallback failures cannot delete the master normalized `cover.jpg`
      - Ogg / Opus artwork embedding is now first-class via `vorbiscomment` `METADATA_BLOCK_PICTURE` writes before falling back to the generic ffmpeg attached-pic path

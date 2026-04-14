@@ -140,6 +140,16 @@ artwork_trim_text() {
   printf '%s' "${1:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+artwork_maybe_unsort_artist_name() {
+  local raw
+  raw="$(artwork_trim_text "${1:-}")"
+  if [[ "$raw" =~ ^([^,][^,]*)[[:space:]]*,[[:space:]]*([^,].+)$ ]]; then
+    printf '%s %s' "$(artwork_trim_text "${BASH_REMATCH[2]}")" "$(artwork_trim_text "${BASH_REMATCH[1]}")"
+    return 0
+  fi
+  printf '%s' "$raw"
+}
+
 artwork_musicbrainz_escape_query_value() {
   printf '%s' "${1:-}" | sed 's/\\/\\\\/g;s/"/\\"/g'
 }
@@ -457,13 +467,19 @@ artwork_guess_album_identity() {
   local guessed_year=""
   local album_dir_name=""
   local parent_dir_name=""
+  local guessed_artist_from_tags=0
 
   audio_collect_files "$album_dir" audio_files
   if ((${#audio_files[@]} > 0)); then
     first_track="${audio_files[0]}"
     audio_ffprobe_meta_prime "$first_track"
     guessed_artist="$(artwork_trim_text "$(audio_probe_tag_value "$first_track" "album_artist")")"
-    [[ -n "$guessed_artist" ]] || guessed_artist="$(artwork_trim_text "$(audio_probe_tag_value "$first_track" "artist")")"
+    if [[ -n "$guessed_artist" ]]; then
+      guessed_artist_from_tags=1
+    else
+      guessed_artist="$(artwork_trim_text "$(audio_probe_tag_value "$first_track" "artist")")"
+      [[ -n "$guessed_artist" ]] && guessed_artist_from_tags=1
+    fi
     guessed_album="$(artwork_trim_text "$(audio_probe_tag_value "$first_track" "album")")"
   fi
 
@@ -478,6 +494,11 @@ artwork_guess_album_identity() {
   parent_dir_name="$(basename "$(dirname "$album_dir")")"
   if [[ -z "$guessed_artist" && -n "$parent_dir_name" && "$parent_dir_name" != "." && "$parent_dir_name" != "/" ]]; then
     guessed_artist="$(artwork_trim_text "$parent_dir_name")"
+    guessed_artist_from_tags=0
+  fi
+
+  if [[ -n "$guessed_artist" && "$guessed_artist_from_tags" != "1" ]]; then
+    guessed_artist="$(artwork_maybe_unsort_artist_name "$guessed_artist")"
   fi
 
   out_artist_ref="$guessed_artist"
@@ -514,14 +535,21 @@ artwork_pick_musicbrainz_candidate() {
 import json
 import re
 import sys
+import unicodedata
 
 json_path, query_artist, query_album, query_year = sys.argv[1:5]
 
 
 def norm(text: str) -> str:
     text = (text or "").casefold()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())
+
+
+def token_sig(text: str) -> str:
+    return " ".join(sorted(norm(text).split()))
 
 
 def artist_credit_name(release: dict) -> str:
@@ -557,6 +585,7 @@ except Exception:
 query_artist_n = norm(query_artist)
 query_album_n = norm(query_album)
 query_year_n = safe_year(query_year)
+query_artist_sig = token_sig(query_artist)
 best = None
 best_score = -1
 
@@ -578,11 +607,13 @@ for release in payload.get("releases") or []:
 
     title_n = norm(title)
     artist_n = norm(rel_artist)
+    artist_sig = token_sig(rel_artist)
     title_exact = bool(query_album_n) and title_n == query_album_n
     artist_match = bool(query_artist_n) and (
         artist_n == query_artist_n
         or query_artist_n in artist_n
         or artist_n in query_artist_n
+        or (query_artist_sig and artist_sig == query_artist_sig)
     )
     year_match = bool(query_year_n) and rel_year == query_year_n
 
@@ -647,6 +678,7 @@ artwork_try_fetch_cover_from_remote() {
   local query_without_year=""
   local query_freeform=""
   local active_query=""
+  local candidate_year=""
   local -a search_queries=()
   local search_ok=0
 
@@ -691,6 +723,10 @@ artwork_try_fetch_cover_from_remote() {
 
   for active_query in "${search_queries[@]}"; do
     [[ -n "$active_query" ]] || continue
+    candidate_year=""
+    if [[ -n "$year" && "$active_query" == "$query_with_year" ]]; then
+      candidate_year="$year"
+    fi
     artwork_rate_limit_musicbrainz
     if ! curl -fsSL -A "$user_agent" --get \
       --data-urlencode "query=$active_query" \
@@ -701,7 +737,7 @@ artwork_try_fetch_cover_from_remote() {
       continue
     fi
     if IFS=$'\t' read -r release_id release_group_id matched_title matched_artist matched_year matched_score < <(
-      artwork_pick_musicbrainz_candidate "$search_json" "$artist" "$album" "$year"
+      artwork_pick_musicbrainz_candidate "$search_json" "$artist" "$album" "$candidate_year"
     ); then
       search_ok=1
       break

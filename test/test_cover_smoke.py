@@ -282,6 +282,239 @@ EOF
         self.assertIn('query=release:"Stub Album" AND artist:"Stub Artist" AND date:2001*', curl_log)
         self.assertIn("coverartarchive.org/release/rel-123/front-500", curl_log)
 
+    def test_cover_album_fetches_missing_art_from_sort_name_parent_dir(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{ffprobe_log}"
+                args="$*"
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=flac
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=44100
+bits_per_raw_sample=16
+bits_per_sample=0
+sample_fmt=s16
+bit_rate=800000
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=800000
+TAG:album_artist=
+TAG:artist=
+TAG:title=Movin Out
+TAG:album=
+TAG:cuesheet=
+TAG:lyrics=
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v -show_entries stream=index"* ]]; then
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v:0 -show_entries stream=codec_name,width,height"* ]]; then
+                  cat <<'EOF'
+codec_name=mjpeg
+width=600
+height=600
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
+
+                exit 0
+                """
+            ),
+        )
+        curl_log = self.tmpdir / "curl.log"
+        _write_exec(
+            self.bin_dir / "curl",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{curl_log}"
+                out=""
+                url=""
+                query=""
+                while [[ $# -gt 0 ]]; do
+                  case "${{1:-}}" in
+                    -o)
+                      shift || true
+                      out="${{1:-}}"
+                      ;;
+                    --data-urlencode)
+                      shift || true
+                      query="${{1:-}}"
+                      ;;
+                    http://*|https://*)
+                      url="${{1:-}}"
+                      ;;
+                  esac
+                  shift || true
+                done
+
+                case "$url" in
+                  *musicbrainz.org/ws/2/release*)
+                    if [[ "$query" != *'artist:"Billy Joel"'* ]]; then
+                      exit 1
+                    fi
+                    cat <<'EOF' > "${{out:-/dev/stdout}}"
+{{"releases":[{{"id":"rel-bj","title":"The Stranger","date":"1977","artist-credit":[{{"name":"Billy Joel"}}],"release-group":{{"id":"rg-bj"}},"score":"100"}}]}}
+EOF
+                    ;;
+                  *coverartarchive.org/release/rel-bj/front-500*)
+                    printf 'img' > "${{out:-/dev/stdout}}"
+                    ;;
+                  *)
+                    exit 1
+                    ;;
+                esac
+                exit 0
+                """
+            ),
+        )
+        fetch_album = self.tmpdir / "Joel, Billy" / "1977 - The Stranger"
+        fetch_album.mkdir(parents=True, exist_ok=True)
+        (fetch_album / "01-noart.flac").write_text("", encoding="utf-8")
+
+        proc = self._run(["--yes", "--fetch-missing-art", str(fetch_album)])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((fetch_album / "cover.jpg").exists())
+        self.assertIn("source=fetched:musicbrainz:release:rel-bj", proc.stdout)
+        self.assertIn('query=release:"The Stranger" AND artist:"Billy Joel" AND date:1977*', curl_log.read_text(encoding="utf-8"))
+
+    def test_cover_album_fetches_missing_art_with_accented_musicbrainz_title(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+        _write_exec(
+            self.bin_dir / "ffprobe",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{ffprobe_log}"
+                args="$*"
+
+                if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
+                  cat <<'EOF'
+[STREAM]
+index=0
+codec_name=flac
+codec_tag_string=[0][0][0][0]
+codec_long_name=stub
+profile=
+sample_rate=96000
+bits_per_raw_sample=24
+bits_per_sample=0
+sample_fmt=s32
+bit_rate=1411200
+channels=2
+[/STREAM]
+[FORMAT]
+duration=120
+bit_rate=1411200
+TAG:album_artist=Jean-Michel Jarre
+TAG:artist=Jean-Michel Jarre
+TAG:title=Equinoxe Part 1
+TAG:album=Equinoxe
+TAG:cuesheet=
+TAG:lyrics=
+TAG:date=1983
+[/FORMAT]
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v -show_entries stream=index"* ]]; then
+                  exit 0
+                fi
+
+                if [[ "$args" == *"-select_streams v:0 -show_entries stream=codec_name,width,height"* ]]; then
+                  cat <<'EOF'
+codec_name=mjpeg
+width=600
+height=600
+EOF
+                  exit 0
+                fi
+
+                if [[ "$args" == *"stream=codec_name"* ]]; then
+                  echo "flac"
+                  exit 0
+                fi
+
+                exit 0
+                """
+            ),
+        )
+        curl_log = self.tmpdir / "curl.log"
+        _write_exec(
+            self.bin_dir / "curl",
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                printf '%s\\n' "$*" >> "{curl_log}"
+                out=""
+                url=""
+                while [[ $# -gt 0 ]]; do
+                  case "${{1:-}}" in
+                    -o)
+                      shift || true
+                      out="${{1:-}}"
+                      ;;
+                    http://*|https://*)
+                      url="${{1:-}}"
+                      ;;
+                  esac
+                  shift || true
+                done
+
+                case "$url" in
+                  *musicbrainz.org/ws/2/release*)
+                    cat <<'EOF' > "${{out:-/dev/stdout}}"
+{{"releases":[{{"id":"rel-jmj","title":"Équinoxe","date":"1983","artist-credit":[{{"name":"Jean Michel Jarre"}}],"release-group":{{"id":"rg-jmj"}},"score":"100"}}]}}
+EOF
+                    ;;
+                  *coverartarchive.org/release/rel-jmj/front-500*)
+                    printf 'img' > "${{out:-/dev/stdout}}"
+                    ;;
+                  *)
+                    exit 1
+                    ;;
+                esac
+                exit 0
+                """
+            ),
+        )
+        fetch_album = self.tmpdir / "Jean-Michel Jarre" / "1978 - Equinoxe"
+        fetch_album.mkdir(parents=True, exist_ok=True)
+        (fetch_album / "01-noart.flac").write_text("", encoding="utf-8")
+
+        proc = self._run(["--yes", "--fetch-missing-art", str(fetch_album)])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertTrue((fetch_album / "cover.jpg").exists())
+        self.assertIn("source=fetched:musicbrainz:release:rel-jmj", proc.stdout)
+        self.assertIn('query=release:"Equinoxe" AND artist:"Jean-Michel Jarre" AND date:1978*', curl_log.read_text(encoding="utf-8"))
+
     def test_cover_album_warns_for_small_art_without_fetch(self) -> None:
         ffprobe_log = self.tmpdir / "ffprobe.log"
         _write_exec(

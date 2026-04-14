@@ -3702,14 +3702,25 @@ transfer_manifest_append_entry() {
   local year="$6"
   local source_path="$7"
   local dest_dir transfer_year
+  local resolved_source_row=""
+  local resolved_source_id=""
+  local resolved_source_path=""
 
-  if [[ -z "$source_path" || ! -d "$source_path" ]]; then
+  resolved_source_row="$(find_transfer_source_row "$row_id" "$artist" "$album" "$year" "$source_path" || true)"
+  if [[ -n "$resolved_source_row" ]]; then
+    IFS=$'\t' read -r resolved_source_id resolved_source_path <<< "$resolved_source_row"
+  fi
+  if [[ -z "$resolved_source_path" || ! -d "$resolved_source_path" ]]; then
     ACTION_MESSAGE="Transfer failed: source path unavailable for $artist - $album."
     if [[ -n "$transfer_log" ]]; then
       printf '[%s] abort: source missing for id=%s artist=%s album=%s path=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$artist" "$album" "${source_path:-<empty>}" >>"$transfer_log" 2>/dev/null || true
     fi
     return 1
   fi
+  if [[ -n "$transfer_log" && -n "$source_path" && "$resolved_source_path" != "$source_path" ]]; then
+    printf '[%s] fallback: row id=%s resolved via row id=%s path=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "${resolved_source_id:-<unknown>}" "$resolved_source_path" >>"$transfer_log" 2>/dev/null || true
+  fi
+  source_path="$resolved_source_path"
 
   transfer_year="$(transfer_year_for_source "$source_path" "$year")"
   [[ "$transfer_year" =~ ^[12][0-9]{3}$ ]] || transfer_year="$year"
@@ -3718,6 +3729,49 @@ transfer_manifest_append_entry() {
     printf '[%s] row id=%s source=%s year_db=%s year_transfer=%s dest=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$source_path" "$year" "$transfer_year" "$dest_dir" >>"$transfer_log" 2>/dev/null || true
   fi
   printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$artist" "$album" "$transfer_year" "$source_path" "$dest_dir" >>"$manifest_file"
+}
+
+find_transfer_source_row() {
+  local row_id="$1"
+  local artist="$2"
+  local album="$3"
+  local year="$4"
+  local source_path="$5"
+  local album_lc artist_lc year_sql
+  local candidate_id candidate_artist _candidate_album candidate_path
+
+  if [[ -n "$source_path" && -d "$source_path" ]]; then
+    printf '%s\t%s' "$row_id" "$source_path"
+    return 0
+  fi
+
+  album_lc="$(norm_lc "$album")"
+  artist_lc="$(norm_lc "$artist")"
+  year_sql="$(sql_num_or_null "$year")"
+  [[ "$year_sql" == "NULL" ]] && year_sql=0
+
+  while IFS=$'\t' read -r candidate_id candidate_artist _candidate_album candidate_path; do
+    [[ -n "$candidate_path" && -d "$candidate_path" ]] || continue
+    printf '%s\t%s' "$candidate_id" "$candidate_path"
+    return 0
+  done < <(
+    sqlite3 -separator $'\t' -noheader "$DB_PATH" \
+      "SELECT
+         id,
+         COALESCE(artist,''),
+         COALESCE(album,''),
+         COALESCE(source_path,'')
+       FROM album_quality
+       WHERE album_lc='$(sql_escape "$album_lc")'
+         AND year_int=$year_sql
+         AND COALESCE(source_path,'') <> ''
+       ORDER BY
+         CASE WHEN id=$row_id THEN 0 ELSE 1 END ASC,
+         CASE WHEN artist_lc='$(sql_escape "$artist_lc")' THEN 0 ELSE 1 END ASC,
+         id ASC;" 2>/dev/null || true
+  )
+
+  return 1
 }
 
 run_transfer_manifest() {

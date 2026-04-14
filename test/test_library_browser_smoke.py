@@ -1953,6 +1953,291 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertNotIn("abort: row not found id=6", transfer_text, msg=transfer_text)
         self.assertIn("transfer rc=0", transfer_text, msg=transfer_text)
 
+    def test_transfer_falls_back_to_live_duplicate_source_path_for_non_first_page_selection(self) -> None:
+        player_dir = self.tmpdir / "player"
+        player_dir.mkdir(parents=True, exist_ok=True)
+        rsync_args_log = self.tmpdir / "rsync-args.log"
+        transfer_log = self.tmpdir / "transfer.log"
+        sync_calls_log = self.tmpdir / "sync-calls.log"
+
+        rsync_stub = self.bin_dir / "rsync"
+        _write_exec(
+            rsync_stub,
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  printf '%s\\n' 'rsync help --info --outbuf'
+  printf '%s\\n' '--info'
+  printf '%s\\n' '--outbuf'
+  exit 0
+fi
+printf '%s\\n' "$*" >> "${RSYNC_ARGS_LOG:?}"
+exit 0
+""",
+        )
+
+        sync_stub = self.bin_dir / "sync-stub"
+        _write_exec(
+            sync_stub,
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
+""",
+        )
+
+        isolated_root = self.tmpdir / "isolated-fallback"
+        isolated_bin = isolated_root / "bin"
+        isolated_bin.mkdir(parents=True, exist_ok=True)
+        isolated_browser = isolated_bin / "audlint.sh"
+        shutil.copy2(LIBRARY_BROWSER, isolated_browser)
+        isolated_browser.chmod(isolated_browser.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        shutil.copytree(REPO_ROOT / "lib", isolated_root / "lib")
+        library_root = self.tmpdir / "library"
+        (isolated_root / ".env").write_text(
+            "\n".join(
+                [
+                    f'AUDL_MEDIA_PLAYER_PATH="{player_dir}"',
+                    f'LIBRARY_ROOT="{library_root}"',
+                    f'RSYNC_BIN="{rsync_stub}"',
+                    f'SYNC_BIN="{sync_stub}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        bootstrap = self._run(["--no-interactive", "--db", str(self.db_path)], script_path=isolated_browser)
+        self.assertEqual(bootstrap.returncode, 0, msg=bootstrap.stderr + "\n" + bootstrap.stdout)
+
+        stale_dir = library_root / "Jean Michel Jarre" / "2000 - Missing Album"
+        live_dir = library_root / "Jean-Michel Jarre" / "2000 - Missing Album"
+        live_dir.mkdir(parents=True, exist_ok=True)
+        (live_dir / "01. Track.flac").write_text("stub", encoding="utf-8")
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = []
+            for idx in range(1, 6):
+                album_dir = library_root / "Jean Michel Jarre" / f"2000 - Album {idx:02d}"
+                album_dir.mkdir(parents=True, exist_ok=True)
+                (album_dir / f"{idx:02d}. Track.flac").write_text("stub", encoding="utf-8")
+                rows.append(
+                    (
+                        idx,
+                        "Jean Michel Jarre",
+                        "jean michel jarre",
+                        f"Album {idx:02d}",
+                        f"album {idx:02d}",
+                        2000,
+                        "A",
+                        8.5,
+                        10.0,
+                        "Keep",
+                        "44100/24",
+                        "1411",
+                        "flac",
+                        "flac",
+                        "Keep as-is",
+                        0,
+                        0,
+                        0,
+                        str(album_dir),
+                        "",
+                        "standard",
+                        0,
+                        1000 - idx,
+                    )
+                )
+            rows.extend(
+                [
+                    (
+                        6,
+                        "Jean Michel Jarre",
+                        "jean michel jarre",
+                        "Good Page Two",
+                        "good page two",
+                        2000,
+                        "A",
+                        8.5,
+                        10.0,
+                        "Keep",
+                        "44100/24",
+                        "1411",
+                        "flac",
+                        "flac",
+                        "Keep as-is",
+                        0,
+                        0,
+                        0,
+                        str(library_root / "Jean Michel Jarre" / "2000 - Good Page Two"),
+                        "",
+                        "standard",
+                        0,
+                        994,
+                    ),
+                    (
+                        7,
+                        "Jean Michel Jarre",
+                        "jean michel jarre",
+                        "Missing Album",
+                        "missing album",
+                        2000,
+                        "A",
+                        8.5,
+                        10.0,
+                        "Keep",
+                        "44100/24",
+                        "1411",
+                        "flac",
+                        "flac",
+                        "Keep as-is",
+                        0,
+                        0,
+                        0,
+                        str(stale_dir),
+                        "",
+                        "standard",
+                        0,
+                        993,
+                    ),
+                    (
+                        8,
+                        "Jean-Michel Jarre",
+                        "jean-michel jarre",
+                        "Missing Album",
+                        "missing album",
+                        2000,
+                        "A",
+                        8.5,
+                        10.0,
+                        "Keep",
+                        "44100/24",
+                        "1411",
+                        "flac",
+                        "flac",
+                        "Keep as-is",
+                        0,
+                        0,
+                        0,
+                        str(live_dir),
+                        "",
+                        "standard",
+                        0,
+                        992,
+                    ),
+                ]
+            )
+            good_page_two_dir = library_root / "Jean Michel Jarre" / "2000 - Good Page Two"
+            good_page_two_dir.mkdir(parents=True, exist_ok=True)
+            (good_page_two_dir / "01. Track.flac").write_text("stub", encoding="utf-8")
+            conn.executemany(
+                """
+                INSERT INTO album_quality (
+                  id, artist, artist_lc, album, album_lc, year_int, quality_grade,
+                  quality_score, dynamic_range_score, recommendation, current_quality,
+                  bitrate, codec, codec_norm, recode_recommendation, needs_recode, needs_replacement,
+                  scan_failed, source_path, notes, genre_profile, rarity, last_checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        env = self.env.copy()
+        env.update(
+            {
+                "RSYNC_ARGS_LOG": str(rsync_args_log),
+                "SYNC_CALLS_LOG": str(sync_calls_log),
+                "LIBRARY_BROWSER_TRANSFER_LOG": str(transfer_log),
+            }
+        )
+
+        master_fd, slave_fd = pty.openpty()
+        winsz = struct.pack("HHHH", 40, 220, 0, 0)
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsz)
+        proc = subprocess.Popen(
+            [str(isolated_browser), "--db", str(self.db_path), "--page-size", "5", "--search", "Jean Michel Jarre"],
+            cwd=str(self.tmpdir),
+            env=env,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+
+        output = bytearray()
+
+        def read_until(needle: bytes, timeout_s: float = 6.0) -> None:
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if needle in output:
+                    return
+                r, _, _ = select.select([master_fd], [], [], 0.1)
+                if not r:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError as exc:
+                    if exc.errno == errno.EIO:
+                        chunk = b""
+                    else:
+                        raise
+                if not chunk:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                output.extend(chunk)
+            raise AssertionError(
+                f"Timed out waiting for {needle!r}\nOutput:\n{output.decode('utf-8', errors='replace')}"
+            )
+
+        try:
+            read_until(b"q=quit >")
+            os.write(master_fd, b"n")
+            read_until(b"page=2/2")
+            read_until(b"q=quit >")
+            os.write(master_fd, b"t2\n")
+            read_until(b"[any key Continue] >")
+            os.write(master_fd, b" ")
+            read_until(b"q=quit >")
+            os.write(master_fd, b"q")
+            read_until(b"Quit application?")
+            os.write(master_fd, b"y")
+
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and proc.poll() is None:
+                r, _, _ = select.select([master_fd], [], [], 0.1)
+                if not r:
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError as exc:
+                    if exc.errno == errno.EIO:
+                        break
+                    raise
+                if not chunk:
+                    break
+                output.extend(chunk)
+            if proc.poll() is None:
+                proc.kill()
+            rc = proc.wait(timeout=1.0)
+        finally:
+            os.close(master_fd)
+
+        clean = self._strip_ansi(output.decode("utf-8", errors="replace"))
+        self.assertEqual(rc, 0, msg=clean)
+        self.assertTrue(transfer_log.exists(), msg=clean)
+        transfer_text = transfer_log.read_text(encoding="utf-8")
+        self.assertIn("transfer start ids=7", transfer_text, msg=transfer_text)
+        self.assertIn("fallback: row id=7 resolved via row id=8", transfer_text, msg=transfer_text)
+        self.assertIn(f"source={live_dir}", transfer_text, msg=transfer_text)
+        self.assertIn("transfer rc=0", transfer_text, msg=transfer_text)
+
     def test_multi_album_recode_keeps_single_live_status_line(self) -> None:
         album1_dir = self.tmpdir / "library" / "Pink Floyd" / "1983 - The Final Cut"
         album2_dir = self.tmpdir / "library" / "Pink Floyd" / "1967 - The Piper At The Gates Of Dawn"

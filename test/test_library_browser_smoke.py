@@ -1506,7 +1506,6 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertEqual(rc, 0, msg=clean)
         self.assertTrue(rsync_args_log.exists(), msg=clean)
         args_text = rsync_args_log.read_text(encoding="utf-8")
-        self.assertNotIn("--itemize-changes", args_text)
         self.assertIn("--exclude=.audlint_inspect_cache.json", args_text)
         self.assertIn("--exclude=.any2flac_truepeak_cache.tsv", args_text)
         self.assertIn("--exclude=.sox_album_done", args_text)

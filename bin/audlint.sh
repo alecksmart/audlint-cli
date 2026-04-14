@@ -3916,8 +3916,9 @@ virtwin_status_set() {
 
 printf 'Media player path: %s\n\n' "$player_path"
 rsync_args=(
-  -ah
+  -av
   --delete
+  --itemize-changes
   --exclude='.audlint_inspect_cache.json'
   --exclude='.any2flac_truepeak_cache.tsv'
   --exclude='.dff2flac_truepeak_cache.tsv'
@@ -3936,12 +3937,12 @@ rsync_args=(
 )
 if "$rsync_bin" --help 2>/dev/null | grep -q -- '--info'; then
   rsync_args+=(--info=progress2,name1)
-  printf 'rsync mode: readable names + progress2\n\n'
+  printf 'rsync mode: verbose + itemize + progress2\n\n'
 elif "$rsync_bin" --help 2>/dev/null | grep -q -- '--progress'; then
   rsync_args+=(--progress)
-  printf 'rsync mode: readable progress\n\n'
+  printf 'rsync mode: verbose + itemize + progress\n\n'
 else
-  printf 'rsync mode: readable names (no progress option available)\n\n'
+  printf 'rsync mode: verbose + itemize (no progress option available)\n\n'
 fi
 if "$rsync_bin" --help 2>/dev/null | grep -q -- '--outbuf'; then
   rsync_args+=(--outbuf=L)

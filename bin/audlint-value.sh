@@ -158,9 +158,15 @@ ALBUM_DIR="$(resolve_album_dir "$ALBUM_DIR")" || { echo "Not a directory: $1" >&
 [[ -f "$DR_GRADE_PY" ]] || { echo "Missing: $DR_GRADE_PY" >&2; exit 1; }
 
 if [[ "$DR14METER_BIN" == */* ]]; then
-  [[ -x "$DR14METER_BIN" ]] || { echo "Missing executable dr14meter: $DR14METER_BIN" >&2; exit 1; }
+  [[ -x "$DR14METER_BIN" ]] || {
+    echo "Missing executable dr14meter: $DR14METER_BIN (PATH=$PATH HOME=${HOME:-})" >&2
+    exit 1
+  }
 else
-  have "$DR14METER_BIN" || { echo "Missing dependency: dr14meter" >&2; exit 1; }
+  have "$DR14METER_BIN" || {
+    echo "Missing dependency: dr14meter (DR14METER_BIN=$DR14METER_BIN PATH=$PATH HOME=${HOME:-})" >&2
+    exit 1
+  }
 fi
 have "$PYTHON_BIN" || { echo "Missing dependency: python3" >&2; exit 1; }
 

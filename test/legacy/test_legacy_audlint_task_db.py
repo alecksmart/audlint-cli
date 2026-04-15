@@ -1510,6 +1510,7 @@ OUT
         self.assertIsNotNone(row)
         self.assertEqual(row[0], 1)
         self.assertIn("scan failed", (row[1] or ""))
+        self.assertIn("simulated failure", (row[1] or ""))
 
     def test_scan_mode_uses_analyze_fallback_for_wav_when_audlint_value_fails(self) -> None:
         root = self.tmpdir / "library"

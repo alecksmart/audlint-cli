@@ -702,7 +702,7 @@ scan_album_dir_merged() {
       fi
     fi
     if [[ ! "$AUDVALUE_RECODE_TO" =~ ^[0-9]+/[0-9]+$ ]]; then
-      MERGE_LAST_ERROR="audlint-value scan failed"
+      MERGE_LAST_ERROR="${AUDVALUE_LAST_ERROR:-audlint-value scan failed}"
       return 1
     fi
   fi

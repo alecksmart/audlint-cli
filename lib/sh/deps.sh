@@ -6,7 +6,14 @@ has_bin() {
 
 deps_ensure_common_path() {
   local dir
-  for dir in "${AUDL_BIN_PATH:-$HOME/.local/bin}" /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+  local python_bin_dir="${AUDL_PYTHON_BIN:-}"
+  if [[ -n "$python_bin_dir" ]]; then
+    python_bin_dir="${python_bin_dir/#\~/$HOME}"
+    python_bin_dir="${python_bin_dir//\$HOME/$HOME}"
+    python_bin_dir="$(dirname "$python_bin_dir")"
+  fi
+  for dir in "$HOME/.local/bin" "${AUDL_BIN_PATH:-$HOME/.local/bin}" "$python_bin_dir" /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+    [[ -n "$dir" ]] || continue
     dir="${dir/#\~/$HOME}"
     dir="${dir//\$HOME/$HOME}"
     [[ -d "$dir" ]] || continue

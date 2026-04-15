@@ -105,6 +105,18 @@ _audio_ffprobe_meta_cache_init() {
   fi
 }
 
+audio_compact_error_text() {
+  local raw="${1:-}"
+  local max_len="${2:-240}"
+  local compact=""
+
+  compact="$(printf '%s' "$raw" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+  if [[ "$max_len" =~ ^[0-9]+$ ]] && (( ${#compact} > max_len )); then
+    compact="${compact:0:max_len}..."
+  fi
+  printf '%s' "$compact"
+}
+
 _audio_ffprobe_meta_key() {
   printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g;s/__*/_/g;s/^_//;s/_$//'
 }
@@ -812,6 +824,7 @@ audio_save_true_peak_cache() {
 #   AUDVALUE_SR_HZ       — sampling rate from dr14meter report (or "")
 #   AUDVALUE_BITRATE_KBS — average bitrate from dr14meter report (or "")
 #   AUDVALUE_BITS        — bits per sample from dr14meter report (or "")
+#   AUDVALUE_LAST_ERROR  — condensed failure detail when audlint-value fails
 #
 # Usage:
 #   audvalue_scan_album "/path/to/album" [genre_profile]
@@ -835,6 +848,7 @@ audvalue_scan_album() {
   AUDVALUE_SR_HZ=""
   AUDVALUE_BITRATE_KBS=""
   AUDVALUE_BITS=""
+  AUDVALUE_LAST_ERROR=""
 
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -844,17 +858,44 @@ audvalue_scan_album() {
     audlint_value_bin="$(cd "$script_dir" && cd ../../bin 2>/dev/null && pwd)/audlint-value.sh"
   fi
 
-  [[ -x "$audlint_value_bin" ]] || return 1
+  if [[ ! -x "$audlint_value_bin" ]]; then
+    AUDVALUE_LAST_ERROR="audlint-value scan failed: missing executable ($audlint_value_bin)"
+    return 1
+  fi
 
   # AUDLINT_VALUE_PYTHON_BIN allows tests to override python3 for JSON parsing
   # independently of AUDL_PYTHON_BIN.
   local python_bin="${AUDLINT_VALUE_PYTHON_BIN:-${PYTHON_BIN:-python3}}"
-  local json_out
-  json_out="$(GENRE_PROFILE="$genre_profile" "$audlint_value_bin" "$album_dir" 2>/dev/null)" || return 1
+  local json_out stderr_tmp value_rc value_err
+  stderr_tmp="$(mktemp -t audvalue_scan.XXXXXX)" || {
+    AUDVALUE_LAST_ERROR="audlint-value scan failed: unable to allocate stderr capture"
+    return 1
+  }
+  value_rc=0
+  if json_out="$(GENRE_PROFILE="$genre_profile" "$audlint_value_bin" "$album_dir" 2>"$stderr_tmp")"; then
+    value_rc=0
+  else
+    value_rc=$?
+  fi
+  value_err=""
+  if [[ -s "$stderr_tmp" ]]; then
+    value_err="$(audio_compact_error_text "$(cat "$stderr_tmp")")"
+  fi
+  rm -f "$stderr_tmp"
+  if ((value_rc != 0)); then
+    AUDVALUE_LAST_ERROR="audlint-value scan failed"
+    [[ -n "$value_err" ]] && AUDVALUE_LAST_ERROR="${AUDVALUE_LAST_ERROR}: ${value_err}"
+    return 1
+  fi
 
   # Parse JSON fields with python3 (already a required dep).
-  local parsed
-  parsed="$("$python_bin" - "$json_out" <<'PY'
+  local parsed parse_tmp parse_rc parse_err
+  parse_tmp="$(mktemp -t audvalue_parse.XXXXXX)" || {
+    AUDVALUE_LAST_ERROR="audlint-value scan failed: unable to allocate parse stderr capture"
+    return 1
+  }
+  parse_rc=0
+  if parsed="$("$python_bin" - "$json_out" 2>"$parse_tmp" <<'PY'
 import json, sys
 data = json.loads(sys.argv[1])
 def s(v): return str(v) if v is not None else ""
@@ -870,7 +911,21 @@ print(s(data.get("samplingRateHz","")))
 print(s(data.get("averageBitrateKbs","")))
 print(s(data.get("bitsPerSample","")))
 PY
-  )" || return 1
+  )"; then
+    parse_rc=0
+  else
+    parse_rc=$?
+  fi
+  parse_err=""
+  if [[ -s "$parse_tmp" ]]; then
+    parse_err="$(audio_compact_error_text "$(cat "$parse_tmp")")"
+  fi
+  rm -f "$parse_tmp"
+  if ((parse_rc != 0)); then
+    AUDVALUE_LAST_ERROR="audlint-value scan failed: invalid JSON payload"
+    [[ -n "$parse_err" ]] && AUDVALUE_LAST_ERROR="${AUDVALUE_LAST_ERROR}: ${parse_err}"
+    return 1
+  fi
 
   {
     IFS= read -r AUDVALUE_RECODE_TO

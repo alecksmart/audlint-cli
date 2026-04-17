@@ -186,7 +186,7 @@ TARGET_SR=$TARGET_SR
 TARGET_BITS=$TARGET_BITS
 ALBUM_FAKE_UPSCALE=$ALBUM_FAKE_UPSCALE
 ALBUM_HAS_FAKE_UPSCALE_TRACKS=$ALBUM_HAS_FAKE_UPSCALE_TRACKS
-ALBUM_FAMILY_SR=$ALBUM_FAMILY_SR
+ALBUM_FAMILY_SR=${ALBUM_FAMILY_SR:-null}
 ALBUM_DECISION=$ALBUM_DECISION
 SOURCE_FINGERPRINT=$CURRENT_SOURCE_FINGERPRINT
 CONFIG_FINGERPRINT=$CURRENT_CONFIG_FINGERPRINT
@@ -295,7 +295,7 @@ print("1" if payload.get("auto_exact_fallback") else "0")
 print(payload.get("album_confidence", "low"))
 print("1" if payload.get("album_fake_upscale") else "0")
 print("1" if payload.get("album_has_fake_upscale_tracks") else "0")
-print("" if family is None else str(family))
+print("null" if family is None else str(family))
 print(payload.get("album_decision", "keep_source"))
 PY
 )"

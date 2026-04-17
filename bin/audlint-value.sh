@@ -222,29 +222,51 @@ family_sr_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_FAMILY_SR" || true)"
 analyze_decision_raw="$(profile_cache_get "$ALBUM_DIR" "ALBUM_DECISION" || true)"
 [[ "$fake_upscale_raw" =~ ^(0|1)$ ]] || fake_upscale_raw="0"
 [[ "$has_fake_tracks_raw" =~ ^(0|1)$ ]] || has_fake_tracks_raw="0"
-[[ "$family_sr_raw" =~ ^[0-9]+$ ]] || family_sr_raw=""
+family_sr_known=0
+if [[ "$family_sr_raw" =~ ^[0-9]+$ ]]; then
+  family_sr_known=1
+elif [[ "$family_sr_raw" == "null" ]]; then
+  family_sr_raw=""
+  family_sr_known=1
+else
+  family_sr_raw=""
+fi
 
-if [[ -z "$analyze_decision_raw" ]]; then
+if [[ -z "$analyze_decision_raw" || "$family_sr_known" -ne 1 ]]; then
   analyze_json="$("$AUDLINT_ANALYZE_BIN" --json "$ALBUM_DIR")"
   analyze_meta="$("$PYTHON_BIN" - "$analyze_json" <<'PY'
 import json, sys
 payload = json.loads(sys.argv[1])
 family = payload.get("album_family_sr")
+album_sr = payload.get("album_sr")
+album_bits = payload.get("album_bits")
+if album_sr is None or album_bits is None:
+    print("")
+else:
+    print(f"{int(album_sr)}/{int(album_bits)}")
 print("1" if payload.get("album_fake_upscale") else "0")
 print("1" if payload.get("album_has_fake_upscale_tracks") else "0")
-print("" if family is None else str(family))
+print("null" if family is None else str(family))
 print(payload.get("album_decision", "keep_source"))
 PY
   )"
   {
+    IFS= read -r recode_to_json
     IFS= read -r fake_upscale_json
     IFS= read -r has_fake_tracks_json
     IFS= read -r family_sr_json
     IFS= read -r analyze_decision_json
   } <<< "$analyze_meta"
+  [[ "$recode_to_json" =~ ^[0-9]+/[0-9]+$ ]] && recode_to="$recode_to_json"
   [[ "$fake_upscale_json" =~ ^(0|1)$ ]] && fake_upscale_raw="$fake_upscale_json"
   [[ "$has_fake_tracks_json" =~ ^(0|1)$ ]] && has_fake_tracks_raw="$has_fake_tracks_json"
-  [[ "$family_sr_json" =~ ^[0-9]+$ ]] && family_sr_raw="$family_sr_json"
+  if [[ "$family_sr_json" =~ ^[0-9]+$ ]]; then
+    family_sr_raw="$family_sr_json"
+    family_sr_known=1
+  elif [[ "$family_sr_json" == "null" ]]; then
+    family_sr_raw=""
+    family_sr_known=1
+  fi
   [[ -n "$analyze_decision_json" ]] && analyze_decision_raw="$analyze_decision_json"
 fi
 

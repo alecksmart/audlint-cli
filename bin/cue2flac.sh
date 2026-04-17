@@ -907,7 +907,7 @@ printf '\n'
 printf '%sDone:%s %s track(s) encoded, %s failed.\n' "$DIM" "$RESET" "$(ui_value_text "$ok_count")" "$(ui_value_text "$fail_count")"
 printf '%sOutput:%s %s\n' "$DIM" "$RESET" "$(ui_output_path_text "$OUTPUT_DIR")"
 printf '%sProfile:%s %s\n' "$DIM" "$RESET" "$(ui_value_text "$TARGET_PROFILE_LABEL")"
-artwork_run_cover_album_postprocess "$OUTPUT_DIR" "$AUDLINT_COVER_ALBUM_BIN" "$DRY_RUN" || true
+artwork_run_cover_album_postprocess "$OUTPUT_DIR" "$AUDLINT_COVER_ALBUM_BIN" "$DRY_RUN" "$SOURCE_DIR" || true
 
 if ((fail_count > 0)); then
   exit 1

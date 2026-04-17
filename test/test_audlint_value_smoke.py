@@ -141,6 +141,48 @@ EOF
         self.assertEqual(payload["familySampleRateHz"], 48000)
         self.assertEqual(payload["analyzeDecision"], "keep_source")
 
+    def test_value_refreshes_partial_analyzer_cache_via_json(self) -> None:
+        analyze_log = self.tmpdir / "audlint-analyze.log"
+        _write_exec(
+            self.bin_dir / "audlint-analyze.sh",
+            f"""\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            if [[ -n "${{STUB_AUDLINT_ANALYZE_LOG:-}}" ]]; then
+              printf '%s\\n' "$*" >> "${{STUB_AUDLINT_ANALYZE_LOG}}"
+            fi
+            album_dir="${{@: -1}}"
+            if [[ "${{1:-}}" == "--json" ]]; then
+              cat <<'JSON'
+{{"album_sr": 48000, "album_bits": 24, "album_fake_upscale": true, "album_has_fake_upscale_tracks": true, "album_family_sr": 48000, "album_decision": "downgrade_fake_upscale", "tracks": []}}
+JSON
+              exit 0
+            fi
+            cat > "$album_dir/.sox_album_profile" <<'EOF'
+TARGET_SR=192000
+TARGET_BITS=24
+ALBUM_FAKE_UPSCALE=1
+ALBUM_HAS_FAKE_UPSCALE_TRACKS=1
+ALBUM_FAMILY_SR=
+ALBUM_DECISION=downgrade_fake_upscale
+EOF
+            printf '192000/24\\n'
+            """,
+        )
+
+        proc = self._run([str(self.album_dir)], extra_env={"STUB_AUDLINT_ANALYZE_LOG": str(analyze_log)})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["recodeTo"], "48000/24")
+        self.assertTrue(payload["fakeUpscale"])
+        self.assertEqual(payload["familySampleRateHz"], 48000)
+        self.assertEqual(payload["analyzeDecision"], "downgrade_fake_upscale")
+
+        analyze_args = analyze_log.read_text(encoding="utf-8")
+        self.assertIn(str(self.album_dir), analyze_args)
+        self.assertIn(f"--json {self.album_dir}", analyze_args)
+
     def test_value_surfaces_dr14meter_failure_output(self) -> None:
         _write_exec(
             self.bin_dir / "dr14meter",

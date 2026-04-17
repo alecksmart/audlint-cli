@@ -297,6 +297,38 @@ EOF
         cover_log = (self.tmpdir / "cover.log").read_text(encoding="utf-8")
         self.assertIn("--summary-only --yes --cleanup-extra-sidecars", cover_log)
 
+    def test_cover_postprocess_seeds_source_sidecar_into_output_dir(self) -> None:
+        (self.album_dir / "cover.jpg").write_text("stub-image", encoding="utf-8")
+        _write_exec(
+            self.bin_dir / "cover_album.sh",
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                target="${@: -1}"
+                if [[ -f "$target/cover.jpg" ]]; then
+                  printf 'Art: OK | cover.jpg | JPEG 600x600 | embedded 3/3 | sidecars cleared=0 | extra embeds cleared=0\\n'
+                  exit 0
+                fi
+                printf 'Art: ERROR | no sidecar or embedded art source found\\n'
+                exit 1
+                """
+            ),
+        )
+
+        proc = self._run(
+            ["--yes"],
+            extra_env={
+                "AUDL_ARTWORK_AUTO": "1",
+                "AUDLINT_COVER_ALBUM_BIN": str(self.bin_dir / "cover_album.sh"),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Art: OK | cover.jpg | JPEG 600x600", proc.stdout)
+
+        expected_dir = self.output_root / "Test Artist" / "2024 - Test Album"
+        self.assertTrue((expected_dir / "cover.jpg").is_file())
+
     # -------------------------------------------------------------------------
     # Test: INDEX 1 (without leading zero) is accepted as INDEX 01
     # -------------------------------------------------------------------------

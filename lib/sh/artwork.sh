@@ -1291,6 +1291,7 @@ artwork_run_cover_album_postprocess() {
   local album_dir="$1"
   local default_bin="${2:-}"
   local dry_run="${3:-0}"
+  local reference_dir="${4:-}"
   local cover_bin="${AUDLINT_COVER_ALBUM_BIN:-${COVER_ALBUM_BIN:-$default_bin}}"
   local -a args=(--summary-only --yes --cleanup-extra-sidecars)
   local output=""
@@ -1313,6 +1314,10 @@ artwork_run_cover_album_postprocess() {
     args+=(--fetch-missing-art)
   fi
 
+  if [[ "$dry_run" != "1" ]]; then
+    artwork_seed_cover_from_reference_dir "$album_dir" "$reference_dir" || true
+  fi
+
   if artwork_output_supports_color; then
     output="$(FORCE_COLOR=1 "$cover_bin" "${args[@]}" "$album_dir" 2>&1)" || rc=$?
   else
@@ -1322,4 +1327,38 @@ artwork_run_cover_album_postprocess() {
     printf '%s\n' "$output"
   fi
   return "$rc"
+}
+
+artwork_seed_cover_from_reference_dir() {
+  local album_dir="$1"
+  local reference_dir="$2"
+  local album_dir_resolved="" reference_dir_resolved=""
+  local canonical_cover="" max_dim="" quality="" tmp_dir="" normalized_cover=""
+  local -a cover_files=()
+
+  [[ -n "$reference_dir" && -d "$reference_dir" ]] || return 0
+
+  album_dir_resolved="$(path_resolve "$album_dir" 2>/dev/null || printf '%s' "$album_dir")"
+  reference_dir_resolved="$(path_resolve "$reference_dir" 2>/dev/null || printf '%s' "$reference_dir")"
+  [[ "$album_dir_resolved" != "$reference_dir_resolved" ]] || return 0
+
+  artwork_collect_coverlike_files "$album_dir" cover_files
+  ((${#cover_files[@]} == 0)) || return 0
+
+  canonical_cover="$album_dir/$(artwork_sidecar_name)"
+  [[ ! -f "$canonical_cover" ]] || return 0
+
+  max_dim="$(artwork_max_dim)"
+  quality="$(artwork_jpeg_quality)"
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/artwork_seed.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$tmp_dir" ]] || return 0
+  normalized_cover="$tmp_dir/cover.jpg"
+
+  if artwork_pick_source "$reference_dir" "$normalized_cover" "$max_dim" "$quality" 0 \
+    && [[ -f "$normalized_cover" ]]; then
+    cp -f "$normalized_cover" "$canonical_cover" 2>/dev/null || true
+  fi
+
+  rm -rf "$tmp_dir"
+  return 0
 }

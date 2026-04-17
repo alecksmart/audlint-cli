@@ -287,7 +287,7 @@ for idx in "${!dff_files[@]}"; do
   fi
 done
 
-artwork_run_cover_album_postprocess "$OUTPUT_DIR" "$AUDLINT_COVER_ALBUM_BIN" "$DRY_RUN" || true
+artwork_run_cover_album_postprocess "$OUTPUT_DIR" "$AUDLINT_COVER_ALBUM_BIN" "$DRY_RUN" "$SOURCE_DIR" || true
 while ((jobs_running > 0)); do
   wait -n || true
   ((jobs_running -= 1))

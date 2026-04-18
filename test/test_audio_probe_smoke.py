@@ -57,6 +57,7 @@ class AudioProbeSmokeTests(unittest.TestCase):
                 case "$base" in
                   *.ape ) codec="ape"; sr="96000"; bps="24"; sfmt="s32p" ;;
                   *.dsf ) codec="dsd_lsbf"; sr="2822400"; bps="1"; sfmt="s32" ;;
+                  *.dst ) codec="dst"; sr="5644800"; bps="1"; sfmt="s32" ;;
                 esac
 
                 if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
@@ -162,6 +163,14 @@ EOF
         dsf.write_text("stub", encoding="utf-8")
 
         proc = self._run_shell(f'audio_probe_bit_depth_bits "{dsf}"')
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "24")
+
+    def test_dst_probe_normalizes_1bit_to_24bit_ceiling(self) -> None:
+        dst = self.album_dir / "01-track.dst"
+        dst.write_text("stub", encoding="utf-8")
+
+        proc = self._run_shell(f'audio_probe_bit_depth_bits "{dst}"')
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertEqual(proc.stdout.strip(), "24")
 

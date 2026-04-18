@@ -78,6 +78,22 @@ class AudlintAnalyzeLogicTests(unittest.TestCase):
         self.assertEqual(strategy, audlint_analyze.ANALYSIS_STRATEGY_SEGMENT)
         self.assertIn("expensive_codec:dsd_lsbf", reason)
 
+    def test_expensive_dst_codec_prefers_segment_strategy(self) -> None:
+        meta = audlint_analyze.TrackMeta(
+            sr=5644800.0,
+            dur=480.0,
+            bits=24,
+            channels=2,
+            analysis_sr=192000,
+            codec="dst",
+            size_bytes=650 * 1024 * 1024,
+            has_sibling_cue=False,
+            prefer_ffmpeg_first=True,
+        )
+        strategy, reason = audlint_analyze.choose_analysis_strategy("/tmp/image.dff", meta)
+        self.assertEqual(strategy, audlint_analyze.ANALYSIS_STRATEGY_SEGMENT)
+        self.assertIn("expensive_codec:dst", reason)
+
     def test_segment_confidence_allows_consistent_small_samples(self) -> None:
         confidence = audlint_analyze.analysis_confidence(
             [19850.0, 19880.0, 19820.0, 19860.0],
@@ -270,6 +286,40 @@ class AudlintAnalyzeLogicTests(unittest.TestCase):
         self.assertEqual(decision["standard_family_sr"], 48000)
         self.assertFalse(decision["fake_upscale"])
         self.assertEqual(decision["target_sr"], 192000)
+        self.assertTrue(decision["downgrade_guarded"])
+
+    def test_guarded_ultrahires_downgrade_still_caps_48k_family_to_192k(self) -> None:
+        decision = audlint_analyze.resolve_recode_decision(
+            4738.625,
+            384000.0,
+            500,
+            {
+                "decision_confidence": "low",
+                "decision_reason": "fallback_due_to_disagreement",
+                "fallback_reason": "fallback_due_to_disagreement",
+                "allow_fake_upscale": True,
+            },
+        )
+        self.assertFalse(decision["fake_upscale"])
+        self.assertEqual(decision["target_sr"], 192000)
+        self.assertEqual(decision["decision"], "cap_highres_ceiling")
+        self.assertTrue(decision["downgrade_guarded"])
+
+    def test_guarded_ultrahires_downgrade_still_caps_44k_family_to_176k(self) -> None:
+        decision = audlint_analyze.resolve_recode_decision(
+            4738.625,
+            705600.0,
+            500,
+            {
+                "decision_confidence": "low",
+                "decision_reason": "fallback_due_to_disagreement",
+                "fallback_reason": "fallback_due_to_disagreement",
+                "allow_fake_upscale": True,
+            },
+        )
+        self.assertFalse(decision["fake_upscale"])
+        self.assertEqual(decision["target_sr"], 176400)
+        self.assertEqual(decision["decision"], "cap_highres_ceiling")
         self.assertTrue(decision["downgrade_guarded"])
 
     def test_genuine_ultrahires_caps_to_192k_ceiling(self) -> None:

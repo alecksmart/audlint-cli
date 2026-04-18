@@ -244,7 +244,7 @@ audio_sample_fmt_to_bit_label() {
 
 audio_is_dsd_codec() {
   case "${1:-}" in
-  dsd*) return 0 ;;
+  dsd* | dst) return 0 ;;
   *) return 1 ;;
   esac
 }

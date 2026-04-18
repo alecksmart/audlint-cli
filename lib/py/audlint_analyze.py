@@ -40,6 +40,7 @@ PCM_BYTES_PER_SAMPLE = 4
 STRATEGY_CONFIG_VERSION = "hybrid-v2"
 SEGMENT_EXPENSIVE_CODECS = {
     "ape",
+    "dst",
     "wavpack",
     "wv",
     "dsf",
@@ -373,7 +374,7 @@ def sample_fmt_to_bits(sample_fmt: str | None) -> int | None:
 
 def normalize_source_bits(codec: str | None, bits: int | None) -> int | None:
     codec = (codec or "").strip().lower()
-    if codec.startswith("dsd") and (bits is None or bits < 24):
+    if (codec.startswith("dsd") or codec == "dst") and (bits is None or bits < 24):
         return 24
     return bits if bits and bits > 0 else None
 
@@ -1816,6 +1817,8 @@ def resolve_recode_decision(
 ) -> dict[str, object]:
     source_sr = int(sr_in)
     source_family = source_family_sr(source_sr)
+    ceiling_candidates = family_target_ladder_hz(source_family)
+    family_ceiling_sr = int(ceiling_candidates[-1]) if ceiling_candidates else None
     standard_family = classify_standard_family_sr(cutoff_hz, source_sr, headroom_hz)
     effective = effective_cutoff_hz(cutoff_hz, headroom_hz)
     selected_target_sr = classify_family_target_sr(cutoff_hz, source_sr, headroom_hz)
@@ -1852,13 +1855,10 @@ def resolve_recode_decision(
             fake_upscale = False
             target_sr = source_sr
             downgrade_guarded = True
-    else:
-        ceiling_candidates = family_target_ladder_hz(source_family)
-        if ceiling_candidates:
-            family_ceiling_sr = int(ceiling_candidates[-1])
-            if source_sr > family_ceiling_sr:
-                target_sr = family_ceiling_sr
-                decision = "cap_highres_ceiling"
+    if family_ceiling_sr is not None and target_sr > family_ceiling_sr:
+        target_sr = family_ceiling_sr
+        if decision != "downgrade_fake_upscale":
+            decision = "cap_highres_ceiling"
 
     return {
         "source_sr": source_sr,

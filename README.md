@@ -36,6 +36,7 @@ flowchart TD
 - Docs index: [docs/README.md](./docs/README.md)
 - Additional tools: [docs/tools.md](./docs/tools.md)
 - Spectrogram generation guide: [docs/spectre.md](./docs/spectre.md)
+- AI development harness: [docs/ai-development.md](./docs/ai-development.md)
 
 ## Library layout
 

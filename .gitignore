@@ -1,22 +1,13 @@
-# Local-only agent runbook and scratch dirs
-RUNBOOK.md
-AGENTS.md
-CLAUDE.md
-
-# Legacy project baseline
+# Local configuration and generated caches
 .env
 **/.env
 .venv*/
 **/.venv*/
-.claude/
+.claude/settings.local.json
+_bmad/config.user.toml
 .pytest_cache/
 __pycache__/
 *.pyc
 .vscode/
 spectrogram-analyzer/audio_quality_batch_results.json
 spectrogram-analyzer/audio_quality_batch_smoke.json
-
-# Private planning docs
-.PLANNING
-.PLANNING/
-.PLANNING/**

@@ -13,7 +13,9 @@ import stat
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+import time
+from datetime import datetime, timezone
+from platform import machine, platform, processor
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -28,6 +30,33 @@ R3_OUTPUT_PATH = (
     / "benchmarks"
     / "r3-analyzer-corpus-benchmark-baseline"
     / "corpus-manifest.json"
+)
+BENCHMARK_RELATIVE_PATH = Path(
+    "_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/benchmark-results.json"
+)
+BENCHMARK_TOOL_ORDER = (
+    "audlint-analyze",
+    "audlint-value",
+    "cue2flac",
+    "any2flac",
+    "dff2flac",
+)
+_CONVERTER_DESCRIPTORS = {
+    "cue2flac": {
+        "proof": "fixture_snapshot_cue2flac_profile_out_dry_run",
+        "form": ("--profile", "<profile>", "--out", "$OUTPUT", "--dry-run"),
+    },
+    "any2flac": {
+        "proof": "fixture_snapshot_any2flac_profile_dir_plan_only",
+        "form": ("--profile", "<profile>", "--dir", "$STAGE", "--plan-only"),
+    },
+}
+_ANALYZER_WORK_FIELDS = (
+    "track_count",
+    "metadata_probe_count",
+    "metadata_probe_counts",
+    "decode_operation_count",
+    "decode_operation_counts",
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RFC3339_UTC_RE = re.compile(
@@ -48,6 +77,7 @@ def usage() -> str:
         "  audlint_analyze_corpus.py [--json] MANIFEST.json\n"
         "  audlint_analyze_corpus.py --inventory CORPUS_ROOT MANIFEST.json\n\n"
         "  audlint_analyze_corpus.py --evaluate CORPUS_ROOT MANIFEST.json [CASE_ID ...]\n\n"
+        "  audlint_analyze_corpus.py --benchmark CORPUS_ROOT MANIFEST.json --iterations N\n\n"
         "--inventory validates a strict schema-v1 manifest and writes the\n"
         "read-only inventory to _bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/\n"
         "corpus-manifest.json. It never invokes audlint-analyze.\n\n"
@@ -760,6 +790,449 @@ def evaluate_strict_manifest(corpus_root: Path, manifest_path: Path, case_ids: l
     }
 
 
+def _benchmark_output_path(project_root: Path | None = None) -> Path:
+    """Return the sole R3.4 publication target.
+
+    The environment override exists only to let tests use a disposable project
+    root.  It deliberately cannot select an arbitrary output filename.
+    """
+    if project_root is None:
+        configured_root = os.environ.get("AUDLINT_BENCHMARK_PROJECT_ROOT", "")
+        project_root = Path(configured_root) if configured_root else Path(__file__).resolve().parents[2]
+    return project_root / BENCHMARK_RELATIVE_PATH
+
+
+def _atomic_write_deterministic_json(payload: object, output_path: Path) -> None:
+    """Publish a complete JSON candidate with replace(2), never partial text."""
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, candidate_name = tempfile.mkstemp(prefix=".benchmark-results-", suffix=".json", dir=output_path.parent)
+    candidate = Path(candidate_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, output_path)
+    except OSError:
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _safe_command_value(value: str, stage_root: Path, output_root: Path, corpus_root: Path) -> str:
+    rendered = value.replace(str(stage_root), "$STAGE").replace(str(output_root), "$OUTPUT").replace(str(corpus_root), "<corpus>")
+    # The executable identity is its filename; retaining an arbitrary absolute
+    # wrapper path would leak a fixture or temporary-project path into the
+    # stable artifact without adding reproducibility value.
+    if rendered.startswith("/") and "$STAGE" not in rendered and "$OUTPUT" not in rendered and "<corpus>" not in rendered:
+        return Path(rendered).name
+    return rendered
+
+
+def _diagnostics(stdout: str, stderr: str, root: Path, stage: Path, output: Path) -> dict[str, object]:
+    def detail(value: str) -> dict[str, object]:
+        clean = _safe_text(value, root, stage).replace(str(output), "$OUTPUT")
+        encoded = clean.encode("utf-8", "replace")
+        limit = 2048
+        return {
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "excerpt": clean[:limit],
+            "truncated": len(clean) > limit,
+        }
+    return {"stdout": detail(stdout), "stderr": detail(stderr)}
+
+
+def _artifact_facts(stage_root: Path, declared: set[str]) -> list[dict[str, object]]:
+    """Return publish-safe facts for generated (not declared input) stage files."""
+    facts: list[dict[str, object]] = []
+    for item in sorted(stage_root.rglob("*")):
+        relative = item.relative_to(stage_root).as_posix()
+        if relative in declared:
+            continue
+        info = item.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            kind = "directory"
+        elif stat.S_ISREG(info.st_mode):
+            kind = "file"
+        elif stat.S_ISLNK(info.st_mode):
+            kind = "symlink"
+        else:
+            kind = "other"
+        fact: dict[str, object] = {"path": relative, "type": kind, "bytes": info.st_size}
+        if kind == "file":
+            fact["sha256"] = _sha256_file(item)
+        facts.append(fact)
+    return facts
+
+
+def _is_cue_case(entry: dict[str, Any]) -> bool:
+    return any(str(item.get("path", "")).casefold().endswith(".cue") for item in entry["files"])
+
+
+def _is_dff_case(entry: dict[str, Any]) -> bool:
+    return any(str(item.get("path", "")).casefold().endswith(".dff") for item in entry["files"])
+
+
+def _is_any2flac_case(entry: dict[str, Any]) -> bool:
+    # DFF belongs to its dedicated converter.  All other declared audio is an
+    # any2flac planning candidate, including lossy cases whose own policy may
+    # reject the plan and must then remain visible as a command failure.
+    return any(_is_audio_file(item) and not str(item.get("path", "")).casefold().endswith(".dff") for item in entry["files"])
+
+
+def _benchmark_tools(entry: dict[str, Any]) -> list[str]:
+    tools = ["audlint-analyze", "audlint-value"]
+    if _is_cue_case(entry):
+        tools.append("cue2flac")
+    if _is_any2flac_case(entry):
+        tools.append("any2flac")
+    if _is_dff_case(entry):
+        tools.append("dff2flac")
+    return tools
+
+
+def _benchmark_command(tool: str, stage_case: Path, output_root: Path, entry: dict[str, Any]) -> tuple[list[str] | None, dict[str, str], str, str | None]:
+    """Build fixture-proven command descriptors; dff2flac stays excluded.
+
+    The descriptors are deliberately narrow.  Their exact argv and complete
+    stage-snapshot proofs live in the benchmark fixture tests, preventing a
+    future dry-run label from silently becoming an eligibility claim.
+    """
+    profile = str(entry["expected_target_profile"])
+    if tool == "audlint-analyze":
+        return [os.environ["AUDLINT_ANALYZE_BIN"], "--json", str(stage_case)], {}, "stage", None
+    if tool == "audlint-value":
+        return [os.environ["AUDLINT_VALUE_BIN"], str(stage_case)], {}, "stage", None
+    if tool == "cue2flac":
+        return [os.environ["AUDLINT_CUE2FLAC_BIN"], str(stage_case), "--profile", profile, "--out", str(output_root), "--dry-run"], {}, "stage", None
+    if tool == "any2flac":
+        overrides = {"ANY2FLAC_ANALYZE_JOBS": "1"}
+        return [os.environ["AUDLINT_ANY2FLAC_BIN"], "--profile", profile, "--dir", str(stage_case), "--plan-only"], overrides, "stage", None
+    # Its present --dry-run creates a true-peak cache in the working tree, so
+    # R3.4 has no eligible dff form.  Do not turn the label into a safety claim.
+    return None, {}, "stage", "no_fixture_proven_non_mutating_command"
+
+
+def _command_evidence(argv: list[str], stage: Path, output: Path, root: Path, cwd_role: str, overrides: dict[str, str]) -> dict[str, object]:
+    return {
+        "executable": _safe_command_value(argv[0], stage, output, root),
+        "argv": [_safe_command_value(value, stage, output, root) for value in argv],
+        "working_directory_role": cwd_role,
+        "environment_overrides": dict(sorted(overrides.items())),
+        "serial_worker_settings": dict(sorted(overrides.items())),
+    }
+
+
+def _run_timed(argv: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str, str, float]:
+    """Time exactly launch through communicate(), which drains both pipes."""
+    started = time.monotonic_ns()
+    proc = subprocess.Popen(
+        argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    stdout, stderr = proc.communicate()
+    stopped = time.monotonic_ns()
+    elapsed = max(0, stopped - started) / 1_000_000
+    return proc.returncode, stdout, stderr, elapsed
+
+
+def _analyzer_evidence(stdout: str) -> tuple[dict[str, object], dict[str, object]]:
+    actual = _parse_analyzer_result(stdout)
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:  # _parse_analyzer_result already checks this, for type narrowing.
+        raise _error("analyzer", f"invalid JSON ({exc.msg})") from exc
+    if not isinstance(payload, dict):
+        raise _error("analyzer", "JSON must be one object")
+    for field in _ANALYZER_WORK_FIELDS:
+        if field not in payload:
+            raise _error(f"analyzer.{field}", "is required by R3.3")
+    for field in ("track_count", "metadata_probe_count", "decode_operation_count"):
+        _require_int(payload[field], f"analyzer.{field}", nonnegative=True)
+    for field, keys, total in (
+        ("metadata_probe_counts", {"ffprobe", "soxi"}, "metadata_probe_count"),
+        ("decode_operation_counts", {"segment", "full"}, "decode_operation_count"),
+    ):
+        counts = _require_object(payload[field], f"analyzer.{field}")
+        if set(counts) != keys:
+            raise _error(f"analyzer.{field}", f"must have exact keys {sorted(keys)}")
+        values = [_require_int(counts[key], f"analyzer.{field}.{key}", nonnegative=True) for key in sorted(keys)]
+        if sum(values) != payload[total]:
+            raise _error(f"analyzer.{field}", f"must sum to {total}")
+    return actual, payload
+
+
+def _accuracy_evidence(entry: dict[str, Any], actual: dict[str, object]) -> tuple[str, dict[str, object], dict[str, object] | None]:
+    expected = {
+        "target_profile": entry["expected_target_profile"], "decision": entry["expected_decision"],
+        "fake_upscale": entry["expected_fake_upscale"], "analysis_mode": entry.get("expected_analysis_mode"),
+    }
+    mismatches = [field for field, value in expected.items() if value is not None and value != actual[field]]
+    status = "pass" if not mismatches else ("fail" if entry["trust"] == "trusted" else "warn")
+    reason = None if not mismatches else {"code": "accuracy_mismatch", "detail": ", ".join(mismatches)}
+    return status, {"expected": expected, "actual": actual, "trust": entry["trust"], "mismatch_reasons": mismatches, "verdict": status}, reason
+
+
+def _sample_base(ordinal: int, entry: dict[str, Any], tool: str, iteration: int, condition: str) -> dict[str, object]:
+    return {
+        "ordinal": ordinal,
+        "sample_id": f"{entry['id']}:{tool}:{iteration}:{condition}",
+        "case": {key: entry[key] for key in ("id", "album_path", "trust", "category", "case_class")},
+        "tool": tool,
+        "iteration": iteration,
+        "cache_condition": condition,
+        "applicable": True,
+        "executed": False,
+        "status": "error",
+        "command": None,
+        "exit_status": None,
+        "elapsed_ms": None,
+        "cache_observation": {"declared": condition, "observed": "unsupported", "basis": "not_executed", "before": [], "after": []},
+        "accuracy_evidence": None,
+        "accuracy_evidence_unavailability_reason": "not_analyzer_accuracy_boundary",
+        "analyzer_evidence": None,
+        "analyzer_evidence_unavailability_reason": "not_exposed_by_tool",
+        "safety": {"stage_verification": "not_run", "source_snapshot": "not_run", "converter_stage_snapshot": "not_applicable", "cleanup": "not_run"},
+        "diagnostics": None,
+        "reason": None,
+    }
+
+
+def _aggregates(samples: list[dict[str, object]]) -> dict[str, object]:
+    dimensions = ("trust", "category", "case_class", "tool", "cache_condition", "selected_strategy", "fast_to_exact_fallback", "segment_to_full_fallback")
+    groups: dict[str, dict[str, list[float]]] = {dimension: {} for dimension in dimensions}
+    for sample in samples:
+        if not sample["executed"] or sample["status"] not in {"pass", "warn"} or sample["elapsed_ms"] is None:
+            continue
+        analyzer = sample.get("analyzer_evidence") or {}
+        case = sample["case"]
+        values = {
+            "trust": case["trust"], "category": case["category"], "case_class": case["case_class"], "tool": sample["tool"], "cache_condition": sample["cache_condition"],
+            "selected_strategy": analyzer.get("album_analysis_strategies", "unavailable"),
+            "fast_to_exact_fallback": analyzer.get("auto_exact_fallback", "unavailable"),
+            "segment_to_full_fallback": analyzer.get("album_strategy_fallback_to_full", "unavailable"),
+        }
+        for dimension, raw in values.items():
+            key = "unavailable" if raw is None else (",".join(raw) if isinstance(raw, list) else str(raw).lower())
+            groups[dimension].setdefault(key, []).append(float(sample["elapsed_ms"]))
+    result: dict[str, object] = {"method": "successful executed pass/warn raw samples only", "rounding_decimals": 3, "dimensions": {}}
+    for dimension in dimensions:
+        rendered = []
+        for key in sorted(groups[dimension]):
+            values = sorted(groups[dimension][key])
+            middle = len(values) // 2
+            median = values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+            rendered.append({"key": key, "count": len(values), "min_ms": round(values[0], 3), "median_ms": round(median, 3), "mean_ms": round(sum(values) / len(values), 3), "max_ms": round(values[-1], 3)})
+        result["dimensions"][dimension] = rendered
+    return result
+
+
+def _identity(validated: dict[str, Any], manifest_sha256: str, iterations: int, planned_tools: set[str]) -> dict[str, object]:
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, check=True).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        head, dirty = None, None
+    workers = {}
+    if "any2flac" in planned_tools:
+        workers["ANY2FLAC_ANALYZE_JOBS"] = "1"
+    if "dff2flac" in planned_tools:
+        workers["DFF2FLAC_ANALYZE_JOBS"] = "1"
+    toolchain: dict[str, object] = {}
+    unavailable: dict[str, str] = {}
+    for label, argv in {
+        "bash": ["bash", "--version"], "python": [sys.executable, "--version"], "numpy": [sys.executable, "-c", "import numpy; print(numpy.__version__)"],
+        "sox": ["sox", "--version"], "soxi": ["soxi", "--version"], "ffmpeg": ["ffmpeg", "-version"], "ffprobe": ["ffprobe", "-version"], "dr14": ["dr14meter", "--version"],
+    }.items():
+        try:
+            version = subprocess.run(argv, capture_output=True, text=True, check=True).stdout.strip().splitlines()[0]
+            toolchain[label] = version or None
+            if not version:
+                unavailable[label] = "version_probe_returned_no_text"
+        except (OSError, subprocess.SubprocessError, IndexError):
+            toolchain[label] = None
+            unavailable[label] = "version_probe_unavailable"
+    audlint_tools: dict[str, object] = {}
+    for environment, name in {
+        "AUDLINT_ANALYZE_BIN": "audlint-analyze", "AUDLINT_VALUE_BIN": "audlint-value",
+        "AUDLINT_CUE2FLAC_BIN": "cue2flac", "AUDLINT_ANY2FLAC_BIN": "any2flac",
+    }.items():
+        if name not in planned_tools:
+            continue
+        path = Path(os.environ.get(environment, ""))
+        try:
+            audlint_tools[name] = {"executable": path.name, "sha256": _sha256_file(path)}
+        except OSError:
+            audlint_tools[name] = {"executable": path.name or None, "sha256": None, "unavailability_reason": "identity_unavailable"}
+    analyzer_settings = {key: _safe_text(value) for key, value in sorted(os.environ.items()) if key.startswith("AUDLINT_ANALYZE_")}
+    requested_mode = analyzer_settings.get("AUDLINT_ANALYZE_MODE") or "auto"
+    return {
+        "manifest": {"corpus_id": validated["corpus_id"], "corpus_revision": validated["corpus_revision"], "sha256": manifest_sha256},
+        "repository": {"head": head, "dirty": dirty},
+        "host": {"os": platform(), "architecture": machine(), "cpu": processor() or None, "logical_cores": os.cpu_count(), "memory_bytes": None, "memory_unavailability_reason": "not_portably_discoverable"},
+        "toolchain": toolchain | {"audlint_tools": audlint_tools, "unavailability_reasons": unavailable},
+        "analyzer": {"requested_mode": requested_mode, "effective_mode": requested_mode, "settings": analyzer_settings},
+        "execution": {"iterations": iterations, "serial_worker_overrides": workers},
+        "cache_limitation": "Application-cold stages are controlled; operating-system page cache is uncontrolled and this makes no hardware-cold claim.",
+    }
+
+
+def benchmark_strict_manifest(corpus_root: Path, manifest_path: Path, iterations: int, project_root: Path | None = None) -> tuple[int, dict[str, object]]:
+    """Execute R3.4's serial cold/warm plan and conditionally publish its artifact."""
+    if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations <= 0:
+        raise _error("iterations", "must be a positive integer")
+    raw, payload = _read_manifest_bytes(manifest_path)
+    manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    validated = validate_and_inventory_manifest(corpus_root, payload)
+    root = corpus_root.resolve(strict=True)
+    required_bins = {
+        "AUDLINT_ANALYZE_BIN": "audlint-analyze", "AUDLINT_VALUE_BIN": "audlint-value",
+        "AUDLINT_CUE2FLAC_BIN": "cue2flac", "AUDLINT_ANY2FLAC_BIN": "any2flac",
+    }
+    planned_tools = {tool for entry in validated["entries"] for tool in _benchmark_tools(entry)}
+    for key, tool in required_bins.items():
+        if tool in planned_tools and not os.environ.get(key):
+            raise _error(key, f"is required for planned {tool} samples")
+        if tool in planned_tools and os.environ.get(key) and not (Path(os.environ[key]).is_file() and os.access(os.environ[key], os.X_OK)):
+            raise _error(key, f"must name an executable for planned {tool} samples")
+
+    # This intentionally precedes every stage and product invocation.
+    identity = _identity(validated, manifest_sha256, iterations, planned_tools)
+    generated_at_utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    samples: list[dict[str, object]] = []
+    ordinal = 0
+    safety_failure = False
+    for entry in validated["entries"]:
+        for tool in _benchmark_tools(entry):
+            for iteration in range(1, iterations + 1):
+                pair: list[dict[str, object]] = []
+                for condition in ("cold", "warm"):
+                    ordinal += 1
+                    pair.append(_sample_base(ordinal, entry, tool, iteration, condition))
+                samples.extend(pair)
+                stage_root: Path | None = None
+                output_root: Path | None = None
+                source_before: list[dict[str, object]] | None = None
+                stage_before: list[dict[str, object]] | None = None
+                stage_case: Path | None = None
+                declared = {str(item["path"]) for item in entry["files"]}
+                try:
+                    case_root = _relative_lstat_path(root, str(entry["album_path"]), f"case {entry['id']}")
+                    source_before = _snapshot_subtree(case_root)
+                    stage_root = _new_stage_root(root)
+                    stage_case = _stage_case(root, entry, stage_root)
+                    output_root = Path(tempfile.mkdtemp(prefix="audlint-r3-output-", dir=str(stage_root.parent))).resolve()
+                    argv, overrides, cwd_role, exclusion = _benchmark_command(tool, stage_case, output_root, entry)
+                    if exclusion:
+                        source_after = _snapshot_subtree(case_root)
+                        for sample in pair:
+                            sample["status"] = "excluded"
+                            sample["reason"] = {"code": exclusion, "detail": "R3.4 has no exact fixture-proven non-mutating command form"}
+                            sample["safety"]["stage_verification"] = "pass"
+                            sample["safety"]["source_snapshot"] = "pass" if source_before == source_after else "error"
+                            sample["safety"]["cleanup"] = "not_run"
+                            if source_before != source_after:
+                                sample["status"] = "error"
+                                sample["reason"] = {"code": "source_mutated", "detail": "source subtree changed"}
+                                safety_failure = True
+                        continue
+                    assert argv is not None
+                    command = _command_evidence(argv, stage_root, output_root, root, cwd_role, overrides)
+                    for sample in pair:
+                        sample["command"] = command
+                        sample["safety"]["stage_verification"] = "pass"
+                    if tool in {"cue2flac", "any2flac"}:
+                        stage_before = _snapshot_subtree(stage_root)
+                        for sample in pair:
+                            sample["safety"]["converter_stage_snapshot"] = "pass"
+                    env = os.environ.copy()
+                    env.update(overrides)
+                    for position, sample in enumerate(pair):
+                        before_facts = _artifact_facts(stage_root, declared)
+                        rc, stdout, stderr, elapsed = _run_timed(argv, stage_case, env)
+                        sample["executed"] = True
+                        sample["exit_status"] = rc
+                        sample["elapsed_ms"] = elapsed
+                        sample["diagnostics"] = _diagnostics(stdout, stderr, root, stage_root, output_root)
+                        after_facts = _artifact_facts(stage_root, declared)
+                        observed = "bypass" if tool == "audlint-analyze" else "unsupported"
+                        basis = "audlint_analyze_json_performs_fresh_analysis" if tool == "audlint-analyze" else "no_structured_cache_state_exposed"
+                        sample["cache_observation"] = {"declared": sample["cache_condition"], "observed": observed, "basis": basis, "before": before_facts, "after": after_facts}
+                        try:
+                            if rc != 0:
+                                raise _error("product", f"exited {rc}")
+                            if tool == "audlint-analyze":
+                                actual, evidence = _analyzer_evidence(stdout)
+                                status, accuracy, reason = _accuracy_evidence(entry, actual)
+                                sample["status"], sample["accuracy_evidence"], sample["analyzer_evidence"], sample["reason"] = status, accuracy, evidence, reason
+                                sample["accuracy_evidence_unavailability_reason"] = None
+                                sample["analyzer_evidence_unavailability_reason"] = None
+                            else:
+                                sample["status"] = "pass"
+                        except ManifestValidationError as exc:
+                            sample["status"] = "error"
+                            sample["reason"] = {"code": "product_or_evidence_failure", "detail": _safe_text(exc, root, stage_root)}
+                        source_after = _snapshot_subtree(case_root)
+                        sample["safety"]["source_snapshot"] = "pass" if source_before == source_after else "error"
+                        if source_before != source_after:
+                            safety_failure = True
+                            sample["status"], sample["elapsed_ms"], sample["reason"] = "error", None, {"code": "source_mutated", "detail": "source subtree changed"}
+                        if stage_before is not None:
+                            current_stage = _snapshot_subtree(stage_root)
+                            sample["safety"]["converter_stage_snapshot"] = "pass" if stage_before == current_stage else "error"
+                            if stage_before != current_stage:
+                                safety_failure = True
+                                sample["status"], sample["elapsed_ms"], sample["reason"] = "error", None, {"code": "converter_stage_mutated", "detail": "complete staged tree changed"}
+                        if sample["status"] in {"error", "fail"} and position == 0:
+                            warm = pair[1]
+                            warm["status"] = "error"
+                            warm["reason"] = {"code": "cold_failed", "detail": "warm command was not launched"}
+                            break
+                except (ManifestValidationError, OSError, shutil.Error) as exc:
+                    target = pair[0] if not pair[0]["executed"] else pair[1]
+                    target["status"] = "error"
+                    target["reason"] = {"code": "stage_or_safety_failure", "detail": _safe_text(exc, root, stage_root)}
+                    if not pair[0]["executed"]:
+                        pair[1]["status"] = "error"
+                        pair[1]["reason"] = {"code": "cold_failed", "detail": "warm command was not launched"}
+                    safety_failure = True
+                finally:
+                    for sample in pair:
+                        if sample["safety"]["cleanup"] == "pending":
+                            sample["safety"]["cleanup"] = "not_needed"
+                    cleanup_error = False
+                    for temporary in (stage_root, output_root):
+                        if temporary is not None:
+                            try:
+                                shutil.rmtree(temporary)
+                                if temporary.exists():
+                                    cleanup_error = True
+                            except OSError:
+                                cleanup_error = True
+                    for sample in pair:
+                        if sample["safety"]["cleanup"] not in {"not_needed", "pass"}:
+                            sample["safety"]["cleanup"] = "error" if cleanup_error else "pass"
+                        if cleanup_error:
+                            sample["status"] = "error"
+                            sample["reason"] = {"code": "cleanup_failed", "detail": "temporary benchmark paths could not be removed"}
+                            safety_failure = True
+    exclusions = [{key: sample[key] for key in ("sample_id", "tool", "iteration", "cache_condition", "reason")} | {"case_id": sample["case"]["id"]} for sample in samples if sample["status"] == "excluded"]
+    counts = {status: sum(1 for sample in samples if sample["status"] == status) for status in ("pass", "warn", "fail", "error", "excluded")}
+    summary = counts | {"executed": sum(1 for sample in samples if sample["executed"]), "not_executed": sum(1 for sample in samples if not sample["executed"]), "total": len(samples), "overall_status": "pass" if not (counts["fail"] or counts["error"]) else "error"}
+    result: dict[str, object] = {"schema_version": 1, "generated_at_utc": generated_at_utc, "identity": identity, "samples": samples, "exclusions": exclusions, "aggregates": _aggregates(samples), "summary": summary}
+    if not safety_failure:
+        try:
+            _atomic_write_deterministic_json(result, _benchmark_output_path(project_root))
+        except OSError as exc:
+            result["publication_error"] = _safe_text(exc)
+            result["summary"]["overall_status"] = "error"
+    return (0 if summary["overall_status"] == "pass" else 1), result
+
+
 def _manifest_entries(payload: object) -> list[dict[str, object]]:
     if isinstance(payload, list):
         return [entry for entry in payload if isinstance(entry, dict)]
@@ -885,6 +1358,20 @@ def _print_text(results: list[dict[str, object]]) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--benchmark":
+        args = argv[1:]
+        if len(args) != 4 or args[2] != "--iterations":
+            print(usage(), file=sys.stderr)
+            return 2
+        try:
+            iterations = int(args[3])
+            returncode, evidence = benchmark_strict_manifest(Path(args[0]), Path(args[1]), iterations)
+        except (ValueError, ManifestValidationError, OSError) as exc:
+            print(json.dumps(_strict_error_evidence(None, exc), sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+            return 1
+        print(json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        return returncode
+
     if argv and argv[0] == "--evaluate":
         if len(argv) < 3:
             print(usage(), file=sys.stderr)

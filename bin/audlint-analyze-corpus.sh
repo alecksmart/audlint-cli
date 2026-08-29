@@ -28,6 +28,10 @@ env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
 PYTHON_BIN="${AUDL_PYTHON_BIN:-python3}"
 AUDLINT_ANALYZE_CORPUS_PY="${AUDLINT_ANALYZE_CORPUS_PY:-$SCRIPT_DIR/../lib/py/audlint_analyze_corpus.py}"
 export AUDLINT_ANALYZE_BIN="${AUDLINT_ANALYZE_BIN:-$SCRIPT_DIR/audlint-analyze.sh}"
+export AUDLINT_VALUE_BIN="${AUDLINT_VALUE_BIN:-$SCRIPT_DIR/audlint-value.sh}"
+export AUDLINT_CUE2FLAC_BIN="${AUDLINT_CUE2FLAC_BIN:-$SCRIPT_DIR/cue2flac.sh}"
+export AUDLINT_ANY2FLAC_BIN="${AUDLINT_ANY2FLAC_BIN:-$SCRIPT_DIR/any2flac.sh}"
+export AUDLINT_DFF2FLAC_BIN="${AUDLINT_DFF2FLAC_BIN:-$SCRIPT_DIR/dff2flac.sh}"
 
 if [[ ! -f "$AUDLINT_ANALYZE_CORPUS_PY" ]]; then
   echo "Missing helper: $AUDLINT_ANALYZE_CORPUS_PY" >&2

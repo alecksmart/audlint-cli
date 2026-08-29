@@ -177,6 +177,9 @@ lyrics_db_init "$LIBRARY_DB"
 NOW_TS=$(date +%s)
 TRACKS_WITH_LYRICS=0
 TRACKS_FAILED=0
+TRACKS_CACHE_ELIGIBLE=0
+TRACKS_CACHE_DEFERRED=0
+TRACKS_DISQUALIFYING_SKIPS=0
 for f in "${FILES[@]}"; do
   audio_ffprobe_meta_prime "$f"
   CODEC="$(audio_codec_name "$f" || true)"
@@ -189,6 +192,7 @@ for f in "${FILES[@]}"; do
     SUPPORT_LYRICS=true
   fi
   if [ "$SUPPORT_LYRICS" = false ]; then
+    TRACKS_DISQUALIFYING_SKIPS=$((TRACKS_DISQUALIFYING_SKIPS + 1))
     echo "${YELLOW}[LYRICS]${RESET} Unsupported codec for lyrics embed; skip: $f"
     continue
   fi
@@ -204,6 +208,7 @@ for f in "${FILES[@]}"; do
   fi
 
   if [ -z "$ARTIST" ] || [ -z "$TITLE" ]; then
+    TRACKS_DISQUALIFYING_SKIPS=$((TRACKS_DISQUALIFYING_SKIPS + 1))
     echo "${YELLOW}[LYRICS]${RESET} Missing tags (artist/title): $f"
     continue
   fi
@@ -235,6 +240,7 @@ for f in "${FILES[@]}"; do
     continue
   fi
 
+  TRACKS_CACHE_ELIGIBLE=$((TRACKS_CACHE_ELIGIBLE + 1))
   CACHE_META=$(lyrics_cache_lookup "$LIBRARY_DB" "$ARTIST_LC" "$TITLE_LC" "$ALBUM_LC" "$DURATION_INT")
   CACHE_STATUS=""
   CACHE_ATTEMPTED=0
@@ -247,6 +253,7 @@ for f in "${FILES[@]}"; do
     if [ $((NOW_TS - CACHE_ATTEMPTED)) -lt "$LYRICS_RETRY_SECONDS" ]; then
       NEXT_RETRY=$((CACHE_ATTEMPTED + LYRICS_RETRY_SECONDS))
       NEXT_DATE=$(date_format_epoch "$NEXT_RETRY" "+%Y-%m-%d" 2>/dev/null || echo "later")
+      TRACKS_CACHE_DEFERRED=$((TRACKS_CACHE_DEFERRED + 1))
       echo "${BLUE}[LYRICS]${RESET} Cached not found; revisit ${NEXT_DATE}: $f"
       continue
     fi
@@ -319,6 +326,9 @@ if ((TRACKS_FAILED > 0)); then
 fi
 
 if ((TRACKS_WITH_LYRICS == 0)); then
+  if ((TRACKS_CACHE_ELIGIBLE > 0 && TRACKS_CACHE_ELIGIBLE == TRACKS_CACHE_DEFERRED && TRACKS_DISQUALIFYING_SKIPS == 0)); then
+    exit 0
+  fi
   exit 1
 fi
 

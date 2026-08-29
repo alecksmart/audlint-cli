@@ -63,11 +63,15 @@ class TagsScriptsTests(unittest.TestCase):
         self.tmpdir = Path(self._tmp.name)
         self.bin_dir = self.tmpdir / "bin"
         self.bin_dir.mkdir(parents=True, exist_ok=True)
+        self.ffprobe_fixture_dir = self.tmpdir / "ffprobe-fixtures"
+        self.ffprobe_fixture_dir.mkdir(parents=True, exist_ok=True)
         self._install_stubs()
 
         self.env_base = os.environ.copy()
         self.env_base["PATH"] = f"{self.bin_dir}{os.pathsep}{self.env_base.get('PATH', '')}"
         self.env_base["TERM"] = "xterm"
+        self.env_base["FFPROBE_FIXTURE_DIR"] = str(self.ffprobe_fixture_dir)
+        self.env_base["METAFLAC_FIXTURE_DIR"] = str(self.ffprobe_fixture_dir)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -105,6 +109,14 @@ class TagsScriptsTests(unittest.TestCase):
                 title="${FFPROBE_TITLE:-Test Song}"
                 album="${FFPROBE_ALBUM:-Test Album}"
                 album_artist="${FFPROBE_ALBUM_ARTIST:-}"
+                fixture="${FFPROBE_FIXTURE_DIR:-}/$base"
+                if [ -n "${FFPROBE_FIXTURE_DIR:-}" ] && [ -d "$fixture" ]; then
+                  codec="$(cat "$fixture/codec")"
+                  artist="$(cat "$fixture/artist")"
+                  title="$(cat "$fixture/title")"
+                  album="$(cat "$fixture/album")"
+                  duration="$(cat "$fixture/duration")"
+                fi
 
                 if [[ "$args" == *"stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics"* ]]; then
                   cat <<EOF
@@ -224,8 +236,11 @@ EOF
                 """\
                 #!/bin/bash
                 args="$*"
+                file="${@: -1}"
+                base="$(basename "$file")"
+                fixture="${METAFLAC_FIXTURE_DIR:-}/$base"
                 if [[ "$args" == *"--show-tag=LYRICS"* ]]; then
-                  if [ "${METAFLAC_HAS_LYRICS:-0}" = "1" ]; then
+                  if [ "${METAFLAC_HAS_LYRICS:-0}" = "1" ] || { [ -n "${METAFLAC_FIXTURE_DIR:-}" ] && [ -f "$fixture/has-lyrics" ]; }; then
                     echo "LYRICS=present"
                   fi
                   exit 0
@@ -233,6 +248,9 @@ EOF
 
                 if [ -n "${METAFLAC_LOG:-}" ]; then
                   printf "%s\\n" "$*" >> "${METAFLAC_LOG}"
+                fi
+                if [ -n "${METAFLAC_FIXTURE_DIR:-}" ] && [ -f "$fixture/embed-fails" ]; then
+                  exit 1
                 fi
                 exit 0
                 """
@@ -258,6 +276,74 @@ EOF
             capture_output=True,
             check=False,
         )
+
+    def _create_lyrics_track(
+        self,
+        album_dir: Path,
+        name: str,
+        *,
+        codec: str = "flac",
+        artist: str = "Test Artist",
+        title: str = "Test Song",
+        album: str = "Test Album",
+        duration: int = 123,
+        has_lyrics: bool = False,
+        embed_fails: bool = False,
+    ) -> Path:
+        track = album_dir / name
+        track.write_text("", encoding="utf-8")
+        fixture = self.ffprobe_fixture_dir / name
+        fixture.mkdir(parents=True)
+        for field, value in (
+            ("codec", codec),
+            ("artist", artist),
+            ("title", title),
+            ("album", album),
+            ("duration", str(duration)),
+        ):
+            (fixture / field).write_text(value, encoding="utf-8")
+        if has_lyrics:
+            (fixture / "has-lyrics").touch()
+        if embed_fails:
+            (fixture / "embed-fails").touch()
+        return track
+
+    def _cache_not_found(
+        self,
+        db_path: Path,
+        track: Path,
+        *,
+        artist: str = "Test Artist",
+        title: str = "Test Song",
+        album: str = "Test Album",
+        duration: int = 123,
+    ) -> None:
+        _create_schema(db_path)
+        now = int(time.time())
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO lyrics_cache (
+                  artist_lc, title_lc, album_lc, duration_int, path, status, lyrics, source, attempted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artist.strip().lower(),
+                    title.strip().lower(),
+                    album.strip().lower(),
+                    duration,
+                    str(track),
+                    "not_found",
+                    "",
+                    "lrclib",
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def test_lyrics_album_fetches_embeds_and_caches_found(self) -> None:
         album = self.tmpdir / "album"
@@ -436,6 +522,248 @@ EOF
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
         self.assertIn("Cached not found; revisit", proc.stdout)
         self.assertFalse(curl_log.exists(), "network fetch should be skipped during backoff")
+
+    def test_lyrics_album_expired_cached_not_found_retries_and_fresh_miss_fails(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        track = self._create_lyrics_track(album_dir, "01 - Expired Miss.flac")
+
+        db_path = self.tmpdir / "library.sqlite"
+        self._cache_not_found(db_path, track)
+        expired_at = int(time.time()) - (60 * 60 * 24 * 30 * 6) - 1
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE lyrics_cache SET attempted_at = ?, updated_at = ?",
+                (expired_at, expired_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(db_path),
+            "CURL_LOG": str(curl_log),
+            "CURL_OUTPUT": "[]",
+        }
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Not found: 01 - Expired Miss.flac", proc.stdout)
+        self.assertEqual(len(curl_log.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_lyrics_album_all_cached_not_found_backoff_multiple_tracks(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        track_one = self._create_lyrics_track(
+            album_dir, "01 - Deferred One.flac", title="Deferred One"
+        )
+        track_two = self._create_lyrics_track(
+            album_dir, "02 - Deferred Two.flac", title="Deferred Two"
+        )
+
+        db_path = self.tmpdir / "library.sqlite"
+        self._cache_not_found(db_path, track_one, title="Deferred One")
+        self._cache_not_found(db_path, track_two, title="Deferred Two")
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(db_path),
+            "CURL_LOG": str(curl_log),
+        }
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertEqual(proc.stdout.count("Cached not found; revisit"), 2)
+        self.assertFalse(curl_log.exists(), "all deferred tracks must skip network fetches")
+
+    def test_lyrics_album_mixed_cached_backoff_and_fresh_miss_fails(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        deferred = self._create_lyrics_track(
+            album_dir, "01 - Deferred.flac", title="Deferred"
+        )
+        self._create_lyrics_track(album_dir, "02 - Fresh Miss.flac", title="Fresh Miss")
+
+        db_path = self.tmpdir / "library.sqlite"
+        self._cache_not_found(db_path, deferred, title="Deferred")
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(db_path),
+            "CURL_LOG": str(curl_log),
+            "CURL_OUTPUT": "[]",
+        }
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Cached not found; revisit", proc.stdout)
+        self.assertIn("Not found: 02 - Fresh Miss.flac", proc.stdout)
+        self.assertEqual(len(curl_log.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_lyrics_album_deferred_track_does_not_mask_embed_failure(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        deferred = self._create_lyrics_track(
+            album_dir, "01 - Deferred.flac", title="Deferred"
+        )
+        self._create_lyrics_track(
+            album_dir,
+            "02 - Embed Failure.flac",
+            title="Embed Failure",
+            embed_fails=True,
+        )
+
+        db_path = self.tmpdir / "library.sqlite"
+        self._cache_not_found(db_path, deferred, title="Deferred")
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(db_path),
+            "CURL_LOG": str(curl_log),
+            "CURL_OUTPUT": '[{"syncedLyrics":"[00:00.00]Hello world"}]',
+        }
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Cached not found; revisit", proc.stdout)
+        self.assertIn("Embed failed: 02 - Embed Failure.flac", proc.stdout)
+        self.assertEqual(len(curl_log.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_lyrics_album_deferred_track_does_not_mask_unsupported_track(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        deferred = self._create_lyrics_track(
+            album_dir, "01 - Deferred.flac", title="Deferred"
+        )
+        self._create_lyrics_track(
+            album_dir, "02 - Unsupported.ogg", codec="vorbis", title="Unsupported"
+        )
+
+        db_path = self.tmpdir / "library.sqlite"
+        self._cache_not_found(db_path, deferred, title="Deferred")
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(db_path),
+            "CURL_LOG": str(curl_log),
+        }
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Cached not found; revisit", proc.stdout)
+        self.assertIn("Unsupported codec for lyrics embed; skip: 02 - Unsupported.ogg", proc.stdout)
+        self.assertFalse(curl_log.exists())
+
+    def test_lyrics_album_deferred_track_does_not_mask_missing_tags(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        deferred = self._create_lyrics_track(
+            album_dir, "01 - Deferred.flac", title="Deferred"
+        )
+        self._create_lyrics_track(
+            album_dir, "02 - Missing Tags.flac", artist="", title="Missing Tags"
+        )
+
+        db_path = self.tmpdir / "library.sqlite"
+        self._cache_not_found(db_path, deferred, title="Deferred")
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(db_path),
+            "CURL_LOG": str(curl_log),
+        }
+
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Cached not found; revisit", proc.stdout)
+        self.assertIn("Missing tags (artist/title): 02 - Missing Tags.flac", proc.stdout)
+        self.assertFalse(curl_log.exists())
+
+    def test_lyrics_album_unsupported_track_remains_nonzero(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        self._create_lyrics_track(
+            album_dir, "01 - Unsupported.ogg", codec="vorbis", title="Unsupported"
+        )
+
+        env = {**self.env_base, "AUDL_DB_PATH": str(self.tmpdir / "library.sqlite")}
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Unsupported codec for lyrics embed; skip", proc.stdout)
+
+    def test_lyrics_album_missing_tags_remains_nonzero(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        self._create_lyrics_track(
+            album_dir, "01 - Missing Tags.flac", artist="", title="Missing Tags"
+        )
+
+        env = {**self.env_base, "AUDL_DB_PATH": str(self.tmpdir / "library.sqlite")}
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+
+        self.assertEqual(proc.returncode, 1, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Missing tags (artist/title)", proc.stdout)
+
+    def test_lyrics_album_existing_lyrics_with_unsupported_track_stays_successful(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        self._create_lyrics_track(
+            album_dir, "01 - Existing Lyrics.flac", title="Existing Lyrics", has_lyrics=True
+        )
+        self._create_lyrics_track(
+            album_dir, "02 - Unsupported.ogg", codec="vorbis", title="Unsupported"
+        )
+
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(self.tmpdir / "library.sqlite"),
+            "CURL_LOG": str(curl_log),
+        }
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Tag exists; skip: 01 - Existing Lyrics.flac", proc.stdout)
+        self.assertIn("Unsupported codec for lyrics embed; skip: 02 - Unsupported.ogg", proc.stdout)
+        self.assertFalse(curl_log.exists())
+
+    def test_lyrics_album_embedded_lyrics_with_missing_tags_stays_successful(self) -> None:
+        album_dir = self.tmpdir / "album"
+        album_dir.mkdir()
+        (album_dir / ".env").write_text("", encoding="utf-8")
+        self._create_lyrics_track(
+            album_dir, "01 - Fresh Lyrics.flac", title="Fresh Lyrics"
+        )
+        self._create_lyrics_track(
+            album_dir, "02 - Missing Tags.flac", artist="", title="Missing Tags"
+        )
+
+        curl_log = self.tmpdir / "curl.log"
+        env = {
+            **self.env_base,
+            "AUDL_DB_PATH": str(self.tmpdir / "library.sqlite"),
+            "CURL_LOG": str(curl_log),
+            "CURL_OUTPUT": '[{"syncedLyrics":"[00:00.00]Hello world"}]',
+        }
+        proc = self._run(LYRICS_ALBUM, ["-y"], cwd=album_dir, env=env)
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertIn("Embedded: 01 - Fresh Lyrics.flac", proc.stdout)
+        self.assertIn("Missing tags (artist/title): 02 - Missing Tags.flac", proc.stdout)
+        self.assertEqual(len(curl_log.read_text(encoding="utf-8").splitlines()), 1)
 
     def test_lyrics_album_replaces_existing_window_rows_instead_of_appending(self) -> None:
         album = self.tmpdir / "album"

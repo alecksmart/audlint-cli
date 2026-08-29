@@ -37,3 +37,31 @@ Source-available Bash 5 and Python CLI/TUI for inspecting and maintaining local 
 - Confirm the working directory is `audlint-cli` before reading project instructions; a prior session restored an unrelated repository from injected context.
 
 <!-- /bmad:context -->
+
+---
+
+## Human-Readable Artifact Style
+
+**BMAD artifact readability:** All human-readable planning/specification artifacts
+must use concise plain English. Preserve required BMAD headings, schemas,
+identifiers, code/API names, and technical precision, but avoid methodology
+jargon and abstract enterprise language where ordinary words work. Explain
+unavoidable specialist terms on first use. Prefer concrete statements about
+what the software does, what changes, what must remain unchanged, and how
+success is verified. Do not make artifacts longer merely to explain terminology.
+
+When presenting a BMAD artifact to the user, summarize it first in plain English:
+what is wrong, what is changing, what is not changing, and how the change will be
+proven to work. Show technical details only where the user needs them to make a
+decision.
+
+---
+
+## Release Branch Policy
+
+- `main` represents the stable released state.
+- Prepare each release on a temporary `release/<version>` branch created from `main`.
+- During release preparation, treat the release branch as the integration target instead of `main`.
+- Do not merge or push release-preparation changes to `main` without explicit operator approval.
+- After final verification, stop for approval before merging the release branch into `main`.
+- Delete the temporary release branch after the release is completed.

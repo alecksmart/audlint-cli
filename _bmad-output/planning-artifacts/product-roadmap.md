@@ -98,7 +98,7 @@ decision explicitly changes them:
 
 | Order | ID | Priority | Horizon | State | Outcome |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | R3 | P0 | Analyzer evidence | ready | Establish trustworthy accuracy and runtime baselines from the approved test corpus. |
+| 1 | R3 | P0 | Analyzer evidence | active | Establish trustworthy accuracy and runtime baselines from the approved test corpus. |
 | 2 | R3A | P0 | Analyzer execution | candidate | Remove repeated analysis and redundant probing without weakening decisions. |
 | 3 | R0 | P0 | Trustworthy baseline | ready | Establish a current, reproducible quality and release baseline. |
 | 4 | R1 | P0 | Mutation safety | ready | Make dry-run, backup, and recovery semantics truthful across every mutating workflow. |
@@ -192,7 +192,7 @@ in automation, with documented exceptions for environment-specific checks.
 
 ### R3 — Build the analyzer evidence base
 
-**State:** `ready`
+**State:** `active`
 
 **Priority:** `P0`
 

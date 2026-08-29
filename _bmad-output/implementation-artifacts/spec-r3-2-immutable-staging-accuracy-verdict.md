@@ -2,7 +2,7 @@
 title: 'R3.2 Immutable Staging and Accuracy Verdict'
 type: 'feature'
 created: '2026-08-29'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: '9286f1205ff70ae594584aff89a65085df2ca33c'
 context:

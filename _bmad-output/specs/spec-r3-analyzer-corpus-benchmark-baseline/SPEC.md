@@ -20,19 +20,19 @@ Audlint has a corpus runner and synthetic dataset builder but no durable represe
 
 - **CAP-1 — Versioned corpus inventory**
   - **intent:** Maintainers can identify every approved corpus case, its media facts, expected outcomes, provenance, and trust level without depending on machine-specific paths.
-  - **success:** A schema-valid manifest records stable relative paths, checksums, codec/container metadata, expected source and target profiles, expected decisions, label provenance, and `trusted` or `weak` status for every inventoried case.
+  - **success:** A schema-valid manifest records stable relative paths, checksums, objective codec/container metadata, human-supplied expected source and target profiles, expected decisions, label provenance, and `trusted` or `weak` status for every inventoried case; automation never creates or promotes expected analyzer truth.
 
 - **CAP-2 — Immutable staged execution**
   - **intent:** Maintainers can evaluate external corpus cases without exposing the corpus to analyzer, DR, report, cache, or converter writes.
-  - **success:** Every command runs only against a verified byte-for-byte temporary copy, no executable receives a corpus path as its writable album or output path, and any pre/post source-tree difference fails the run.
+  - **success:** Every command runs only against a verified byte-for-byte temporary copy, no executable receives a corpus path as its writable album or output path, and complete pre/post snapshots detect any added, removed, or changed entry in each selected case directory without hashing unrelated cases.
 
 - **CAP-3 — Trust-aware accuracy verdict**
   - **intent:** Maintainers can distinguish decision regressions from uncertain labels while retaining the evidence needed to review either outcome.
-  - **success:** Trusted mismatches and execution errors produce a nonzero verdict; weak mismatches remain explicit warnings; results preserve expected and actual values without deriving trust from previous Audlint or database output.
+  - **success:** Trusted mismatches and execution errors produce a nonzero verdict; weak mismatches remain explicit warnings; only explicit human review can promote provenance and expected profile, decision, or fake-upscale values to `trusted`; missing trusted truth stops the run instead of being inferred from Audlint output.
 
 - **CAP-4 — Reproducible serial runtime baseline**
   - **intent:** Maintainers can measure current analyzer work and elapsed time under declared cold and warm application-cache conditions before optimization begins.
-  - **success:** Machine-readable results contain applicable cold/warm serial measurements for `audlint-analyze`, `audlint-value`, `cue2flac`, `any2flac`, and `dff2flac`, including environment identity, track and work counters, strategy, cache state, fallbacks, confidence, and failures or exclusions.
+  - **success:** Stable generated artifacts contain applicable cold/warm serial measurements for `audlint-analyze`, `audlint-value`, `cue2flac`, `any2flac`, and `dff2flac`, including environment identity, track and work counters, strategy, cache state, fallbacks, confidence, and failures or exclusions.
 
 - **CAP-5 — Reproducible synthetic lineage**
   - **intent:** Maintainers can reproduce declared genuine and fake derivatives independently of Audlint's current verdict.
@@ -42,6 +42,8 @@ Audlint has a corpus runner and synthetic dataset builder but no durable represe
 
 - `/Volumes/Music/Tests` is immutable input: the implementation may read it only to inventory or copy declared inputs into temporary staging and must never create, remove, rename, rewrite, retag, chmod, or timestamp anything inside it.
 - Stages contain byte-for-byte copies, never symlinks or hard links, and live outside the corpus root; staging and verification time is excluded from command timing.
+- Source immutability covers the complete subtree of each selected case directory, not only manifest-declared files. Unrelated corpus cases are outside that run's snapshot and hashing boundary.
+- The generated runtime artifacts are `_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/corpus-manifest.json`, `benchmark-results.json`, and `baseline-summary.md`; the sibling Markdown companions of this SPEC define their contract and are not generated runtime evidence.
 - Automated tests use repository-owned temporary fixtures. No real music library, live SQLite database, mounted sync destination, backup target, or destructive conversion flow may be used.
 - `audlint-analyze` remains the sole recode-decision authority; the runner evaluates structured output without reconstructing analyzer policy.
 - The baseline is serial and deterministic. It exposes repeated work and fallback cost without changing analyzer thresholds, decision rules, cache semantics, or worker models.

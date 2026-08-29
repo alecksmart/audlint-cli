@@ -8,6 +8,12 @@ The committed manifest is a versioned BMAD artifact. It never embeds a machine-s
 
 The first inventory preserves the existing top-level meaning: `real/` contains genuine profile families, `fake/` contains labeled MP3/AAC/Opus upscale cases, and `edge_cases/` contains low-pass mastering, noisy live, and vinyl-rip cases.
 
+## Contract document and generated manifest
+
+This file, `corpus-manifest.md`, defines the manifest contract; it is not the runtime corpus inventory. The generated inventory has the stable repository-relative path `_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/corpus-manifest.json`.
+
+The generated manifest is one UTF-8 JSON object using the fields below. It uses two-space indentation, lexicographically sorted object keys, LF line endings, and one final newline. Array order is preserved, including the deterministic `entries` order. The runner records the SHA-256 of these exact bytes as the corpus-contract identity.
+
 ## Top-level fields
 
 | Field | Requirement |
@@ -44,14 +50,18 @@ Each `files` item records `path`, `role`, `sha256`, and `bytes`. Audio items als
 
 `provenance` records a basis, source reference or recipe lineage, rationale, reviewer identity, and UTC review date.
 
+Expected analyzer truth is human-owned. Automated inventory may enumerate files, compute checksums and sizes, and collect objective probe facts such as container, codec, sample rate, bit depth, channels, and duration. It must not populate, change, validate by agreement with, or promote `expected_source_profile`, `expected_target_profile`, `expected_decision`, `expected_fake_upscale`, `expected_analysis_mode`, provenance, or trust from Audlint output.
+
 A case is `trusted` only when all apply:
 
 - Its source profile or synthetic lineage is established independently of the current Audlint result.
-- Its expected target, decision, and fake-upscale label have a recorded human review.
+- A named human reviewer has explicitly reviewed the provenance and every expected source profile, target profile, decision, and fake-upscale value, plus expected analysis mode when present.
 - Every declared input is checksum-pinned.
 - A synthetic case names the trusted source checksum, exact `audlint-dataset.sh` invocation parameters, and relevant encoder/tool versions.
 
-A case is `weak` when provenance is incomplete, inherited from a library/database label, or based on previous Audlint output. Weak is the default review outcome, never an implicit parser default. Promotion from `weak` to `trusted` is an explicit reviewed manifest change; a passing analyzer run cannot promote it.
+A case is `weak` when its expectation is retained from incomplete or historical evidence, inherited from a library/database label, or based on previous Audlint output. Such evidence may remain useful as a weak expectation but cannot establish truth. Weak is the default human review outcome, never an implicit parser fallback. Promotion from `weak` to `trusted` is an explicit human-reviewed manifest change; a passing analyzer run cannot promote it.
+
+If an entry is declared or requested as `trusted` without the required reviewed provenance or expected values, manifest validation stops with an error. Inventory and evaluation must not invent the missing values, copy current Audlint output into them, silently downgrade the entry, or publish a trusted baseline from incomplete truth.
 
 ## Required coverage
 
@@ -68,6 +78,6 @@ Coverage validation reports missing classes; it does not fabricate cases or labe
 
 ## Inventory and synthetic verification
 
-Inventory is read-only: resolve the supplied root, enumerate inputs, compute metadata and SHA-256 values, attach reviewed expectations and provenance, validate coverage, and write the manifest only under BMAD output.
+Inventory is read-only: resolve the supplied root, enumerate inputs, compute objective metadata and SHA-256 values, merge only human-supplied expectations and provenance, validate coverage and trust requirements, and write the generated JSON manifest only at its declared BMAD output path.
 
 `audlint-dataset.sh` reproduces declared derivatives into a new temporary destination. Reproduction passes only when the generated files match the manifest's declared lineage, media metadata, and checksums. It never targets the approved corpus or the repository.

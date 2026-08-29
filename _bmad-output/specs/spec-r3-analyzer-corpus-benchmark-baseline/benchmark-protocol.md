@@ -1,20 +1,34 @@
 # Accuracy and Runtime Benchmark Protocol
 
+## Contract documents and generated artifacts
+
+`SPEC.md`, `corpus-manifest.md`, `benchmark-protocol.md`, and `brownfield.md` are Markdown contract documents. They define R3 and are not generated benchmark evidence.
+
+Runtime generation writes exactly these repository-relative artifacts:
+
+| Artifact | Stable path | Format |
+| --- | --- | --- |
+| Runtime corpus manifest | `_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/corpus-manifest.json` | One UTF-8 JSON object using the manifest schema. |
+| Machine-readable benchmark results | `_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/benchmark-results.json` | One UTF-8 JSON object containing identity, environment, ordered raw samples, per-case verdicts and counters, exclusions, and deterministic aggregates. |
+| Human-readable baseline summary | `_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/baseline-summary.md` | UTF-8 CommonMark with identity/environment, immutability verdict, trusted and weak accuracy summaries, cold/warm runtime tables, work/fallback findings, exclusions, and failures. |
+
+Both JSON files use two-space indentation, lexicographically sorted object keys, LF line endings, and one final newline; arrays retain manifest and execution order. The Markdown file uses LF line endings and one final newline. Generation may use temporary files, but it publishes only these stable final names and does not overwrite the specification companions.
+
 ## Immutable staging protocol
 
 For each tool and corpus case:
 
-1. Resolve and validate every manifest input under the supplied corpus root. Reject missing files, traversal, and escapes.
-2. Snapshot the source tree's relative paths, types, sizes, modification times, and checksums for manifest-declared files.
+1. Resolve the selected case directory as the supplied corpus root plus the manifest entry's `album_path`. Reject missing paths, traversal, and escapes; the resolved case directory is the source immutability boundary for this case run.
+2. Before copying or invoking a product command, walk the complete selected case directory subtree without following symlinks. Record the case root as `.` and every descendant by normalized relative path using `lstat`: file type, byte size, permission bits, nanosecond modification time, and nanosecond status-change time. Record SHA-256 content for every regular file and the link target for every symlink.
 3. Create a unique temporary stage outside the source root with a portable `mktemp` pattern.
 4. Byte-copy all declared inputs while preserving the relative layout needed by album, CUE, and converter workflows. Do not use symlinks or hard links.
 5. Verify staged checksums against the manifest before invoking a product command.
 6. Pass only stage and temporary-output paths to product commands. Staging, hashing, and cleanup remain outside measured time.
 7. Capture structured output, exit status, stderr, counters, and monotonic elapsed time; sanitize committed results to root-relative paths.
-8. Compare the source snapshot after the run. Any added, removed, changed, retagged, permission-changed, or timestamp-changed source entry is a safety failure and invalidates the baseline.
+8. After command and evidence capture, repeat the complete selected-subtree snapshot and compare it field-for-field with the pre-run snapshot. Any added or removed path, type change, size change, permission change, timestamp change, regular-file checksum change, or symlink-target change is a safety failure and invalidates the baseline. Access time is excluded because read-only traversal and hashing may advance it.
 9. Copy only source-control-safe result evidence into BMAD output, then remove the stage.
 
-No result is publishable when staging verification or the source immutability check fails.
+The snapshot and hashing boundary is only the selected case directory subtree. A case run does not traverse or hash unrelated corpus cases; tests use a complete temporary case subtree as the same boundary. No result is publishable when staging verification or the source immutability check fails.
 
 ## Cold and warm semantics
 

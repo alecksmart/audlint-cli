@@ -119,6 +119,7 @@ class LyricsSmokeTests(unittest.TestCase):
     def test_lyrics_album_returns_nonzero_when_embed_fails(self) -> None:
         album = self.tmpdir / "album"
         album.mkdir()
+        (album / ".env").write_text("", encoding="utf-8")
         (album / "01 - Song.flac").write_text("", encoding="utf-8")
         db_path = self.tmpdir / "library.sqlite"
 

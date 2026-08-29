@@ -68,6 +68,8 @@ SEGMENT_BRICKWALL_DROP_DB = 14.0
 HF_GUARD_PEAK_DB_THRESHOLD = -78.0
 HF_GUARD_OCCUPANCY_THRESHOLD = 0.002
 HF_GUARD_ENERGY_RATIO_THRESHOLD = 1e-4
+WORK_EVENTS_ENV = "AUDLINT_ANALYZE_WORK_EVENTS"
+_LOCAL_WORK_EVENTS: Counter[str] = Counter()
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,64 @@ class DecodedTrack:
     channels: int
     frames: int
     source_start_sec: float
+
+
+def record_work_event(kind: str, category: str) -> None:
+    """Record one external analyzer process launch for this invocation."""
+    event = f"{kind}:{category}"
+    _LOCAL_WORK_EVENTS[event] += 1
+    events_path = os.environ.get(WORK_EVENTS_ENV, "")
+    if not events_path:
+        return
+    try:
+        fd = os.open(events_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            encoded = f"{event}\n".encode("ascii")
+            written = 0
+            while written < len(encoded):
+                count = os.write(fd, encoded[written:])
+                if count <= 0:
+                    break
+                written += count
+        finally:
+            os.close(fd)
+    except OSError:
+        # Instrumentation must not change analyzer behavior when its optional
+        # invocation state cannot be written.
+        pass
+
+
+def reset_work_events() -> None:
+    _LOCAL_WORK_EVENTS.clear()
+    events_path = os.environ.get(WORK_EVENTS_ENV, "")
+    if events_path:
+        try:
+            with open(events_path, "w", encoding="ascii"):
+                pass
+        except OSError:
+            pass
+
+
+def work_summary(track_count: int) -> dict[str, int | dict[str, int]]:
+    events = Counter(_LOCAL_WORK_EVENTS)
+    events_path = os.environ.get(WORK_EVENTS_ENV, "")
+    if events_path:
+        try:
+            with open(events_path, "r", encoding="ascii") as fh:
+                events = Counter(line.strip() for line in fh if line.strip())
+        except OSError:
+            pass
+    ffprobe_count = events["metadata:ffprobe"]
+    soxi_count = events["metadata:soxi"]
+    segment_count = events["decode:segment"]
+    full_count = events["decode:full"]
+    return {
+        "track_count": max(0, int(track_count)),
+        "metadata_probe_count": ffprobe_count + soxi_count,
+        "metadata_probe_counts": {"ffprobe": ffprobe_count, "soxi": soxi_count},
+        "decode_operation_count": segment_count + full_count,
+        "decode_operation_counts": {"segment": segment_count, "full": full_count},
+    }
 
 
 def usage() -> str:
@@ -182,6 +242,7 @@ def cmd_config_fingerprint(argv: list[str]) -> int:
 
 
 def soxi(field: str, path: str) -> float | None:
+    record_work_event("metadata", "soxi")
     proc = subprocess.run(["soxi", field, path], capture_output=True, text=True)
     if proc.returncode != 0:
         return None
@@ -194,6 +255,7 @@ def soxi(field: str, path: str) -> float | None:
 def ffprobe_audio_json(path: str) -> dict[str, str]:
     if not HAS_FFPROBE:
         return {}
+    record_work_event("metadata", "ffprobe")
     proc = subprocess.run(
         [
             "ffprobe",
@@ -240,6 +302,7 @@ def ffprobe_audio_json(path: str) -> dict[str, str]:
 def ffprobe_stream(path: str, field: str) -> float | None:
     if not HAS_FFPROBE:
         return None
+    record_work_event("metadata", "ffprobe")
     proc = subprocess.run(
         [
             "ffprobe",
@@ -270,6 +333,7 @@ def ffprobe_stream(path: str, field: str) -> float | None:
 def ffprobe_stream_text(path: str, field: str) -> str | None:
     if not HAS_FFPROBE:
         return None
+    record_work_event("metadata", "ffprobe")
     proc = subprocess.run(
         [
             "ffprobe",
@@ -298,6 +362,7 @@ def ffprobe_stream_text(path: str, field: str) -> str | None:
 def ffprobe_duration(path: str) -> float | None:
     if not HAS_FFPROBE:
         return None
+    record_work_event("metadata", "ffprobe")
     proc = subprocess.run(
         [
             "ffprobe",
@@ -458,11 +523,12 @@ def debug(message: str) -> None:
         print(message, file=sys.stderr)
 
 
-def run_decode_command_to_file(cmd: list[str], timeout_sec: float) -> str | None:
+def run_decode_command_to_file(cmd: list[str], timeout_sec: float, decode_kind: str) -> str | None:
     fd, pcm_path = tempfile.mkstemp(prefix="audlint_analyze_", suffix=".pcm")
     os.close(fd)
     try:
         with open(pcm_path, "wb") as fh:
+            record_work_event("decode", decode_kind)
             proc = subprocess.run(
                 cmd,
                 stdout=fh,
@@ -529,7 +595,8 @@ def decode_pcm_span(
             commands.append(ffmpeg_cmd)
 
     for cmd in commands:
-        pcm_path = run_decode_command_to_file(cmd, timeout_sec)
+        decode_kind = "segment" if duration_sec is not None else "full"
+        pcm_path = run_decode_command_to_file(cmd, timeout_sec, decode_kind)
         if not pcm_path:
             continue
         frame_width = PCM_BYTES_PER_SAMPLE * decode_channels
@@ -1900,6 +1967,7 @@ def cmd_analyze(argv: list[str]) -> int:
         print(usage(), file=sys.stderr)
         return 2
 
+    reset_work_events()
     requested_analysis_mode = analysis_mode
     track_results: list[tuple[str, TrackMeta, dict[str, object], str, bool]] = []
     for path in files:
@@ -2008,7 +2076,7 @@ def cmd_analyze(argv: list[str]) -> int:
         )
 
     if not tracks:
-        print(json.dumps({"error": "no_tracks"}))
+        print(json.dumps({"error": "no_tracks", "tracks": [], **work_summary(0)}))
         return 0
 
     album_sr = max(track["tgt_sr"] for track in tracks if track["tgt_sr"] is not None)
@@ -2057,6 +2125,7 @@ def cmd_analyze(argv: list[str]) -> int:
                 "album_analysis_strategies": album_analysis_strategies,
                 "album_strategy_fallback_to_full": album_strategy_fallback_to_full,
                 "tracks": tracks,
+                **work_summary(len(tracks)),
             }
         )
     )

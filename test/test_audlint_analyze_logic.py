@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,30 @@ def _segment_sample(
 
 
 class AudlintAnalyzeLogicTests(unittest.TestCase):
+    def test_work_summary_has_exact_keys_and_totals(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="ascii") as events:
+            events.write("metadata:ffprobe\nmetadata:ffprobe\nmetadata:soxi\ndecode:segment\ndecode:full\n")
+            events.flush()
+            with patch.dict("os.environ", {audlint_analyze.WORK_EVENTS_ENV: events.name}):
+                summary = audlint_analyze.work_summary(3)
+
+        self.assertEqual(summary["track_count"], 3)
+        self.assertEqual(summary["metadata_probe_counts"], {"ffprobe": 2, "soxi": 1})
+        self.assertEqual(summary["metadata_probe_count"], 3)
+        self.assertEqual(summary["decode_operation_counts"], {"segment": 1, "full": 1})
+        self.assertEqual(summary["decode_operation_count"], 2)
+
+    def test_reset_work_events_discards_prior_invocation_events(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="ascii") as events:
+            events.write("metadata:ffprobe\n")
+            events.flush()
+            with patch.dict("os.environ", {audlint_analyze.WORK_EVENTS_ENV: events.name}):
+                audlint_analyze.reset_work_events()
+                summary = audlint_analyze.work_summary(0)
+
+        self.assertEqual(summary["metadata_probe_count"], 0)
+        self.assertEqual(summary["decode_operation_count"], 0)
+
     def test_normal_flac_prefers_fast_strategy(self) -> None:
         meta = audlint_analyze.TrackMeta(
             sr=44100.0,

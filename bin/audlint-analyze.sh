@@ -49,6 +49,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/env.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/deps.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/analyze_work.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 env_load_files "$SCRIPT_DIR/../.env" "$SCRIPT_DIR/.env" || true
@@ -231,10 +233,10 @@ album_matches_target_profile() {
 }
 
 # collect audio files (non-recursive)
-mapfile -t FILES < <(
-  # shellcheck disable=SC2046
-  find "$ALBUM_DIR" -maxdepth 1 \( -type f -o -type l \) \( $(audio_find_iname_args) \) -print | sort
-)
+audio_collect_files "$ALBUM_DIR" FILES
+if [[ ${#FILES[@]} -gt 0 ]]; then
+  mapfile -t FILES < <(printf '%s\n' "${FILES[@]}" | sort)
+fi
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
   echo "No audio files found in: $ALBUM_DIR" >&2
@@ -269,6 +271,14 @@ fi
 
 # Analyse all tracks → choose album target.
 tmpjson="$(mktemp -t sox_analyze.XXXXXX)"
+if [[ "$OUTPUT_MODE" == "json" ]]; then
+  if ! audlint_analyze_work_init; then
+    echo "Could not initialize analyzer work instrumentation." >&2
+    rm -f "$tmpjson"
+    exit 1
+  fi
+  trap 'audlint_analyze_work_cleanup' EXIT
+fi
 
 if ! "$PYTHON_BIN" "$AUDLINT_ANALYZE_PY" analyze "$HEADROOM_HZ" "$THRESH_REL_DB" "$WINDOW_SEC" "$MAX_WINDOWS" "$REQUESTED_ANALYSIS_MODE" "${FILES[@]}" >"$tmpjson"; then
   echo "Analysis failed." >&2
@@ -323,6 +333,11 @@ if ! update_done_marker_file; then
 fi
 
 if [[ "$OUTPUT_MODE" == "json" ]]; then
+  if ! audlint_analyze_work_finalize_json "$tmpjson"; then
+    echo "Analysis failed." >&2
+    rm -f "$tmpjson"
+    exit 1
+  fi
   cat "$tmpjson"
   rm -f "$tmpjson"
   exit 0

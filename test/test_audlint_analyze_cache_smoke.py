@@ -48,6 +48,12 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
                 """\
                 #!/usr/bin/env bash
                 field="${1:-}"
+                if [ -n "${SOXI_LOG:-}" ]; then
+                  printf "%s\\n" "$*" >> "${SOXI_LOG}"
+                fi
+                if [ -n "${SOXI_FAIL_PATH:-}" ] && [[ "$*" == *"${SOXI_FAIL_PATH}"* ]]; then
+                  exit 1
+                fi
                 case "$field" in
                   -r) echo "44100" ;;
                   -D) echo "120" ;;
@@ -63,6 +69,9 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
                 """\
                 #!/usr/bin/env bash
                 # Force ffmpeg fallback path in analyze script.
+                if [ -n "${SOX_LOG:-}" ]; then
+                  printf "%s\\n" "$*" >> "${SOX_LOG}"
+                fi
                 exit 1
                 """
             ),
@@ -75,6 +84,12 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
                 args="$*"
                 if [ -n "${FFPROBE_LOG:-}" ]; then
                   printf "%s\\n" "$args" >> "${FFPROBE_LOG}"
+                fi
+                if [ "${FFPROBE_FAIL_JSON:-}" = "1" ] && [[ "$args" == *"-of json"* ]]; then
+                  exit 1
+                fi
+                if [ -n "${FFPROBE_FAIL_PATH:-}" ] && [[ "$args" == *"${FFPROBE_FAIL_PATH}"* ]]; then
+                  exit 1
                 fi
                 if [[ "$args" == *"-of json"* && "$args" == *"stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels"* ]]; then
                   cat <<'EOF'
@@ -280,12 +295,130 @@ EOF
 
     def test_auto_mode_reuses_single_decode_for_exact_fallback(self) -> None:
         ffmpeg_log = self.tmpdir / "ffmpeg.log"
-        proc = self._run("--json", extra_env={"FFMPEG_LOG": str(ffmpeg_log)})
+        sox_log = self.tmpdir / "sox.log"
+        proc = self._run(
+            "--json",
+            extra_env={"FFMPEG_LOG": str(ffmpeg_log), "SOX_LOG": str(sox_log)},
+        )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
+        payload = json.loads(proc.stdout)
         invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertEqual(len(invocations), 1)
         self.assertIn("-ac 2", invocations[0])
+        self.assertEqual(len(sox_log.read_text(encoding="utf-8").splitlines()), 1)
+        self.assertEqual(payload["tracks"][0]["decode_operations"], 1)
+        self.assertEqual(payload["decode_operation_counts"], {"segment": 0, "full": 2})
+        self.assertEqual(payload["decode_operation_count"], 2)
+
+    def test_json_work_summary_matches_every_normal_stub_launch(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe.log"
+        soxi_log = self.tmpdir / "soxi.log"
+        ffmpeg_log = self.tmpdir / "ffmpeg.log"
+        sox_log = self.tmpdir / "sox.log"
+        proc = self._run(
+            "--json",
+            extra_env={
+                "FFPROBE_LOG": str(ffprobe_log),
+                "SOXI_LOG": str(soxi_log),
+                "FFMPEG_LOG": str(ffmpeg_log),
+                "SOX_LOG": str(sox_log),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        ffprobe_count = len(ffprobe_log.read_text(encoding="utf-8").splitlines())
+        soxi_count = len(soxi_log.read_text(encoding="utf-8").splitlines())
+        full_count = len(ffmpeg_log.read_text(encoding="utf-8").splitlines()) + len(
+            sox_log.read_text(encoding="utf-8").splitlines()
+        )
+        self.assertEqual(payload["track_count"], len(payload["tracks"]))
+        self.assertEqual(payload["metadata_probe_counts"], {"ffprobe": ffprobe_count, "soxi": soxi_count})
+        self.assertEqual(payload["metadata_probe_count"], ffprobe_count + soxi_count)
+        self.assertEqual(payload["decode_operation_counts"], {"segment": 0, "full": full_count})
+        self.assertEqual(payload["decode_operation_count"], full_count)
+
+    def test_json_work_summary_retains_failed_metadata_probe(self) -> None:
+        ffprobe_log = self.tmpdir / "ffprobe-failed.log"
+        soxi_log = self.tmpdir / "soxi-failed.log"
+        proc = self._run(
+            "--json",
+            extra_env={
+                "FFPROBE_LOG": str(ffprobe_log),
+                "SOXI_LOG": str(soxi_log),
+                "FFPROBE_FAIL_JSON": "1",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        ffprobe_count = len(ffprobe_log.read_text(encoding="utf-8").splitlines())
+        soxi_count = len(soxi_log.read_text(encoding="utf-8").splitlines())
+        self.assertGreater(ffprobe_count, 0)
+        self.assertEqual(payload["metadata_probe_counts"], {"ffprobe": ffprobe_count, "soxi": soxi_count})
+        self.assertEqual(payload["metadata_probe_count"], ffprobe_count + soxi_count)
+
+    def test_json_work_summary_covers_multiple_tracks(self) -> None:
+        (self.album_dir / "02-track.wav").write_text("seed-b", encoding="utf-8")
+        ffprobe_log = self.tmpdir / "ffprobe-multi.log"
+        soxi_log = self.tmpdir / "soxi-multi.log"
+        ffmpeg_log = self.tmpdir / "ffmpeg-multi.log"
+        sox_log = self.tmpdir / "sox-multi.log"
+        proc = self._run(
+            "--json",
+            extra_env={
+                "FFPROBE_LOG": str(ffprobe_log),
+                "SOXI_LOG": str(soxi_log),
+                "FFMPEG_LOG": str(ffmpeg_log),
+                "SOX_LOG": str(sox_log),
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        ffprobe_count = len(ffprobe_log.read_text(encoding="utf-8").splitlines())
+        soxi_count = len(soxi_log.read_text(encoding="utf-8").splitlines())
+        full_count = len(ffmpeg_log.read_text(encoding="utf-8").splitlines()) + len(
+            sox_log.read_text(encoding="utf-8").splitlines()
+        )
+        self.assertEqual(payload["track_count"], 2)
+        self.assertEqual(payload["track_count"], len(payload["tracks"]))
+        self.assertEqual(payload["metadata_probe_counts"], {"ffprobe": ffprobe_count, "soxi": soxi_count})
+        self.assertEqual(payload["metadata_probe_count"], ffprobe_count + soxi_count)
+        self.assertEqual(payload["decode_operation_counts"], {"segment": 0, "full": full_count})
+        self.assertEqual(payload["decode_operation_count"], full_count)
+
+    def test_json_work_summary_includes_probed_track_omitted_from_tracks(self) -> None:
+        (self.album_dir / "02-unreadable.wav").write_text("seed-b", encoding="utf-8")
+        ffprobe_log = self.tmpdir / "ffprobe-omitted.log"
+        soxi_log = self.tmpdir / "soxi-omitted.log"
+        proc = self._run(
+            "--json",
+            extra_env={
+                "FFPROBE_LOG": str(ffprobe_log),
+                "SOXI_LOG": str(soxi_log),
+                "FFPROBE_FAIL_PATH": "02-unreadable.wav",
+                "SOXI_FAIL_PATH": "02-unreadable.wav",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+
+        payload = json.loads(proc.stdout)
+        ffprobe_count = len(ffprobe_log.read_text(encoding="utf-8").splitlines())
+        soxi_count = len(soxi_log.read_text(encoding="utf-8").splitlines())
+        self.assertEqual(payload["track_count"], len(payload["tracks"]))
+        self.assertEqual(payload["track_count"], 1)
+        self.assertEqual(payload["metadata_probe_counts"], {"ffprobe": ffprobe_count, "soxi": soxi_count})
+        self.assertEqual(payload["metadata_probe_count"], ffprobe_count + soxi_count)
+
+    def test_json_collection_ignores_named_audio_pipe(self) -> None:
+        os.mkfifo(self.album_dir / "not-a-track.wav")
+
+        proc = self._run("--json")
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
+        self.assertEqual(json.loads(proc.stdout)["track_count"], 1)
 
     def test_large_wavpack_prefers_segment_seek_decodes(self) -> None:
         (self.album_dir / "01-track.wav").unlink()
@@ -382,6 +515,8 @@ EOF
         track = payload["tracks"][0]
         self.assertEqual(track["analysis_strategy"], "segment")
         self.assertEqual(track["decode_operations"], 3)
+        self.assertEqual(payload["decode_operation_counts"], {"segment": 3, "full": 0})
+        self.assertEqual(payload["decode_operation_count"], 3)
         invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.assertEqual(len(invocations), 3)
         self.assertTrue(all("-ss" in line and "-t" in line for line in invocations))
@@ -488,7 +623,10 @@ EOF
         self.assertEqual(track["segment_probe_segments_requested"], 6)
         self.assertEqual(track["segment_probe_segments_used"], 0)
         self.assertEqual(track["segment_probe_decode_operations"], 6)
+        self.assertEqual(payload["decode_operation_counts"], {"segment": 6, "full": 1})
+        self.assertEqual(payload["decode_operation_count"], 7)
         invocations = [line for line in ffmpeg_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(invocations), payload["decode_operation_count"])
         self.assertTrue(any("-ss" in line and "-t" in line for line in invocations))
         self.assertTrue(any("-ss" not in line for line in invocations))
 

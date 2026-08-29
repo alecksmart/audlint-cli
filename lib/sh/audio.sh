@@ -57,6 +57,14 @@ audio_collect_files() {
       "$dir"/*.opus
     )
   fi
+  local path
+  local filtered=()
+  for path in "${out_ref[@]}"; do
+    if [[ -f "$path" || -L "$path" ]]; then
+      filtered+=("$path")
+    fi
+  done
+  out_ref=("${filtered[@]}")
   ((had_nullglob == 1)) || shopt -u nullglob
   ((had_nocaseglob == 1)) || shopt -u nocaseglob
   : "${#out_ref[@]}"
@@ -163,6 +171,9 @@ audio_ffprobe_meta_dump() {
   fi
 
   raw="$(
+    if declare -F audlint_analyze_work_record_metadata_probe >/dev/null; then
+      audlint_analyze_work_record_metadata_probe ffprobe
+    fi
     ffprobe -v error -select_streams a:0 \
       -show_entries stream=index,codec_name,codec_tag_string,codec_long_name,profile,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,bit_rate,channels:format=duration,bit_rate:format_tags=album_artist,artist,title,album,cuesheet,lyrics \
       -of default=noprint_wrappers=0:nokey=0 \

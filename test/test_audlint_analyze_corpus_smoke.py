@@ -116,6 +116,286 @@ class AudlintAnalyzeCorpusSmokeTests(unittest.TestCase):
         self.assertEqual(payload["results"][0]["actual_profile"], "48000/24")
 
 
+class R32StrictCorpusEvaluationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self._tmp.name)
+        self.root = self.tmpdir / "corpus"
+        self.first = self.root / "real" / "first"
+        self.second = self.root / "fake" / "second"
+        self.first.mkdir(parents=True)
+        self.second.mkdir(parents=True)
+        (self.first / "album.cue").write_bytes(b"FILE first.flac WAVE\n")
+        (self.second / "album.cue").write_bytes(b"FILE second.flac WAVE\n")
+        self.analyze_stub = self.tmpdir / "audlint-analyze-stub.sh"
+        self.capture = self.tmpdir / "analyzer-argument.txt"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _file(self, relative: str) -> dict[str, object]:
+        path = self.root / relative
+        return {
+            "path": relative,
+            "role": "cue",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+        }
+
+    def _entry(self, case_id: str, album_path: str, trust: str = "trusted", **overrides: object) -> dict[str, object]:
+        entry: dict[str, object] = {
+            "id": case_id,
+            "album_path": album_path,
+            "category": "real",
+            "case_class": f"genuine {case_id}",
+            "files": [self._file(f"{album_path}/album.cue")],
+            "expected_source_profile": "96000/24",
+            "expected_target_profile": "96000/24",
+            "expected_decision": "keep_source",
+            "expected_fake_upscale": False,
+            "expected_analysis_mode": "exact",
+            "trust": trust,
+            "provenance": {
+                "basis": "fixture review",
+                "source_reference": "repository fixture",
+                "rationale": "test-only declared truth",
+                "reviewer": "Fixture Reviewer",
+                "reviewed_at_utc": "2026-08-29T00:00:00Z",
+                "reviewed_fields": [
+                    "expected_source_profile",
+                    "expected_target_profile",
+                    "expected_decision",
+                    "expected_fake_upscale",
+                    "expected_analysis_mode",
+                ],
+            },
+        }
+        entry.update(overrides)
+        return entry
+
+    def _manifest(self, entries: list[dict[str, object]] | None = None) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "corpus_id": "strict-fixture-corpus",
+            "corpus_revision": "strict-fixture-r1",
+            "generated_at_utc": "2026-08-29T00:00:00Z",
+            "entries": entries or [self._entry("first", "real/first")],
+        }
+
+    def _write_success_analyzer(self, extra: str = "") -> None:
+        _write_exec(
+            self.analyze_stub,
+            f"""\
+            #!/usr/bin/env bash
+            set -eu
+            printf '%s' "$2" > "${{CAPTURE_PATH}}"
+            test -f "$2/album.cue"
+            touch "$2/.analyzer-sidecar"
+            {extra}
+            cat <<'EOF'
+            {{"album_sr":96000,"album_bits":24,"album_decision":"keep_source","album_fake_upscale":false,"analysis_mode":"exact"}}
+            EOF
+            """,
+        )
+
+    def _run(self, manifest: object, *case_ids: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        manifest_path = self.tmpdir / "strict-manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        env = os.environ.copy()
+        env.update({
+            "AUDL_PYTHON_BIN": "python3",
+            "AUDLINT_ANALYZE_BIN": str(self.analyze_stub),
+            "CAPTURE_PATH": str(self.capture),
+        })
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [str(CORPUS), "--evaluate", str(self.root), str(manifest_path), *case_ids],
+            cwd=str(self.tmpdir),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_stage_is_independent_and_selected_cases_keep_manifest_order(self) -> None:
+        self._write_success_analyzer()
+        manifest = self._manifest([
+            self._entry("first", "real/first"),
+            self._entry("second", "fake/second", trust="weak"),
+        ])
+        source_before = (self.first / "album.cue").read_bytes()
+        proc = self._run(manifest, "second", "first")
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
+        evidence = json.loads(proc.stdout)
+        self.assertEqual([item["case_id"] for item in evidence["results"]], ["first", "second"])
+        self.assertEqual([item["status"] for item in evidence["results"]], ["pass", "pass"])
+        self.assertEqual(source_before, (self.first / "album.cue").read_bytes())
+        staged_case = Path(self.capture.read_text(encoding="utf-8"))
+        self.assertFalse(staged_case.exists())
+        self.assertFalse(str(staged_case).startswith(str(self.root)))
+        self.assertNotIn(str(self.root), proc.stdout)
+        self.assertEqual(evidence["results"][0]["source_snapshot"], "pass")
+        self.assertEqual(evidence["results"][0]["stage_verification"], "pass")
+        self.assertEqual(evidence["results"][0]["cleanup"], "pass")
+
+    def test_trusted_mismatch_fails_and_weak_mismatch_warns(self) -> None:
+        _write_exec(
+            self.analyze_stub,
+            """\
+            #!/usr/bin/env bash
+            printf '%s' "$2" > "$CAPTURE_PATH"
+            cat <<'EOF'
+            {"album_sr":96000,"album_bits":24,"album_decision":"downgrade_fake_upscale","album_fake_upscale":false,"analysis_mode":"exact"}
+            EOF
+            """,
+        )
+        trusted = self._run(self._manifest())
+        self.assertEqual(trusted.returncode, 1)
+        self.assertEqual(json.loads(trusted.stdout)["results"][0]["status"], "fail")
+        weak = self._run(self._manifest([self._entry("first", "real/first", trust="weak")]))
+        self.assertEqual(weak.returncode, 0)
+        self.assertEqual(json.loads(weak.stdout)["results"][0]["status"], "warn")
+
+    def test_invalid_input_and_symlink_never_invoke_analyzer_or_leak_paths(self) -> None:
+        _write_exec(self.analyze_stub, "#!/usr/bin/env bash\necho invoked > \"$CAPTURE_PATH\"\nexit 99\n")
+        invalid = self._run({"schema_version": 1})
+        self.assertEqual(invalid.returncode, 1)
+        self.assertFalse(self.capture.exists())
+        self.assertEqual(json.loads(invalid.stdout)["results"][0]["status"], "error")
+        self.assertNotIn(str(self.root), invalid.stdout)
+
+        duplicate_selection = self._run(self._manifest(), "first", "first")
+        self.assertEqual(duplicate_selection.returncode, 1)
+        self.assertFalse(self.capture.exists())
+        self.assertEqual(json.loads(duplicate_selection.stdout)["results"][0]["status"], "error")
+
+        symlink_manifest = self._manifest()
+        cue = self.first / "album.cue"
+        cue.unlink()
+        cue.symlink_to(self.tmpdir / "elsewhere")
+        symlink = self._run(symlink_manifest)
+        self.assertEqual(symlink.returncode, 1)
+        self.assertFalse(self.capture.exists())
+        self.assertEqual(json.loads(symlink.stdout)["results"][0]["stage_verification"], "not_run")
+
+    def test_full_manifest_validation_precedes_valid_case_selection(self) -> None:
+        _write_exec(self.analyze_stub, "#!/usr/bin/env bash\necho invoked > \"$CAPTURE_PATH\"\nexit 99\n")
+        manifest = self._manifest([
+            self._entry("first", "real/first"),
+            self._entry("second", "fake/second"),
+        ])
+        manifest["entries"][1]["expected_target_profile"] = "96k/24"
+
+        proc = self._run(manifest, "first")
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(self.capture.exists())
+        self.assertEqual(json.loads(proc.stdout)["results"][0]["status"], "error")
+
+    def test_in_root_symlink_component_is_rejected_before_analyzer(self) -> None:
+        _write_exec(self.analyze_stub, "#!/usr/bin/env bash\necho invoked > \"$CAPTURE_PATH\"\nexit 99\n")
+        nested = self.first / "nested"
+        nested.mkdir()
+        nested_cue = nested / "album.cue"
+        nested_cue.write_bytes(b"FILE nested.flac WAVE\n")
+        (self.first / "linkdir").symlink_to("nested", target_is_directory=True)
+        entry = self._entry(
+            "first",
+            "real/first",
+            files=[self._file("real/first/linkdir/album.cue")],
+        )
+
+        proc = self._run(self._manifest([entry]))
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(self.capture.exists())
+        evidence = json.loads(proc.stdout)["results"][0]
+        self.assertEqual(evidence["status"], "error")
+        self.assertEqual(evidence["stage_verification"], "not_run")
+
+    def test_source_and_stage_byte_or_hardlink_failures_are_rejected(self) -> None:
+        _write_exec(self.analyze_stub, "#!/usr/bin/env bash\necho invoked > \"$CAPTURE_PATH\"\nexit 99\n")
+        mismatch_manifest = self._manifest()
+        mismatch_manifest["entries"][0]["files"][0]["sha256"] = "0" * 64
+        source_mismatch = self._run(mismatch_manifest)
+        self.assertEqual(source_mismatch.returncode, 1)
+        self.assertFalse(self.capture.exists())
+
+        entry = self._manifest()["entries"][0]
+        for name, copier, expected in (
+            (
+                "checksum",
+                lambda source, destination, **_: Path(destination).write_bytes(b"corrupt"),
+                "byte-copy verification",
+            ),
+            (
+                "hard-link",
+                lambda source, destination, **_: os.link(source, destination),
+                "independent regular byte copy",
+            ),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                stage = Path(temporary)
+                with patch.object(corpus_module.shutil, "copyfile", copier):
+                    with self.assertRaisesRegex(corpus_module.ManifestValidationError, expected):
+                        corpus_module._stage_case(self.root, entry, stage)
+
+    def test_typed_analyzer_json_rejects_invalid_required_values(self) -> None:
+        invalid_payloads = (
+            ("boolean sample rate", {"album_sr": True, "album_bits": 24, "album_decision": "keep_source", "album_fake_upscale": False, "analysis_mode": "exact"}),
+            ("string fake upscale", {"album_sr": 96000, "album_bits": 24, "album_decision": "keep_source", "album_fake_upscale": "false", "analysis_mode": "exact"}),
+            ("empty decision", {"album_sr": 96000, "album_bits": 24, "album_decision": "", "album_fake_upscale": False, "analysis_mode": "exact"}),
+        )
+        for name, payload in invalid_payloads:
+            with self.subTest(name=name):
+                _write_exec(
+                    self.analyze_stub,
+                    "#!/usr/bin/env bash\nprintf '%s' \"$2\" > \"$CAPTURE_PATH\"\n"
+                    f"printf '%s\\n' '{json.dumps(payload)}'\n",
+                )
+                proc = self._run(self._manifest())
+                evidence = json.loads(proc.stdout)["results"][0]
+                self.assertEqual(proc.returncode, 1)
+                self.assertEqual(evidence["status"], "error")
+                self.assertEqual(evidence["cleanup"], "pass")
+
+    def test_analyzer_failure_invalid_json_and_source_mutation_are_errors_with_cleanup(self) -> None:
+        _write_exec(self.analyze_stub, "#!/usr/bin/env bash\nprintf '%s' \"$2\" > \"$CAPTURE_PATH\"\necho bad-json\nexit 0\n")
+        malformed = self._run(self._manifest())
+        malformed_evidence = json.loads(malformed.stdout)["results"][0]
+        self.assertEqual(malformed.returncode, 1)
+        self.assertEqual(malformed_evidence["status"], "error")
+        self.assertEqual(malformed_evidence["cleanup"], "pass")
+
+        _write_exec(self.analyze_stub, "#!/usr/bin/env bash\nprintf '%s' \"$2\" > \"$CAPTURE_PATH\"\necho failure >&2\nexit 7\n")
+        failed = self._run(self._manifest())
+        self.assertEqual(json.loads(failed.stdout)["results"][0]["analyzer"]["exit_code"], 7)
+
+        self._write_success_analyzer("printf mutation >> \"$MUTATE_SOURCE\"")
+        mutated = self._run(self._manifest(), extra_env={"MUTATE_SOURCE": str(self.first / "album.cue")})
+        mutated_evidence = json.loads(mutated.stdout)["results"][0]
+        self.assertEqual(mutated.returncode, 1)
+        self.assertEqual(mutated_evidence["source_snapshot"], "error")
+        self.assertEqual(mutated_evidence["cleanup"], "pass")
+
+    def test_snapshot_covers_undeclared_source_subtree_files(self) -> None:
+        undeclared = self.first / "notes" / "operator-note.txt"
+        undeclared.parent.mkdir()
+        undeclared.write_text("before\n", encoding="utf-8")
+        self._write_success_analyzer("printf mutation >> \"$MUTATE_SOURCE\"")
+
+        proc = self._run(
+            self._manifest(),
+            extra_env={"MUTATE_SOURCE": str(undeclared)},
+        )
+
+        evidence = json.loads(proc.stdout)["results"][0]
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(evidence["source_snapshot"], "error")
+        self.assertEqual(evidence["cleanup"], "pass")
+
+
 class R31CorpusManifestInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

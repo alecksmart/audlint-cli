@@ -8,8 +8,11 @@ import json
 import math
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -44,6 +47,7 @@ def usage() -> str:
         "Usage:\n"
         "  audlint_analyze_corpus.py [--json] MANIFEST.json\n"
         "  audlint_analyze_corpus.py --inventory CORPUS_ROOT MANIFEST.json\n\n"
+        "  audlint_analyze_corpus.py --evaluate CORPUS_ROOT MANIFEST.json [CASE_ID ...]\n\n"
         "--inventory validates a strict schema-v1 manifest and writes the\n"
         "read-only inventory to _bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/\n"
         "corpus-manifest.json. It never invokes audlint-analyze.\n\n"
@@ -430,6 +434,332 @@ def inventory_manifest(corpus_root: Path, manifest_path: Path, output_path: Path
     return result
 
 
+def _read_manifest_bytes(manifest_path: Path) -> tuple[bytes, dict[str, Any]]:
+    try:
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _error("manifest", f"could not be read as UTF-8 JSON ({exc})") from exc
+    return raw, _require_object(payload, "manifest")
+
+
+def _relative_lstat_path(root: Path, raw: str, field: str) -> Path:
+    """Resolve a root-relative identity while refusing every symlink component."""
+    relative = PurePosixPath(raw)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            raise _error(field, f"could not lstat declared path ({exc})") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise _error(field, "must not use a symlink")
+    return current
+
+
+def _snapshot_subtree(case_root: Path) -> list[dict[str, object]]:
+    """Take the complete lstat-based, non-following source immutability snapshot."""
+    snapshot: list[dict[str, object]] = []
+
+    def record(path: Path, relative: str) -> None:
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise _error("source_snapshot", f"could not lstat case subtree ({exc})") from exc
+        mode = info.st_mode
+        if stat.S_ISREG(mode):
+            kind = "file"
+        elif stat.S_ISDIR(mode):
+            kind = "directory"
+        elif stat.S_ISLNK(mode):
+            kind = "symlink"
+        else:
+            kind = "other"
+        item: dict[str, object] = {
+            "path": relative,
+            "type": kind,
+            "bytes": info.st_size,
+            "mode": stat.S_IMODE(mode),
+            "mtime_ns": info.st_mtime_ns,
+            "ctime_ns": info.st_ctime_ns,
+        }
+        if kind == "file":
+            item["sha256"] = _sha256_file(path)
+        elif kind == "symlink":
+            try:
+                item["link_target"] = os.readlink(path)
+            except OSError as exc:
+                raise _error("source_snapshot", f"could not read symlink target ({exc})") from exc
+        snapshot.append(item)
+        if kind != "directory":
+            return
+        try:
+            children = sorted(os.scandir(path), key=lambda child: child.name)
+        except OSError as exc:
+            raise _error("source_snapshot", f"could not enumerate case subtree ({exc})") from exc
+        for child in children:
+            child_relative = child.name if relative == "." else f"{relative}/{child.name}"
+            record(Path(child.path), child_relative)
+
+    record(case_root, ".")
+    return snapshot
+
+
+def _safe_text(value: object, corpus_root: Path | None = None, stage_root: Path | None = None) -> str:
+    """Keep diagnostics useful without leaking corpus or temporary absolute paths."""
+    text = str(value).strip()
+    for path, label in ((corpus_root, "<corpus>"), (stage_root, "<stage>")):
+        if path is not None:
+            text = text.replace(str(path), label)
+    # Analyzer diagnostics may quote an absolute child path. Do not publish it.
+    return re.sub(r"(?<![A-Za-z0-9_])/(?:[^\s'\"():,]+/?)+", "<path>", text)
+
+
+def _new_stage_root(corpus_root: Path) -> Path:
+    """Create a unique stage which is provably not nested inside the corpus."""
+    candidates = (Path(tempfile.gettempdir()), Path.cwd(), corpus_root.parent)
+    for parent in candidates:
+        try:
+            stage = Path(tempfile.mkdtemp(prefix="audlint-r3-stage-", dir=str(parent))).resolve()
+        except OSError:
+            continue
+        try:
+            stage.relative_to(corpus_root)
+        except ValueError:
+            return stage
+        try:
+            shutil.rmtree(stage)
+        except OSError:
+            pass
+    raise _error("stage", "could not create a temporary directory outside the corpus root")
+
+
+def _stage_case(root: Path, entry: dict[str, Any], stage_root: Path) -> Path:
+    """Copy only declared files and verify a fresh independent staged layout."""
+    album_path = str(entry["album_path"])
+    stage_case = stage_root.joinpath(*PurePosixPath(album_path).parts)
+    declared: dict[str, dict[str, Any]] = {}
+    for index, file_item in enumerate(entry["files"], 1):
+        field = f"case {entry['id']} file {index}"
+        raw = str(file_item["path"])
+        source = _relative_lstat_path(root, raw, field)
+        source_info = source.lstat()
+        if not stat.S_ISREG(source_info.st_mode):
+            raise _error(field, "must be a regular file")
+        if source_info.st_size != file_item["bytes"] or _sha256_file(source) != file_item["sha256"]:
+            raise _error(field, "does not match its declared checksum and byte size before staging")
+        relative = PurePosixPath(raw)
+        destination = stage_root.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination, follow_symlinks=False)
+        declared[raw] = {"source": source, "destination": destination, "file": file_item}
+
+    # Only stage parent directories and declared regular files. This catches an
+    # accidental extra copy as well as layout and link substitutions.
+    found_files: set[str] = set()
+    for path in sorted(stage_root.rglob("*")):
+        relative = path.relative_to(stage_root).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise _error("stage", "contains a symlink")
+        if stat.S_ISREG(info.st_mode):
+            found_files.add(relative)
+        elif not stat.S_ISDIR(info.st_mode):
+            raise _error("stage", "contains an unexpected file type")
+    if found_files != set(declared):
+        raise _error("stage", "does not contain exactly the declared input identities")
+
+    for raw, staged in declared.items():
+        source = staged["source"]
+        destination = staged["destination"]
+        file_item = staged["file"]
+        info = destination.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise _error("stage", f"{raw} is not an independent regular byte copy")
+        try:
+            same_file = os.path.samefile(source, destination)
+        except OSError as exc:
+            raise _error("stage", f"could not prove independent copy ({exc})") from exc
+        if same_file or info.st_size != file_item["bytes"] or _sha256_file(destination) != file_item["sha256"]:
+            raise _error("stage", f"{raw} failed byte-copy verification")
+    if not stage_case.is_dir():
+        raise _error("stage", "does not retain the declared album layout")
+    return stage_case
+
+
+def _parse_analyzer_result(stdout: str) -> dict[str, object]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise _error("analyzer", f"invalid JSON ({exc.msg})") from exc
+    if not isinstance(payload, dict):
+        raise _error("analyzer", "JSON must be one object")
+    sr = payload.get("album_sr")
+    bits = payload.get("album_bits")
+    decision = payload.get("album_decision")
+    fake = payload.get("album_fake_upscale")
+    mode = payload.get("analysis_mode")
+    if isinstance(sr, bool) or not isinstance(sr, int) or sr <= 0:
+        raise _error("analyzer.album_sr", "must be a positive integer")
+    if isinstance(bits, bool) or not isinstance(bits, int) or bits <= 0:
+        raise _error("analyzer.album_bits", "must be a positive integer")
+    if not isinstance(decision, str) or not decision:
+        raise _error("analyzer.album_decision", "must be a non-empty string")
+    if not isinstance(fake, bool):
+        raise _error("analyzer.album_fake_upscale", "must be boolean")
+    if not isinstance(mode, str) or not mode:
+        raise _error("analyzer.analysis_mode", "must be a non-empty string")
+    profile = normalize_profile(f"{sr}/{bits}")
+    if profile is None:
+        raise _error("analyzer", "returned an invalid target profile")
+    return {
+        "target_profile": profile,
+        "decision": decision,
+        "fake_upscale": fake,
+        "analysis_mode": mode,
+    }
+
+
+def _strict_result(entry: dict[str, Any], index: int) -> dict[str, object]:
+    return {
+        "index": index,
+        "case_id": entry["id"],
+        "case_path": entry["album_path"],
+        "trust": entry["trust"],
+        "expected": {
+            "target_profile": entry["expected_target_profile"],
+            "decision": entry["expected_decision"],
+            "fake_upscale": entry["expected_fake_upscale"],
+            "analysis_mode": entry.get("expected_analysis_mode"),
+        },
+        "actual": None,
+        "mismatch_reasons": [],
+        "status": "error",
+        "analyzer": {"exit_code": None, "diagnostic": ""},
+        "source_snapshot": "not_run",
+        "stage_verification": "not_run",
+        "cleanup": "not_run",
+    }
+
+
+def _evaluate_strict_case(root: Path, entry: dict[str, Any], analyze_bin: str, index: int) -> dict[str, object]:
+    result = _strict_result(entry, index)
+    stage_root: Path | None = None
+    before: list[dict[str, object]] | None = None
+    case_root: Path | None = None
+    try:
+        case_root = _relative_lstat_path(root, str(entry["album_path"]), f"case {entry['id']}")
+        if not stat.S_ISDIR(case_root.lstat().st_mode):
+            raise _error(f"case {entry['id']}", "album_path must be a directory")
+        before = _snapshot_subtree(case_root)
+        stage_root = _new_stage_root(root)
+        stage_case = _stage_case(root, entry, stage_root)
+        result["stage_verification"] = "pass"
+        rc, stdout, stderr = _run_analyzer(analyze_bin, str(stage_case))
+        result["analyzer"] = {
+            "exit_code": rc,
+            "diagnostic": _safe_text(stderr or stdout, root, stage_root),
+        }
+        if rc != 0:
+            raise _error("analyzer", f"exited {rc}")
+        actual = _parse_analyzer_result(stdout)
+        result["actual"] = actual
+        expected = result["expected"]
+        mismatches: list[str] = []
+        for field in ("target_profile", "decision", "fake_upscale", "analysis_mode"):
+            if expected[field] is not None and expected[field] != actual[field]:
+                mismatches.append(f"{field} differs")
+        result["mismatch_reasons"] = mismatches
+        result["status"] = "pass" if not mismatches else ("fail" if entry["trust"] == "trusted" else "warn")
+    except (ManifestValidationError, OSError, shutil.Error) as exc:
+        result["status"] = "error"
+        result["error"] = _safe_text(exc, root, stage_root)
+    finally:
+        if before is not None and case_root is not None:
+            try:
+                after = _snapshot_subtree(case_root)
+                result["source_snapshot"] = "pass" if before == after else "error"
+                if before != after:
+                    result["status"] = "error"
+                    result["error"] = "source subtree changed during evaluation"
+            except ManifestValidationError as exc:
+                result["source_snapshot"] = "error"
+                result["status"] = "error"
+                result["error"] = _safe_text(exc, root, stage_root)
+        if stage_root is None:
+            result["cleanup"] = "not_needed"
+        else:
+            try:
+                shutil.rmtree(stage_root)
+                result["cleanup"] = "pass" if not stage_root.exists() else "error"
+            except OSError as exc:
+                result["cleanup"] = "error"
+                result["status"] = "error"
+                result["error"] = _safe_text(f"stage cleanup failed ({exc})", root, stage_root)
+            if result["cleanup"] != "pass":
+                result["status"] = "error"
+                result.setdefault("error", "stage cleanup failed")
+    return result
+
+
+def _strict_summary(results: list[dict[str, object]]) -> dict[str, int]:
+    return {
+        status: sum(1 for result in results if result["status"] == status)
+        for status in ("pass", "warn", "fail", "error")
+    } | {"total": len(results)}
+
+
+def _strict_error_evidence(manifest_sha256: str | None, reason: object) -> dict[str, object]:
+    results = [{
+        "index": 1,
+        "case_id": None,
+        "case_path": None,
+        "trust": None,
+        "expected": None,
+        "actual": None,
+        "mismatch_reasons": [],
+        "status": "error",
+        "error": _safe_text(reason),
+        "analyzer": {"exit_code": None, "diagnostic": ""},
+        "source_snapshot": "not_run",
+        "stage_verification": "not_run",
+        "cleanup": "not_needed",
+    }]
+    return {"manifest_sha256": manifest_sha256, "corpus_revision": None, "results": results, "summary": _strict_summary(results)}
+
+
+def evaluate_strict_manifest(corpus_root: Path, manifest_path: Path, case_ids: list[str], analyze_bin: str) -> dict[str, object]:
+    """Run a fully validated schema-v1 corpus only through independent stages."""
+    manifest_sha256: str | None = None
+    try:
+        raw, payload = _read_manifest_bytes(manifest_path)
+        manifest_sha256 = hashlib.sha256(raw).hexdigest()
+        validated = validate_and_inventory_manifest(corpus_root, payload)
+        root = corpus_root.resolve(strict=True)
+        requested = [_require_string(case_id, "case_id") for case_id in case_ids]
+        if len(requested) != len(set(requested)):
+            raise _error("case_id", "must not contain duplicates")
+        entries = list(validated["entries"])
+        by_id = {str(entry["id"]): entry for entry in entries}
+        unknown = [case_id for case_id in requested if case_id not in by_id]
+        if unknown:
+            raise _error("case_id", f"unknown stable id {unknown[0]!r}")
+        selected = entries if not requested else [entry for entry in entries if entry["id"] in set(requested)]
+        if not selected:
+            raise _error("case_id", "selected no cases")
+    except ManifestValidationError as exc:
+        return _strict_error_evidence(manifest_sha256, exc)
+
+    results = [_evaluate_strict_case(root, entry, analyze_bin, index) for index, entry in enumerate(selected, 1)]
+    return {
+        "manifest_sha256": manifest_sha256,
+        "corpus_revision": validated["corpus_revision"],
+        "results": results,
+        "summary": _strict_summary(results),
+    }
+
+
 def _manifest_entries(payload: object) -> list[dict[str, object]]:
     if isinstance(payload, list):
         return [entry for entry in payload if isinstance(entry, dict)]
@@ -555,6 +885,21 @@ def _print_text(results: list[dict[str, object]]) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--evaluate":
+        if len(argv) < 3:
+            print(usage(), file=sys.stderr)
+            return 2
+        analyze_bin = os.environ.get("AUDLINT_ANALYZE_BIN", "")
+        if not analyze_bin:
+            print("AUDLINT_ANALYZE_BIN is required", file=sys.stderr)
+            return 1
+        evidence = evaluate_strict_manifest(
+            Path(argv[1]), Path(argv[2]), argv[3:], analyze_bin
+        )
+        print(json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        summary = evidence["summary"]
+        return 0 if summary["fail"] == 0 and summary["error"] == 0 else 1
+
     if argv and argv[0] == "--inventory":
         if len(argv) != 3:
             print(usage(), file=sys.stderr)

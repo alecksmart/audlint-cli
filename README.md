@@ -205,6 +205,27 @@ It only reads the supplied corpus and never runs `audlint-analyze`. Expectations
 trust, provenance, and synthetic lineage are human-authored inputs: inventory
 preserves them and only refreshes declared-file checksums, sizes, and media facts.
 
+## R3 corpus evaluation
+
+Evaluate a schema-version-1 manifest with an explicit corpus root:
+
+```bash
+audlint-analyze-corpus.sh --evaluate /path/to/corpus corpus-manifest.json [CASE_ID ...]
+```
+
+With no case IDs, every validated manifest entry runs in manifest order. Supplied
+IDs must be unique and known; selected entries still run in manifest order. The
+command validates the complete R3.1 manifest before selection, then makes a fresh
+verified byte-copy stage outside the corpus for each case. `audlint-analyze --json`
+only receives that stage, so its sidecars cannot be written into the corpus.
+
+Standard output is deterministic JSON evidence for each case. `pass` means the
+declared values matched, `warn` means a weak-label mismatch, and `fail` means a
+trusted-label mismatch; any safety, analyzer, source-immutability, or cleanup
+failure is `error`. The exit status is zero only when every result is `pass` or
+`warn` and all stages were removed. Evaluation does not publish benchmark results,
+summary files, timing data, or any stable benchmark artifact.
+
 
 ## Credits
 

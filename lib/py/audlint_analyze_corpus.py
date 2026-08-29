@@ -34,6 +34,8 @@ R3_OUTPUT_PATH = (
 BENCHMARK_RELATIVE_PATH = Path(
     "_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/benchmark-results.json"
 )
+MANIFEST_RELATIVE_PATH = BENCHMARK_RELATIVE_PATH.with_name("corpus-manifest.json")
+SUMMARY_RELATIVE_PATH = BENCHMARK_RELATIVE_PATH.with_name("baseline-summary.md")
 BENCHMARK_TOOL_ORDER = (
     "audlint-analyze",
     "audlint-value",
@@ -78,9 +80,13 @@ def usage() -> str:
         "  audlint_analyze_corpus.py --inventory CORPUS_ROOT MANIFEST.json\n\n"
         "  audlint_analyze_corpus.py --evaluate CORPUS_ROOT MANIFEST.json [CASE_ID ...]\n\n"
         "  audlint_analyze_corpus.py --benchmark CORPUS_ROOT MANIFEST.json --iterations N\n\n"
+        "  audlint_analyze_corpus.py --finalize CORPUS_ROOT\n\n"
         "--inventory validates a strict schema-v1 manifest and writes the\n"
         "read-only inventory to _bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/\n"
         "corpus-manifest.json. It never invokes audlint-analyze.\n\n"
+        "--finalize consumes the sibling R3.1 manifest and R3.4 result,\n"
+        "reproduces declared synthetic recipes in temporary paths, and publishes\n"
+        "only baseline-summary.md when every finalization gate passes.\n\n"
         "Manifest shape:\n"
         "  {\n"
         '    "entries": [\n'
@@ -1233,6 +1239,536 @@ def benchmark_strict_manifest(corpus_root: Path, manifest_path: Path, iterations
     return (0 if summary["overall_status"] == "pass" else 1), result
 
 
+# R3.5 deliberately has a stricter recipe reader than R3.1.  R3.1 keeps the
+# human-authored recipe facts intact; this reader refuses to guess how an old
+# free-form invocation should be replayed.
+def _summary_output_path(project_root: Path | None = None) -> Path:
+    if project_root is None:
+        configured_root = os.environ.get("AUDLINT_BENCHMARK_PROJECT_ROOT", "")
+        project_root = Path(configured_root) if configured_root else Path(__file__).resolve().parents[2]
+    return project_root / SUMMARY_RELATIVE_PATH
+
+
+def _project_root(project_root: Path | None) -> Path:
+    candidate = project_root
+    if candidate is None:
+        configured = os.environ.get("AUDLINT_BENCHMARK_PROJECT_ROOT", "")
+        candidate = Path(configured) if configured else Path(__file__).resolve().parents[2]
+    try:
+        result = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise _error("project_root", f"does not exist ({exc})") from exc
+    if not result.is_dir():
+        raise _error("project_root", "must be a directory")
+    return result
+
+
+def _new_r35_temp_root(corpus_root: Path, repository_root: Path, prefix: str) -> Path:
+    """Create a non-symlink temporary directory outside corpus and repository."""
+    candidate = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        resolved = candidate.resolve(strict=True)
+        if candidate.is_symlink() or not resolved.is_dir():
+            raise _error("temporary_path", "must be a non-symlink directory")
+        for protected in (corpus_root, repository_root):
+            try:
+                resolved.relative_to(protected)
+            except ValueError:
+                continue
+            raise _error("temporary_path", "must be outside corpus and repository")
+        return resolved
+    except Exception:
+        shutil.rmtree(candidate, ignore_errors=True)
+        raise
+
+
+def _strict_relative(value: object, field: str) -> str:
+    raw = _require_string(value, field)
+    path = PurePosixPath(raw)
+    if "\\" in raw or path.is_absolute() or raw == "." or path.as_posix() != raw or any(part in ("", ".", "..") for part in path.parts):
+        raise _error(field, "must be a normalized relative POSIX path")
+    return raw
+
+
+def _is_ancestor_path(left: str, right: str) -> bool:
+    left_parts = PurePosixPath(left).parts
+    right_parts = PurePosixPath(right).parts
+    return len(left_parts) < len(right_parts) and right_parts[:len(left_parts)] == left_parts
+
+
+def _canonical_dataset_invocation(argv: list[str]) -> str:
+    return " ".join(["audlint-dataset.sh", *argv])
+
+
+def _dataset_bin(repository_root: Path) -> Path:
+    configured = os.environ.get("AUDLINT_DATASET_BIN", "")
+    path = Path(configured) if configured else repository_root / "bin" / "audlint-dataset.sh"
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise _error("generation_recipe.executable", f"dataset generator is unavailable ({exc})") from exc
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise _error("generation_recipe.executable", "dataset generator must be executable")
+    return resolved
+
+
+def _declared_file_index(entries: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    files: dict[str, dict[str, Any]] = {}
+    owners: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        for file_item in entry["files"]:
+            path = str(file_item["path"])
+            files[path] = file_item
+            owners[path] = entry
+    return files, owners
+
+
+def _finalizer_version_facts(dataset: Path) -> dict[str, str]:
+    """Use explicit injected facts for external tools; never infer versions."""
+    facts = {"audlint_dataset_sha256": _sha256_file(dataset)}
+    prefix = "AUDLINT_R35_TOOL_VERSION_"
+    for key, value in os.environ.items():
+        if key.startswith(prefix) and value:
+            facts[key[len(prefix):].lower()] = value
+    return facts
+
+
+def _parse_r35_recipe(
+    entry: dict[str, Any],
+    files: dict[str, dict[str, Any]],
+    owners: dict[str, dict[str, Any]],
+    dataset: Path,
+) -> dict[str, Any]:
+    field = f"generation_recipe[{entry['id']}]"
+    recipe = _require_object(entry.get("generation_recipe"), field)
+    if _require_int(recipe.get("schema_version"), f"{field}.schema_version") != 1:
+        raise _error(f"{field}.schema_version", "must equal 1")
+    if _require_string(recipe.get("executable"), f"{field}.executable") != "audlint-dataset.sh":
+        raise _error(f"{field}.executable", "must identify audlint-dataset.sh exactly")
+    argv_raw = recipe.get("argv")
+    if not isinstance(argv_raw, list) or not argv_raw:
+        raise _error(f"{field}.argv", "must be a non-empty ordered array")
+    argv = [_require_string(value, f"{field}.argv[{number}]") for number, value in enumerate(argv_raw, 1)]
+    for role in ("$SOURCE", "$OUTPUT"):
+        if argv.count(role) != 1 or any(role in value and value != role for value in argv):
+            raise _error(f"{field}.argv", f"must contain {role} exactly once as a standalone path role")
+    for value in argv:
+        path = PurePosixPath(value)
+        if value.startswith("/") or "\\" in value or any(part in (".", "..") for part in path.parts):
+            raise _error(f"{field}.argv", "must not contain absolute or traversal path arguments")
+        if "<corpus>" in value or "$STAGE" in value:
+            raise _error(f"{field}.argv", "must not contain corpus or benchmark-stage paths")
+    if _require_string(recipe.get("audlint_dataset_invocation"), f"{field}.audlint_dataset_invocation") != _canonical_dataset_invocation(argv):
+        raise _error(f"{field}.audlint_dataset_invocation", "must canonically equal executable plus argv")
+    environment = _require_object(recipe.get("environment", {}), f"{field}.environment")
+    env = { _require_string(key, f"{field}.environment key"): _require_string(value, f"{field}.environment.{key}") for key, value in environment.items() }
+    if env.get("AUDLINT_DATASET_JOBS") not in (None, "1"):
+        raise _error(f"{field}.environment.AUDLINT_DATASET_JOBS", "must be 1 when declared")
+    versions = _require_object(recipe.get("tool_versions"), f"{field}.tool_versions")
+    if not versions:
+        raise _error(f"{field}.tool_versions", "must contain explicit tool identity facts")
+    current_versions = _finalizer_version_facts(dataset)
+    for name, declared in versions.items():
+        key = _require_string(name, f"{field}.tool_versions key")
+        value = _require_string(declared, f"{field}.tool_versions.{key}")
+        if current_versions.get(key) != value:
+            raise _error(f"{field}.tool_versions.{key}", "does not match the current declared tool identity")
+    if "audlint_dataset_sha256" not in versions:
+        raise _error(f"{field}.tool_versions", "must pin audlint_dataset_sha256")
+    sources_raw = recipe.get("source_inputs")
+    if not isinstance(sources_raw, list) or not sources_raw:
+        raise _error(f"{field}.source_inputs", "must be a non-empty ordered array")
+    sources: list[dict[str, str]] = []
+    seen_source_stage: set[str] = set()
+    for number, raw in enumerate(sources_raw, 1):
+        item = _require_object(raw, f"{field}.source_inputs[{number}]")
+        manifest_path = _strict_relative(item.get("manifest_path"), f"{field}.source_inputs[{number}].manifest_path")
+        stage_path = _strict_relative(item.get("stage_path"), f"{field}.source_inputs[{number}].stage_path")
+        if stage_path in seen_source_stage:
+            raise _error(f"{field}.source_inputs[{number}].stage_path", "duplicates a temporary source identity")
+        if any(_is_ancestor_path(stage_path, existing) or _is_ancestor_path(existing, stage_path) for existing in seen_source_stage):
+            raise _error(f"{field}.source_inputs[{number}].stage_path", "must not conflict with another source path ancestor")
+        seen_source_stage.add(stage_path)
+        declared = files.get(manifest_path)
+        if declared is None:
+            raise _error(f"{field}.source_inputs[{number}].manifest_path", "is not a manifest-declared file")
+        if owners[manifest_path]["trust"] != "trusted":
+            raise _error(f"{field}.source_inputs[{number}].manifest_path", "must identify a trusted manifest source")
+        if _require_string(item.get("sha256"), f"{field}.source_inputs[{number}].sha256") != declared["sha256"] or _require_int(item.get("bytes"), f"{field}.source_inputs[{number}].bytes", nonnegative=True) != declared["bytes"]:
+            raise _error(f"{field}.source_inputs[{number}]", "does not retain the declared source identity")
+        sources.append({"manifest_path": manifest_path, "stage_path": stage_path})
+    legacy_source = _require_string(recipe.get("trusted_source_sha256"), f"{field}.trusted_source_sha256")
+    if not _SHA256_RE.fullmatch(legacy_source) or legacy_source not in {files[source["manifest_path"]]["sha256"] for source in sources}:
+        raise _error(f"{field}.trusted_source_sha256", "must equal one explicit trusted source checksum")
+    outputs_raw = recipe.get("outputs")
+    if not isinstance(outputs_raw, list) or not outputs_raw:
+        raise _error(f"{field}.outputs", "must be a non-empty ordered array")
+    outputs: list[dict[str, str]] = []
+    seen_output: set[str] = set()
+    for number, raw in enumerate(outputs_raw, 1):
+        item = _require_object(raw, f"{field}.outputs[{number}]")
+        output_path = _strict_relative(item.get("output_path"), f"{field}.outputs[{number}].output_path")
+        manifest_path = _strict_relative(item.get("manifest_path"), f"{field}.outputs[{number}].manifest_path")
+        if output_path in seen_output:
+            raise _error(f"{field}.outputs[{number}].output_path", "duplicates generated output identity")
+        seen_output.add(output_path)
+        if manifest_path not in files:
+            raise _error(f"{field}.outputs[{number}].manifest_path", "is not a manifest-declared file")
+        outputs.append({"output_path": output_path, "manifest_path": manifest_path})
+    if {output["manifest_path"] for output in outputs} != {str(item["path"]) for item in entry["files"]}:
+        raise _error(f"{field}.outputs", "must cover exactly every declared file in its synthetic entry")
+    return {"argv": argv, "environment": env, "sources": sources, "outputs": outputs}
+
+
+def _verify_r35_file(path: Path, declared: dict[str, Any], field: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise _error(field, "must be a regular non-symlink file")
+    if path.stat().st_size != declared["bytes"] or _sha256_file(path) != declared["sha256"]:
+        raise _error(field, "checksum or byte size does not match the manifest")
+    if _is_audio_file(declared):
+        actual = _objective_audio_facts(path, field)
+        for key in ("container", "codec", "sample_rate", "channels", "bit_depth"):
+            if key in declared and actual.get(key) != declared[key]:
+                raise _error(field, f"objective media fact {key} does not match the manifest")
+        if not math.isclose(float(actual["duration"]), float(declared["duration"]), rel_tol=0.0, abs_tol=0.000001):
+            raise _error(field, "objective media fact duration does not match the manifest")
+
+
+def _run_r35_recipe(recipe: dict[str, Any], corpus_root: Path, repository_root: Path, files: dict[str, dict[str, Any]], owners: dict[str, dict[str, Any]], dataset: Path) -> dict[str, object]:
+    source_root: Path | None = None
+    output_root: Path | None = None
+    work_root: Path | None = None
+    snapshots: dict[str, list[dict[str, object]]] = {}
+    evidence: dict[str, object] = {"status": "error", "outputs": [], "cleanup": "not_run"}
+    try:
+        for source in recipe["sources"]:
+            owner = owners[source["manifest_path"]]
+            boundary = _relative_lstat_path(corpus_root, str(owner["album_path"]), "synthetic source boundary")
+            snapshots[str(boundary)] = _snapshot_subtree(boundary)
+            _verify_r35_file(corpus_root.joinpath(*PurePosixPath(source["manifest_path"]).parts), files[source["manifest_path"]], "trusted_source")
+        source_root = _new_r35_temp_root(corpus_root, repository_root, "audlint-r35-source-")
+        output_root = _new_r35_temp_root(corpus_root, repository_root, "audlint-r35-output-")
+        work_root = _new_r35_temp_root(corpus_root, repository_root, "audlint-r35-work-")
+        for source in recipe["sources"]:
+            destination = source_root.joinpath(*PurePosixPath(source["stage_path"]).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(corpus_root.joinpath(*PurePosixPath(source["manifest_path"]).parts), destination)
+            _verify_r35_file(destination, files[source["manifest_path"]], "temporary_source")
+            source_info, destination_info = (corpus_root.joinpath(*PurePosixPath(source["manifest_path"]).parts).stat(), destination.stat())
+            if source_info.st_ino == destination_info.st_ino and source_info.st_dev == destination_info.st_dev:
+                raise _error("temporary_source", "must be an independent byte copy, not a hard link")
+        argv = [str(dataset) if value == "$EXECUTABLE" else value.replace("$SOURCE", str(source_root)).replace("$OUTPUT", str(output_root)) for value in recipe["argv"]]
+        env = os.environ.copy() | recipe["environment"] | {"AUDLINT_DATASET_JOBS": "1", "TMPDIR": str(work_root)}
+        proc = subprocess.run([str(dataset), *argv], cwd=str(source_root), env=env, text=True, capture_output=True, encoding="utf-8", errors="replace", check=False)
+        evidence["generator"] = {
+            "exit_status": proc.returncode,
+            "stdout_sha256": hashlib.sha256(proc.stdout.encode("utf-8")).hexdigest(),
+            "stderr_sha256": hashlib.sha256(proc.stderr.encode("utf-8")).hexdigest(),
+        }
+        if proc.returncode != 0:
+            raise _error("generation", f"audlint-dataset.sh exited {proc.returncode}")
+        actual_paths: set[str] = set()
+        for item in output_root.rglob("*"):
+            relative = item.relative_to(output_root).as_posix()
+            info = item.lstat()
+            if stat.S_ISREG(info.st_mode):
+                actual_paths.add(relative)
+            elif stat.S_ISDIR(info.st_mode):
+                continue
+            else:
+                raise _error("generated_output", "contains a symlink or unsupported file type")
+        expected_paths = {output["output_path"] for output in recipe["outputs"]}
+        if actual_paths != expected_paths:
+            raise _error("generated_output", "does not contain exactly the declared output identities")
+        for output in recipe["outputs"]:
+            generated = output_root.joinpath(*PurePosixPath(output["output_path"]).parts)
+            _verify_r35_file(generated, files[output["manifest_path"]], "generated_output")
+            evidence["outputs"].append({"output_path": output["output_path"], "manifest_path": output["manifest_path"]})
+        for boundary, before in snapshots.items():
+            if before != _snapshot_subtree(Path(boundary)):
+                raise _error("source_snapshot", "trusted source boundary changed during reproduction")
+        evidence["status"] = "pass"
+        return evidence
+    finally:
+        source_mutated = False
+        for boundary, before in snapshots.items():
+            try:
+                source_mutated = source_mutated or before != _snapshot_subtree(Path(boundary))
+            except ManifestValidationError:
+                source_mutated = True
+        evidence["source_snapshot"] = "error" if source_mutated else "pass"
+        cleanup_error = False
+        for temporary in (source_root, output_root, work_root):
+            if temporary is not None:
+                try:
+                    shutil.rmtree(temporary)
+                    cleanup_error = cleanup_error or temporary.exists()
+                except OSError:
+                    cleanup_error = True
+        evidence["cleanup"] = "error" if cleanup_error else "pass"
+        if cleanup_error:
+            evidence["status"] = "error"
+            raise _error("cleanup", "temporary synthetic paths could not be removed")
+        if source_mutated and sys.exc_info()[0] is None:
+            evidence["status"] = "error"
+            raise _error("source_snapshot", "trusted source boundary changed during reproduction")
+
+
+def _validate_r35_result(result: object, validated: dict[str, Any], manifest_sha256: str, repository_root: Path) -> dict[str, Any]:
+    payload = _require_object(result, "benchmark_results")
+    if _require_int(payload.get("schema_version"), "benchmark_results.schema_version") != 1:
+        raise _error("benchmark_results.schema_version", "must equal 1")
+    _require_rfc3339_utc(payload.get("generated_at_utc"), "benchmark_results.generated_at_utc")
+    identity = _require_object(payload.get("identity"), "benchmark_results.identity")
+    _require_object(identity.get("host"), "benchmark_results.identity.host")
+    _require_object(identity.get("analyzer"), "benchmark_results.identity.analyzer")
+    _require_object(identity.get("toolchain"), "benchmark_results.identity.toolchain")
+    _require_string(identity.get("cache_limitation"), "benchmark_results.identity.cache_limitation")
+    manifest_identity = _require_object(identity.get("manifest"), "benchmark_results.identity.manifest")
+    for key, expected in (("corpus_id", validated["corpus_id"]), ("corpus_revision", validated["corpus_revision"]), ("sha256", manifest_sha256)):
+        if manifest_identity.get(key) != expected:
+            raise _error(f"benchmark_results.identity.manifest.{key}", "does not match the exact validated manifest")
+    repository = _require_object(identity.get("repository"), "benchmark_results.identity.repository")
+    head = _require_string(repository.get("head"), "benchmark_results.identity.repository.head")
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise _error("benchmark_results.identity.repository.head", "must be a full commit identifier")
+    if not isinstance(repository.get("dirty"), bool):
+        raise _error("benchmark_results.identity.repository.dirty", "must be boolean")
+    try:
+        live = subprocess.run(["git", "-C", str(repository_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _error("repository", f"could not read live HEAD ({exc})") from exc
+    if live != head:
+        raise _error("benchmark_results.identity.repository.head", "does not match live HEAD")
+    execution = _require_object(identity.get("execution"), "benchmark_results.identity.execution")
+    iterations = _require_int(execution.get("iterations"), "benchmark_results.identity.execution.iterations", nonnegative=True)
+    if iterations <= 0:
+        raise _error("benchmark_results.identity.execution.iterations", "must be positive")
+    samples = payload.get("samples")
+    if not isinstance(samples, list):
+        raise _error("benchmark_results.samples", "must be an array")
+    expected_samples = [(entry, tool, iteration, condition) for entry in validated["entries"] for tool in _benchmark_tools(entry) for iteration in range(1, iterations + 1) for condition in ("cold", "warm")]
+    if len(samples) != len(expected_samples):
+        raise _error("benchmark_results.samples", "does not retain the complete planned sample order")
+    for ordinal, (sample, expected) in enumerate(zip(samples, expected_samples), 1):
+        item = _require_object(sample, f"benchmark_results.samples[{ordinal}]")
+        entry, tool, iteration, condition = expected
+        if item.get("ordinal") != ordinal or item.get("sample_id") != f"{entry['id']}:{tool}:{iteration}:{condition}":
+            raise _error(f"benchmark_results.samples[{ordinal}]", "does not retain planned identity and order")
+        if item.get("tool") != tool or item.get("iteration") != iteration or item.get("cache_condition") != condition:
+            raise _error(f"benchmark_results.samples[{ordinal}]", "does not retain planned tool, iteration, and cache condition")
+        if item.get("status") not in {"pass", "warn", "fail", "error", "excluded"} or not isinstance(item.get("executed"), bool) or item.get("applicable") is not True:
+            raise _error(f"benchmark_results.samples[{ordinal}]", "has invalid status or execution state")
+        if item.get("case") != {key: entry[key] for key in ("id", "album_path", "trust", "category", "case_class")}:
+            raise _error(f"benchmark_results.samples[{ordinal}].case", "does not match manifest case identity")
+        elapsed = item.get("elapsed_ms")
+        if elapsed is not None and (isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or elapsed < 0):
+            raise _error(f"benchmark_results.samples[{ordinal}].elapsed_ms", "must be null or nonnegative")
+        if item.get("status") == "excluded" and item.get("executed"):
+            raise _error(f"benchmark_results.samples[{ordinal}]", "excluded samples must not execute")
+        cache = _require_object(item.get("cache_observation"), f"benchmark_results.samples[{ordinal}].cache_observation")
+        if cache.get("declared") != condition or cache.get("observed") not in {"hit", "miss", "bypass", "unsupported"}:
+            raise _error(f"benchmark_results.samples[{ordinal}].cache_observation", "does not retain declared cache evidence")
+        safety = _require_object(item.get("safety"), f"benchmark_results.samples[{ordinal}].safety")
+        required_safety = {"stage_verification", "source_snapshot", "converter_stage_snapshot", "cleanup"}
+        if set(safety) != required_safety:
+            raise _error(f"benchmark_results.samples[{ordinal}].safety", "must contain the complete R3.4 safety fields")
+        if any(value == "error" for value in safety.values()) or safety.get("cleanup") not in {"pass", "not_needed"}:
+            raise _error(f"benchmark_results.samples[{ordinal}].safety", "contains a failed R3.4 safety record")
+        if item["executed"] and (safety["stage_verification"] != "pass" or safety["source_snapshot"] != "pass" or safety["cleanup"] != "pass"):
+            raise _error(f"benchmark_results.samples[{ordinal}].safety", "executed samples require passing stage, source, and cleanup gates")
+        evidence = item.get("accuracy_evidence")
+        status = item["status"]
+        if status in {"pass", "warn", "fail"}:
+            if not item["executed"]:
+                raise _error(f"benchmark_results.samples[{ordinal}]", "pass, warn, and fail samples must execute")
+            _require_int(item.get("exit_status"), f"benchmark_results.samples[{ordinal}].exit_status", nonnegative=True)
+            if elapsed is None:
+                raise _error(f"benchmark_results.samples[{ordinal}].elapsed_ms", "is required for pass, warn, and fail samples")
+            _require_object(item.get("diagnostics"), f"benchmark_results.samples[{ordinal}].diagnostics")
+            _require_object(item.get("command"), f"benchmark_results.samples[{ordinal}].command")
+        if status == "excluded":
+            reason = _require_object(item.get("reason"), f"benchmark_results.samples[{ordinal}].reason")
+            _require_string(reason.get("code"), f"benchmark_results.samples[{ordinal}].reason.code")
+            _require_string(reason.get("detail"), f"benchmark_results.samples[{ordinal}].reason.detail")
+        if tool == "audlint-analyze" and item.get("executed") and item.get("status") in {"pass", "warn", "fail"}:
+            accuracy = _require_object(evidence, f"benchmark_results.samples[{ordinal}].accuracy_evidence")
+            if accuracy.get("trust") != entry["trust"] or accuracy.get("verdict") != item["status"]:
+                raise _error(f"benchmark_results.samples[{ordinal}].accuracy_evidence", "does not preserve R3.2 trust and verdict")
+            expected_accuracy = _require_object(accuracy.get("expected"), f"benchmark_results.samples[{ordinal}].accuracy_evidence.expected")
+            for key, expected in (("target_profile", entry["expected_target_profile"]), ("decision", entry["expected_decision"]), ("fake_upscale", entry["expected_fake_upscale"]), ("analysis_mode", entry.get("expected_analysis_mode"))):
+                if expected_accuracy.get(key) != expected:
+                    raise _error(f"benchmark_results.samples[{ordinal}].accuracy_evidence.expected.{key}", "does not match manifest expectation")
+            analyzer = _require_object(item.get("analyzer_evidence"), f"benchmark_results.samples[{ordinal}].analyzer_evidence")
+            for key in ("track_count", "metadata_probe_count", "decode_operation_count"):
+                _require_int(analyzer.get(key), f"benchmark_results.samples[{ordinal}].analyzer_evidence.{key}", nonnegative=True)
+            for key, exact_keys, total in (("metadata_probe_counts", {"ffprobe", "soxi"}, "metadata_probe_count"), ("decode_operation_counts", {"segment", "full"}, "decode_operation_count")):
+                counts = _require_object(analyzer.get(key), f"benchmark_results.samples[{ordinal}].analyzer_evidence.{key}")
+                if set(counts) != exact_keys or sum(_require_int(counts[name], f"benchmark_results.samples[{ordinal}].analyzer_evidence.{key}.{name}", nonnegative=True) for name in exact_keys) != analyzer[total]:
+                    raise _error(f"benchmark_results.samples[{ordinal}].analyzer_evidence.{key}", "does not preserve the R3.3 counter invariant")
+    typed_samples = [dict(_require_object(sample, "benchmark_results.sample")) for sample in samples]
+    if payload.get("aggregates") != _aggregates(typed_samples):
+        raise _error("benchmark_results.aggregates", "does not match raw successful samples")
+    expected_exclusions = [{key: sample.get(key) for key in ("sample_id", "tool", "iteration", "cache_condition", "reason")} | {"case_id": _require_object(sample.get("case"), "benchmark_results.exclusion.case").get("id")} for sample in typed_samples if sample.get("status") == "excluded"]
+    if payload.get("exclusions") != expected_exclusions:
+        raise _error("benchmark_results.exclusions", "does not match excluded raw samples")
+    counts = {status: sum(1 for sample in typed_samples if sample["status"] == status) for status in ("pass", "warn", "fail", "error", "excluded")}
+    summary = _require_object(payload.get("summary"), "benchmark_results.summary")
+    expected_summary = counts | {"executed": sum(1 for sample in typed_samples if sample["executed"]), "not_executed": sum(1 for sample in typed_samples if not sample["executed"]), "total": len(typed_samples), "overall_status": "pass" if not (counts["fail"] or counts["error"]) else "error"}
+    if summary != expected_summary:
+        raise _error("benchmark_results.summary", "does not match raw status counts")
+    return payload
+
+
+def _markdown_list(ids: list[str]) -> str:
+    return ", ".join(f"`{_markdown_code(item)}`" for item in ids) if ids else "None."
+
+
+def _markdown_code(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("`", "\\`").replace("\r", " ").replace("\n", " ")
+
+
+def _unique_ids(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _r35_work_summary(samples: list[dict[str, Any]]) -> str:
+    pairs: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
+    for sample in samples:
+        if sample["tool"] != "audlint-analyze" or sample["status"] not in {"pass", "warn"} or not sample["executed"]:
+            continue
+        pairs.setdefault((sample["case"]["id"], sample["iteration"]), {})[sample["cache_condition"]] = sample
+    comparable = [pair for pair in pairs.values() if set(pair) == {"cold", "warm"}]
+    if not comparable:
+        return "No valid cold/warm analyzer comparator exists; repeated-work findings are inconclusive."
+    totals: dict[str, int] = {"cold_metadata": 0, "warm_metadata": 0, "cold_decode": 0, "warm_decode": 0}
+    identifiers: list[str] = []
+    for pair in comparable:
+        cold, warm = pair["cold"], pair["warm"]
+        totals["cold_metadata"] += cold["analyzer_evidence"]["metadata_probe_count"]
+        totals["warm_metadata"] += warm["analyzer_evidence"]["metadata_probe_count"]
+        totals["cold_decode"] += cold["analyzer_evidence"]["decode_operation_count"]
+        totals["warm_decode"] += warm["analyzer_evidence"]["decode_operation_count"]
+        identifiers.extend((cold["sample_id"], warm["sample_id"]))
+    return (
+        f"Comparable pairs: {len(comparable)}; metadata probes cold/warm: {totals['cold_metadata']}/{totals['warm_metadata']}; "
+        f"decode operations cold/warm: {totals['cold_decode']}/{totals['warm_decode']}; supporting samples: {_markdown_list(identifiers)}."
+    )
+
+
+def _r35_aggregate_groups(result: dict[str, Any], dimension: str) -> str:
+    groups = result["aggregates"]["dimensions"].get(dimension, [])
+    if not groups:
+        return "None; no successful comparable samples."
+    return ", ".join(f"`{_markdown_code(item['key'])}` ({item['count']})" for item in groups)
+
+
+def _render_r35_summary(validated: dict[str, Any], manifest_sha256: str, result_sha256: str, result: dict[str, Any], synthetic: list[dict[str, object]]) -> str:
+    samples = result["samples"]
+    trusted_pass = _unique_ids([sample["case"]["id"] for sample in samples if sample["tool"] == "audlint-analyze" and sample["status"] == "pass" and sample["case"]["trust"] == "trusted"])
+    trusted_fail = _unique_ids([sample["case"]["id"] for sample in samples if sample["tool"] == "audlint-analyze" and sample["status"] == "fail" and sample["case"]["trust"] == "trusted"])
+    warnings = [sample["sample_id"] for sample in samples if sample["status"] == "warn"]
+    errors = [sample["sample_id"] for sample in samples if sample["status"] == "error"]
+    exclusions = [sample["sample_id"] for sample in samples if sample["status"] == "excluded"]
+    successful = [sample["sample_id"] for sample in samples if sample["executed"] and sample["status"] in {"pass", "warn"}]
+    identity = result["identity"]
+    aggregate_json = json.dumps(result["aggregates"], sort_keys=True, ensure_ascii=False)
+    lines = [
+        "# R3 Analyzer Corpus Benchmark Baseline", "",
+        "## Baseline identity and environment", "",
+        f"- Corpus: `{_markdown_code(validated['corpus_id'])}` revision `{_markdown_code(validated['corpus_revision'])}`.",
+        f"- Manifest SHA-256: `{_markdown_code(manifest_sha256)}`; benchmark-results SHA-256: `{_markdown_code(result_sha256)}`.",
+        f"- Benchmark timestamp: `{_markdown_code(result['generated_at_utc'])}`.",
+        f"- Repository: `{_markdown_code(identity['repository']['head'])}`; recorded dirty state: `{str(identity['repository']['dirty']).lower()}`.",
+        f"- Host evidence: `{_markdown_code(json.dumps(identity['host'], sort_keys=True, ensure_ascii=False))}`.",
+        f"- Environment and toolchain evidence: `{_markdown_code(json.dumps({key: identity[key] for key in ('execution', 'analyzer', 'toolchain')}, sort_keys=True, ensure_ascii=False))}`.", "",
+        "## Synthetic verification", "",
+        f"- Verified synthetic cases: {_markdown_list([str(item['case_id']) for item in synthetic])}",
+        "- Every verified recipe ran serially with `AUDLINT_DATASET_JOBS=1` from independent temporary source bytes.", "",
+        "## Trusted accuracy results", "",
+        f"- Trusted passes: {_markdown_list(trusted_pass)}", f"- Trusted failures: {_markdown_list(trusted_fail)}", "",
+        "## Weak warnings", "", f"- Weak warning samples: {_markdown_list(warnings)}", "",
+        "## Execution errors", "", f"- Execution-error samples: {_markdown_list(errors)}", "",
+        "## Excluded cases", "", f"- Excluded samples: {_markdown_list(exclusions)}", "",
+        "## Cold/warm runtime", "", f"- Verified R3.4 aggregates: `{aggregate_json}`.", f"- Supporting successful sample IDs: {_markdown_list(successful)}", "",
+        "## Repeated probe and decode work", "", f"- {_r35_work_summary(samples)}", "",
+        "## Expensive fallback classes", "", f"- Selected strategy groups: {_r35_aggregate_groups(result, 'selected_strategy')}.", f"- Fast-to-exact fallback groups: {_r35_aggregate_groups(result, 'fast_to_exact_fallback')}.", f"- Segment-to-full fallback groups: {_r35_aggregate_groups(result, 'segment_to_full_fallback')}.", "",
+        "## Known limitations", "", f"- {_markdown_code(identity['cache_limitation'])}", "- A dirty recorded benchmark is a reproducibility limitation; it does not claim a reconstructible clean source state." if identity['repository']['dirty'] else "- The recorded benchmark source was not marked dirty.", "",
+        "## Machine-evidence index", "", "- [Corpus manifest](corpus-manifest.json)", "- [Benchmark results](benchmark-results.json)", "",
+    ]
+    return "\n".join(lines)
+
+
+def _atomic_write_markdown(text: str, output_path: Path, project_root: Path) -> None:
+    encoded = text.encode("utf-8")
+    if not text.endswith("\n") or b"\r" in encoded:
+        raise _error("baseline_summary", "must use UTF-8 LF text with one final newline")
+    try:
+        resolved_project = project_root.resolve(strict=True)
+        output_path.relative_to(resolved_project)
+    except (OSError, ValueError) as exc:
+        raise _error("baseline_summary", "publication target must remain inside the resolved project root") from exc
+    relative_parent = output_path.parent.relative_to(resolved_project)
+    parent = resolved_project
+    for component in relative_parent.parts:
+        parent = parent / component
+        if parent.exists() or parent.is_symlink():
+            if parent.is_symlink() or not parent.is_dir():
+                raise _error("baseline_summary", "publication parent must contain only real directories")
+        else:
+            parent.mkdir()
+    if output_path.is_symlink():
+        raise _error("baseline_summary", "publication target must not be a symlink")
+    fd, name = tempfile.mkstemp(prefix=".baseline-summary-", suffix=".md", dir=output_path.parent)
+    candidate = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, output_path)
+    except OSError:
+        candidate.unlink(missing_ok=True)
+        raise
+
+
+def finalize_baseline(corpus_root: Path, project_root: Path | None = None) -> tuple[int, dict[str, object]]:
+    """Run the R3.5 gates and publish only the final Markdown summary."""
+    evidence: dict[str, object] = {"status": "error", "synthetic": []}
+    try:
+        project = _project_root(project_root)
+        manifest_path = project / MANIFEST_RELATIVE_PATH
+        result_path = project / BENCHMARK_RELATIVE_PATH
+        manifest_bytes, manifest_payload = _read_manifest_bytes(manifest_path)
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        validated = validate_and_inventory_manifest(corpus_root, manifest_payload)
+        result_bytes = result_path.read_bytes()
+        repository_root = Path(os.environ.get("AUDLINT_R35_REPOSITORY_ROOT", str(Path(__file__).resolve().parents[2]))).resolve(strict=True)
+        result = _validate_r35_result(json.loads(result_bytes.decode("utf-8")), validated, manifest_sha256, repository_root)
+        root = corpus_root.resolve(strict=True)
+        dataset = _dataset_bin(repository_root)
+        files, owners = _declared_file_index(list(validated["entries"]))
+        for entry in validated["entries"]:
+            if "generation_recipe" not in entry:
+                continue
+            recipe = _parse_r35_recipe(entry, files, owners, dataset)
+            run = _run_r35_recipe(recipe, root, repository_root, files, owners, dataset)
+            evidence["synthetic"].append({"case_id": entry["id"], **run})
+        summary = _render_r35_summary(validated, manifest_sha256, hashlib.sha256(result_bytes).hexdigest(), result, list(evidence["synthetic"]))
+        summary_path = _summary_output_path(project)
+        # Re-read at the final gate: successful synthetic verification must not
+        # publish a summary for evidence that changed while it was running.
+        if manifest_path.read_bytes() != manifest_bytes or result_path.read_bytes() != result_bytes:
+            raise _error("baseline_summary", "linked manifest or benchmark result changed before publication")
+        _atomic_write_markdown(summary, summary_path, project)
+        evidence["status"] = "published"
+        evidence["summary_path"] = SUMMARY_RELATIVE_PATH.as_posix()
+        return (0 if result["summary"]["overall_status"] == "pass" else 1), evidence
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ManifestValidationError, subprocess.SubprocessError) as exc:
+        evidence["error"] = _safe_text(exc)
+        return 1, evidence
+
+
 def _manifest_entries(payload: object) -> list[dict[str, object]]:
     if isinstance(payload, list):
         return [entry for entry in payload if isinstance(entry, dict)]
@@ -1358,6 +1894,14 @@ def _print_text(results: list[dict[str, object]]) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--finalize":
+        if len(argv) != 2:
+            print(usage(), file=sys.stderr)
+            return 2
+        returncode, evidence = finalize_baseline(Path(argv[1]))
+        print(json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        return returncode
+
     if argv and argv[0] == "--benchmark":
         args = argv[1:]
         if len(args) != 4 or args[2] != "--iterations":

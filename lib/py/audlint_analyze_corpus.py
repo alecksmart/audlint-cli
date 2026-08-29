@@ -1,19 +1,52 @@
 #!/usr/bin/env python3
-"""Run audlint-analyze against a corpus manifest with trusted/weak expectations."""
+"""Evaluate legacy corpus manifests and inventory strict R3.1 manifests."""
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
-from pathlib import Path
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from audlint_analyze import ffprobe_audio_json
+from profile_norm import normalize_profile
+
+
+R3_SCHEMA_VERSION = 1
+R3_OUTPUT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "_bmad-output"
+    / "benchmarks"
+    / "r3-analyzer-corpus-benchmark-baseline"
+    / "corpus-manifest.json"
+)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_RFC3339_UTC_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
+_DSD_FAMILY_RE = re.compile(r"^DSD(?:64|128|256|512|1024)$")
+_REQUIRED_EXPECTED_FIELDS = (
+    "expected_source_profile",
+    "expected_target_profile",
+    "expected_decision",
+    "expected_fake_upscale",
+)
 
 
 def usage() -> str:
     return (
         "Usage:\n"
-        "  audlint_analyze_corpus.py [--json] MANIFEST.json\n\n"
+        "  audlint_analyze_corpus.py [--json] MANIFEST.json\n"
+        "  audlint_analyze_corpus.py --inventory CORPUS_ROOT MANIFEST.json\n\n"
+        "--inventory validates a strict schema-v1 manifest and writes the\n"
+        "read-only inventory to _bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/\n"
+        "corpus-manifest.json. It never invokes audlint-analyze.\n\n"
         "Manifest shape:\n"
         "  {\n"
         '    "entries": [\n'
@@ -28,6 +61,373 @@ def usage() -> str:
         "    ]\n"
         "  }\n"
     )
+
+
+class ManifestValidationError(ValueError):
+    """An actionable schema-v1 corpus-manifest validation failure."""
+
+
+def _error(field: str, message: str) -> ManifestValidationError:
+    return ManifestValidationError(f"{field}: {message}")
+
+
+def _require_object(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _error(field, "must be an object")
+    return value
+
+
+def _require_string(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise _error(field, "must be a non-empty string without surrounding whitespace")
+    return value
+
+
+def _require_int(value: object, field: str, *, nonnegative: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _error(field, "must be an integer")
+    if nonnegative and value < 0:
+        raise _error(field, "must be nonnegative")
+    return value
+
+
+def _require_rfc3339_utc(value: object, field: str) -> str:
+    result = _require_string(value, field)
+    if not _RFC3339_UTC_RE.fullmatch(result):
+        raise _error(field, "must be an RFC 3339 UTC timestamp ending in Z")
+    try:
+        datetime.fromisoformat(result.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise _error(field, "must name a real RFC 3339 UTC date and time") from exc
+    return result
+
+
+def _require_canonical_profile(value: object, field: str) -> str:
+    profile = _require_string(value, field)
+    if normalize_profile(profile) != profile:
+        raise _error(field, "must already use canonical SR_HZ/BITS form")
+    return profile
+
+
+def _require_source_profile(value: object, field: str) -> str:
+    profile = _require_string(value, field)
+    if _DSD_FAMILY_RE.fullmatch(profile):
+        return profile
+    if profile.casefold().startswith("dsd"):
+        raise _error(field, "must use a supported explicit DSD family label such as DSD64")
+    return _require_canonical_profile(profile, field)
+
+
+def _safe_root_relative_path(root: Path, value: object, field: str, *, directory: bool) -> tuple[str, Path]:
+    raw = _require_string(value, field)
+    if "\\" in raw:
+        raise _error(field, "must use POSIX separators")
+    path = PurePosixPath(raw)
+    if path.is_absolute() or raw.startswith("/"):
+        raise _error(field, "must be root-relative, not absolute")
+    if raw == "." or any(part in ("", ".", "..") for part in path.parts):
+        raise _error(field, "must be normalized without dot or traversal segments")
+    # PurePosixPath normalizes duplicate separators; reject instead of silently fixing them.
+    if path.as_posix() != raw:
+        raise _error(field, "must be normalized POSIX path")
+    candidate = root.joinpath(*path.parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise _error(field, f"does not exist beneath corpus root ({exc})") from exc
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise _error(field, "resolves outside the supplied corpus root") from exc
+    if directory:
+        if not resolved.is_dir():
+            raise _error(field, "must resolve to a directory")
+    elif not resolved.is_file():
+        raise _error(field, "must resolve to a regular file")
+    return raw, resolved
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _is_audio_file(file_item: dict[str, Any]) -> bool:
+    return str(file_item.get("role", "")).casefold() == "audio"
+
+
+def _objective_audio_facts(path: Path, field: str) -> dict[str, object]:
+    try:
+        facts = ffprobe_audio_json(str(path))
+    except (OSError, ValueError) as exc:
+        raise _error(field, f"audio probe failed ({exc})") from exc
+    required = ("container", "codec_name", "sample_rate", "channels", "duration")
+    missing = [name for name in required if name not in facts]
+    if missing:
+        raise _error(field, f"audio probe did not provide {', '.join(missing)}")
+    try:
+        sample_rate = int(facts["sample_rate"])
+        channels = int(facts["channels"])
+        duration = float(facts["duration"])
+    except (TypeError, ValueError) as exc:
+        raise _error(field, "audio probe returned non-numeric sample rate, channels, or duration") from exc
+    if sample_rate <= 0 or channels <= 0 or not math.isfinite(duration) or duration < 0:
+        raise _error(field, "audio probe returned invalid sample rate, channels, or duration")
+    result: dict[str, object] = {
+        "container": facts["container"],
+        "codec": facts["codec_name"],
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "duration": duration,
+    }
+    raw_bits = facts.get("bits_per_raw_sample") or facts.get("bits_per_sample")
+    if raw_bits:
+        try:
+            bits = int(raw_bits)
+        except ValueError as exc:
+            raise _error(field, "audio probe returned an invalid bit depth") from exc
+        if bits > 0:
+            result["bit_depth"] = bits
+    return result
+
+
+def _validate_declared_audio_facts(file_item: dict[str, Any], field: str) -> None:
+    for key in ("container", "codec"):
+        _require_string(file_item.get(key), f"{field}.{key}")
+    sample_rate = _require_int(file_item.get("sample_rate"), f"{field}.sample_rate", nonnegative=True)
+    channels = _require_int(file_item.get("channels"), f"{field}.channels", nonnegative=True)
+    if sample_rate <= 0 or channels <= 0:
+        raise _error(field, "audio sample_rate and channels must be positive")
+    duration = file_item.get("duration")
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration < 0
+    ):
+        raise _error(f"{field}.duration", "must be a finite nonnegative number")
+    if "bit_depth" in file_item:
+        if _require_int(file_item["bit_depth"], f"{field}.bit_depth", nonnegative=True) <= 0:
+            raise _error(f"{field}.bit_depth", "must be positive when applicable")
+
+
+def _validate_provenance(entry: dict[str, Any], field: str) -> dict[str, Any]:
+    provenance = _require_object(entry.get("provenance"), f"{field}.provenance")
+    for key in ("basis", "rationale", "reviewer", "reviewed_at_utc"):
+        if key == "reviewed_at_utc":
+            _require_rfc3339_utc(provenance.get(key), f"{field}.provenance.{key}")
+        else:
+            _require_string(provenance.get(key), f"{field}.provenance.{key}")
+    if not any(_require_string(provenance.get(key), f"{field}.provenance.{key}") for key in ("source_reference", "recipe_lineage") if key in provenance):
+        raise _error(f"{field}.provenance", "requires source_reference or recipe_lineage")
+    return provenance
+
+
+def _validate_generation_recipe(
+    entry: dict[str, Any], provenance: dict[str, Any], field: str
+) -> None:
+    recipe = entry.get("generation_recipe")
+    if recipe is None:
+        if "generation_recipe" in entry:
+            raise _error(f"{field}.generation_recipe", "must be an object when supplied")
+        if "recipe_lineage" in provenance:
+            raise _error(
+                f"{field}.generation_recipe",
+                "is required when provenance declares synthetic recipe_lineage",
+            )
+        return
+    if "recipe_lineage" not in provenance:
+        raise _error(
+            f"{field}.provenance.recipe_lineage",
+            "is required when generation_recipe is present",
+        )
+    recipe_obj = _require_object(recipe, f"{field}.generation_recipe")
+    source = _require_string(recipe_obj.get("trusted_source_sha256"), f"{field}.generation_recipe.trusted_source_sha256")
+    if not _SHA256_RE.fullmatch(source):
+        raise _error(f"{field}.generation_recipe.trusted_source_sha256", "must be a lowercase SHA-256 digest")
+    _require_string(recipe_obj.get("audlint_dataset_invocation"), f"{field}.generation_recipe.audlint_dataset_invocation")
+    versions = _require_object(recipe_obj.get("tool_versions"), f"{field}.generation_recipe.tool_versions")
+    if not versions:
+        raise _error(f"{field}.generation_recipe.tool_versions", "must name relevant encoder or tool versions")
+    for name, version in versions.items():
+        _require_string(name, f"{field}.generation_recipe.tool_versions key")
+        _require_string(version, f"{field}.generation_recipe.tool_versions.{name}")
+
+
+def _validate_trusted_entry(entry: dict[str, Any], provenance: dict[str, Any], field: str) -> None:
+    if entry["trust"] != "trusted":
+        return
+    reviewed_fields = provenance.get("reviewed_fields")
+    if not isinstance(reviewed_fields, list) or not all(isinstance(value, str) for value in reviewed_fields):
+        raise _error(f"{field}.provenance.reviewed_fields", "must name every human-reviewed expected field")
+    required = set(_REQUIRED_EXPECTED_FIELDS)
+    if "expected_analysis_mode" in entry:
+        required.add("expected_analysis_mode")
+    if not required.issubset(set(reviewed_fields)):
+        raise _error(f"{field}.provenance.reviewed_fields", "must include every supplied expected field")
+    if not ("source_reference" in provenance or "recipe_lineage" in provenance):
+        raise _error(f"{field}.provenance", "trusted entries require independent source or synthetic lineage")
+
+
+def _coverage_missing(entries: list[dict[str, Any]]) -> list[str]:
+    classes = [str(entry["case_class"]).casefold() for entry in entries]
+
+    def present(*tokens: str) -> bool:
+        return any(all(token in case_class for token in tokens) for case_class in classes)
+
+    def fake_source_bitrates(codec: str) -> set[int]:
+        bitrates: set[int] = set()
+        for case_class in classes:
+            if not all(token in case_class for token in ("fake", codec)):
+                continue
+            for token in re.findall(r"(?<![0-9])[0-9]{2,6}(?![0-9])", case_class):
+                value = int(token)
+                if value not in {48000, 96000, 192000}:
+                    bitrates.add(value)
+        return bitrates
+
+    missing: list[str] = []
+    for profile in ("44100-16", "44100-24", "48000-24", "96000-24", "192000-24"):
+        if not present("genuine", profile):
+            missing.append(f"genuine-pcm-{profile}")
+    for codec in ("mp3", "aac", "opus"):
+        if len(fake_source_bitrates(codec)) < 2:
+            missing.append(f"fake-{codec}-lineage-multiple-bitrates")
+    for target in ("48000", "96000", "192000"):
+        if not present("fake", target):
+            missing.append(f"fake-target-{target}")
+    for label, tokens in (
+        ("sparse-genuine-high-resolution", ("genuine", "sparse", "high")),
+        ("edge-low-pass-mastering", ("low", "pass")),
+        ("edge-noisy-live", ("noisy", "live")),
+        ("edge-vinyl-rip", ("vinyl",)),
+        ("dsd-family", ("dsd",)),
+        ("large-cue-wavpack", ("cue", "wavpack")),
+        ("misleading-spectrogram-evidence", ("misleading", "spectrogram")),
+    ):
+        if not present(*tokens):
+            missing.append(label)
+    return missing
+
+
+def validate_and_inventory_manifest(corpus_root: Path, payload: object) -> dict[str, Any]:
+    """Validate strict schema-v1 input and return its objective inventory.
+
+    This function performs all reads before the caller emits an artifact. It does
+    not run the analyzer and never writes below ``corpus_root``.
+    """
+    try:
+        root = corpus_root.resolve(strict=True)
+    except OSError as exc:
+        raise _error("corpus_root", f"does not exist ({exc})") from exc
+    if not root.is_dir():
+        raise _error("corpus_root", "must be a directory")
+
+    manifest = _require_object(payload, "manifest")
+    if _require_int(manifest.get("schema_version"), "schema_version") != R3_SCHEMA_VERSION:
+        raise _error("schema_version", "must equal 1")
+    _require_string(manifest.get("corpus_id"), "corpus_id")
+    _require_string(manifest.get("corpus_revision"), "corpus_revision")
+    _require_rfc3339_utc(manifest.get("generated_at_utc"), "generated_at_utc")
+    raw_entries = manifest.get("entries")
+    if not isinstance(raw_entries, list):
+        raise _error("entries", "must be an ordered array")
+
+    entries: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_files: set[str] = set()
+    for number, raw_entry in enumerate(raw_entries, 1):
+        field = f"entries[{number}]"
+        entry = _require_object(raw_entry, field)
+        entry_id = _require_string(entry.get("id"), f"{field}.id")
+        if entry_id in seen_ids:
+            raise _error(f"{field}.id", f"duplicates stable id {entry_id!r}")
+        seen_ids.add(entry_id)
+        album_path, album_resolved = _safe_root_relative_path(root, entry.get("album_path"), f"{field}.album_path", directory=True)
+        category = _require_string(entry.get("category"), f"{field}.category")
+        if category not in {"real", "fake", "edge_case"}:
+            raise _error(f"{field}.category", "must be real, fake, or edge_case")
+        _require_string(entry.get("case_class"), f"{field}.case_class")
+        _require_source_profile(entry.get("expected_source_profile"), f"{field}.expected_source_profile")
+        _require_canonical_profile(entry.get("expected_target_profile"), f"{field}.expected_target_profile")
+        _require_string(entry.get("expected_decision"), f"{field}.expected_decision")
+        if not isinstance(entry.get("expected_fake_upscale"), bool):
+            raise _error(f"{field}.expected_fake_upscale", "must be boolean")
+        if "expected_analysis_mode" in entry:
+            _require_string(entry["expected_analysis_mode"], f"{field}.expected_analysis_mode")
+        trust = entry.get("trust")
+        if trust not in {"trusted", "weak"}:
+            raise _error(f"{field}.trust", "must be the literal trusted or weak")
+        provenance = _validate_provenance(entry, field)
+        _validate_generation_recipe(entry, provenance, field)
+        _validate_trusted_entry(entry, provenance, field)
+
+        raw_files = entry.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            raise _error(f"{field}.files", "must be a non-empty ordered array")
+        files: list[dict[str, Any]] = []
+        for file_number, raw_file in enumerate(raw_files, 1):
+            file_field = f"{field}.files[{file_number}]"
+            file_item = _require_object(raw_file, file_field)
+            file_path, resolved = _safe_root_relative_path(root, file_item.get("path"), f"{file_field}.path", directory=False)
+            try:
+                resolved.relative_to(album_resolved)
+            except ValueError as exc:
+                raise _error(f"{file_field}.path", "must be inside its entry album_path") from exc
+            if file_path in seen_files:
+                raise _error(f"{file_field}.path", "duplicates a declared file identity")
+            seen_files.add(file_path)
+            _require_string(file_item.get("role"), f"{file_field}.role")
+            expected_sha = _require_string(file_item.get("sha256"), f"{file_field}.sha256")
+            if not _SHA256_RE.fullmatch(expected_sha):
+                raise _error(f"{file_field}.sha256", "must be a lowercase SHA-256 digest")
+            expected_bytes = _require_int(file_item.get("bytes"), f"{file_field}.bytes", nonnegative=True)
+            try:
+                actual_sha = _sha256_file(resolved)
+                actual_bytes = resolved.stat().st_size
+            except OSError as exc:
+                raise _error(file_field, f"could not read declared file ({exc})") from exc
+            if actual_sha != expected_sha:
+                raise _error(f"{file_field}.sha256", "does not match the declared file")
+            if actual_bytes != expected_bytes:
+                raise _error(f"{file_field}.bytes", "does not match the declared file")
+            inventoried = dict(file_item)
+            inventoried["path"] = file_path
+            inventoried["sha256"] = actual_sha
+            inventoried["bytes"] = actual_bytes
+            if _is_audio_file(file_item):
+                _validate_declared_audio_facts(file_item, file_field)
+                inventoried.update(_objective_audio_facts(resolved, file_field))
+            files.append(inventoried)
+
+        inventoried_entry = dict(entry)
+        inventoried_entry["album_path"] = album_path
+        inventoried_entry["files"] = files
+        entries.append(inventoried_entry)
+
+    inventoried_manifest = dict(manifest)
+    inventoried_manifest["entries"] = entries
+    inventoried_manifest["coverage"] = {"missing_classes": _coverage_missing(entries)}
+    return inventoried_manifest
+
+
+def write_deterministic_json(payload: object, output_path: Path) -> None:
+    encoded = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(encoded, encoding="utf-8", newline="\n")
+
+
+def inventory_manifest(corpus_root: Path, manifest_path: Path, output_path: Path = R3_OUTPUT_PATH) -> dict[str, Any]:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise _error("manifest", f"could not be read as JSON ({exc})") from exc
+    result = validate_and_inventory_manifest(corpus_root, payload)
+    write_deterministic_json(result, output_path)
+    return result
 
 
 def _manifest_entries(payload: object) -> list[dict[str, object]]:
@@ -155,6 +555,17 @@ def _print_text(results: list[dict[str, object]]) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--inventory":
+        if len(argv) != 3:
+            print(usage(), file=sys.stderr)
+            return 2
+        try:
+            inventory_manifest(Path(argv[1]), Path(argv[2]))
+        except ManifestValidationError as exc:
+            print(f"R3.1 manifest validation failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     output_json = False
     args = list(argv)
     if args and args[0] == "--json":

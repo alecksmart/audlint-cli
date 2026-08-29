@@ -204,7 +204,7 @@ def ffprobe_audio_json(path: str) -> dict[str, str]:
             "-show_entries",
             "stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels",
             "-show_entries",
-            "format=duration",
+            "format=duration,format_name",
             "-of",
             "json",
             path,
@@ -231,6 +231,9 @@ def ffprobe_audio_json(path: str) -> dict[str, str]:
     duration = fmt.get("duration")
     if duration not in (None, "", "N/A"):
         result["duration"] = str(duration)
+    container = fmt.get("format_name")
+    if container not in (None, "", "N/A"):
+        result["container"] = str(container)
     return result
 
 

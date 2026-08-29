@@ -190,6 +190,21 @@ Guided album-art runs launched from Maintenance auto-enable missing-art fetch, a
 - Canonical project format: `SR_HZ/BITS` (example: `44100/16`)
 - Use `--help-profiles` on profile-aware tools for full details
 
+## R3 corpus inventory
+
+Create a schema-version-1, root-relative corpus manifest, then inventory it with
+an explicit corpus root:
+
+```bash
+audlint-analyze-corpus.sh --inventory /path/to/corpus corpus-manifest-input.json
+```
+
+The command validates the manifest and writes the deterministic generated artifact
+to `_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/corpus-manifest.json`.
+It only reads the supplied corpus and never runs `audlint-analyze`. Expectations,
+trust, provenance, and synthetic lineage are human-authored inputs: inventory
+preserves them and only refreshes declared-file checksums, sizes, and media facts.
+
 
 ## Credits
 

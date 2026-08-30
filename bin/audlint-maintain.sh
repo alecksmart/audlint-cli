@@ -21,6 +21,10 @@ BOOTSTRAP_DIR="$(cd "$(dirname "$BOOTSTRAP_SOURCE")" && pwd)"
 source "$BOOTSTRAP_DIR/../lib/sh/bootstrap.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/sqlite.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/player.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 
@@ -33,6 +37,10 @@ AUDLINT_CRON_INTERVAL_MIN="${AUDL_CRON_INTERVAL_MIN:-20}"
 AUDLINT_BOOST_SEEK_BIN="${AUDLINT_BOOST_SEEK_BIN:-$SCRIPT_DIR/boost_seek.sh}"
 AUDLINT_COVER_SEEK_BIN="${AUDLINT_COVER_SEEK_BIN:-$SCRIPT_DIR/cover_seek.sh}"
 MEDIA_PLAYER_PATH="${AUDL_MEDIA_PLAYER_PATH:-}"
+AUDL_DB_PATH="${AUDL_DB_PATH:-${AUDL_PATH:+${AUDL_PATH}/library.sqlite}}"
+AUDL_DB_PATH="${AUDL_DB_PATH:-}"
+RSYNC_BIN="${RSYNC_BIN:-rsync}"
+SYNC_BIN="${SYNC_BIN:-sync}"
 NO_COLOR="${NO_COLOR:-}"
 USE_COLOR=false
 C_RESET=""
@@ -92,8 +100,8 @@ pause_with_result() {
 }
 
 shell_quote_sh() {
-  local raw="$1"
-  raw="${raw//\'/\'\\\'\'}"
+  local raw="$1" quote="'" escape="\\"
+  raw="${raw//$quote/$quote$escape$quote$quote}"
   printf "'%s'" "$raw"
 }
 
@@ -106,6 +114,150 @@ int_ge() {
 
 player_attached() {
   [[ -n "$MEDIA_PLAYER_PATH" && -d "$MEDIA_PLAYER_PATH" && -w "$MEDIA_PLAYER_PATH" ]]
+}
+
+player_content_db_available() {
+  [[ -n "$AUDL_DB_PATH" && -f "$AUDL_DB_PATH" && -r "$AUDL_DB_PATH" && -w "$AUDL_DB_PATH" && -w "$(dirname "$AUDL_DB_PATH")" ]] || return 1
+  album_quality_db_init "$AUDL_DB_PATH"
+}
+
+player_content_status_title() {
+  local selected="$1" total="$2" card="not mounted"
+  [[ -n "$MEDIA_PLAYER_PATH" && -d "$MEDIA_PLAYER_PATH" ]] && card="mounted"
+  printf 'SD: %s | Selected: %s | Total: %s' "$card" "$selected" "$(player_human_size_label "$total")"
+}
+
+player_content_term_lines() {
+  if declare -F term_lines_value >/dev/null 2>&1; then term_lines_value; else printf '%s' "${LINES:-24}"; fi
+}
+
+player_content_term_cols() {
+  if declare -F term_cols_value >/dev/null 2>&1; then term_cols_value; else printf '%s' "${COLUMNS:-100}"; fi
+}
+
+player_content_read_key() {
+  local out_var="$1" read_key="" rest=""
+  tty_read_key read_key 1 || read_key="q"
+  if [[ "$read_key" == $'\e' ]]; then
+    tty_read_key rest 1 || true
+    if [[ "$rest" == "[" || "$rest" == "O" ]]; then
+      tty_read_key rest 1 || true
+      case "$rest" in A) read_key="up";; B) read_key="down";; esac
+    fi
+  fi
+  printf -v "$out_var" '%s' "$read_key"
+}
+
+player_content_filter_escape() {
+  local raw="$1"
+  raw="${raw//\\/\\\\}"
+  raw="${raw//\*/\\*}"; raw="${raw//\?/\\?}"; raw="${raw//\[/\\[}"
+  printf '%s' "$raw"
+}
+
+player_content_safe_destination() {
+  local destination="$1" library="$2" db_dir="$3" repo="$4" system_tmp="" system_root="/"
+  system_tmp="$(path_resolve "${system_root}tmp" 2>/dev/null || true)"
+  case "$destination" in ""|/|/Volumes|/Users|/System|/private|/tmp|"$system_tmp"|/var|"$HOME"|"$library"|"$db_dir"|"$repo") return 1;; esac
+  case "$destination" in "$library"/*|"$repo"/*) return 1;; esac
+  case "$library" in "$destination"/*) return 1;; esac
+  case "$db_dir" in "$destination"/*) return 1;; esac
+  case "$repo" in "$destination"/*) return 1;; esac
+  return 0
+}
+
+player_content_sync() {
+  local selected_count="$1" total_bytes="$2"
+  local library_real player_real db_real db_dir_real repo_real row artist_lc album_lc year_int artist album source_path rel escaped prefix refreshed_bytes=0 source_bytes=0
+  library_real="$(path_resolve "$AUDLINT_LIBRARY_ROOT" 2>/dev/null || true)"
+  player_real="$(path_resolve "$MEDIA_PLAYER_PATH" 2>/dev/null || true)"
+  db_real="$(path_resolve "$AUDL_DB_PATH" 2>/dev/null || true)"
+  db_dir_real="$(path_resolve "$(dirname "$AUDL_DB_PATH")" 2>/dev/null || true)"
+  repo_real="$(path_resolve "$REPO_ROOT" 2>/dev/null || true)"
+  [[ -n "$library_real" && -d "$library_real" && -r "$library_real" ]] || { printf 'Sync failed: library root is not a readable directory.\n'; return 1; }
+  [[ -n "$player_real" && -d "$player_real" && -w "$player_real" ]] || { printf 'Sync failed: player path is not a writable mounted directory.\n'; return 1; }
+  player_content_safe_destination "$player_real" "$library_real" "$db_dir_real" "$repo_real" || { printf 'Sync failed: unsafe player destination.\n'; return 1; }
+  command -v "$RSYNC_BIN" >/dev/null 2>&1 || { printf 'Sync failed: rsync not found (%s).\n' "$RSYNC_BIN"; return 1; }
+  command -v "$SYNC_BIN" >/dev/null 2>&1 || { printf 'Sync failed: sync command not found (%s).\n' "$SYNC_BIN"; return 1; }
+
+  local manifest
+  manifest="$(mktemp "${TMPDIR:-/tmp}/audlint_player_manifest.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$manifest" ]] || { printf 'Sync failed: unable to create manifest.\n'; return 1; }
+  local -a rsync_args=(-av --delete --delete-excluded --itemize-changes) parent_rules=() selected_rules=()
+  # Directory rules make only the checked source-relative albums traversable;
+  # shared payload filters then retain exactly the browser transfer payload.
+  while IFS=$'\x1f' read -r artist_lc album_lc year_int artist album source_path; do
+    source_path="$(path_resolve "$source_path" 2>/dev/null || true)"
+    [[ -n "$source_path" && -d "$source_path" && -r "$source_path" ]] || { rm -f "$manifest"; printf 'Sync failed: selected source is unreadable.\n'; return 1; }
+    rel="$(LIBRARY_ROOT="$library_real" player_relative_album_path_from_source "$source_path" || true)"
+    [[ -n "$rel" ]] || { rm -f "$manifest"; printf 'Sync failed: selected source escapes library root.\n'; return 1; }
+    source_bytes="$(player_payload_size_bytes_for_dir "$source_path" 2>/dev/null || true)"
+    [[ "$source_bytes" =~ ^[0-9]+$ ]] || { rm -f "$manifest"; printf 'Sync failed: selected source payload cannot be sized.\n'; return 1; }
+    refreshed_bytes=$((refreshed_bytes + source_bytes))
+    escaped="$(player_content_filter_escape "$rel")"
+    prefix=""
+    IFS='/' read -r -a _pcs_parts <<< "$escaped"
+    local _pcs_part
+    for _pcs_part in "${_pcs_parts[@]}"; do prefix="${prefix:+$prefix/}${_pcs_part}"; parent_rules+=("--include=/${prefix}/"); done
+    selected_rules+=("--include=/${escaped}/***")
+    printf '%s\x1f%s\n' "$source_path" "$rel" >>"$manifest"
+  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT pcs.artist_lc,pcs.album_lc,pcs.year_int,aq.artist,aq.album,aq.source_path FROM player_content_selection pcs LEFT JOIN album_quality aq ON aq.artist_lc=pcs.artist_lc AND aq.album_lc=pcs.album_lc AND aq.year_int=pcs.year_int ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
+  local manifest_count expected_count
+  manifest_count="$(wc -l <"$manifest" | tr -d '[:space:]')"
+  expected_count="$(sqlite3 -noheader "$AUDL_DB_PATH" "SELECT COUNT(*) FROM player_content_selection;" 2>/dev/null || true)"
+  [[ "$expected_count" =~ ^[0-9]+$ && "$manifest_count" =~ ^[0-9]+$ && "$manifest_count" == "$expected_count" ]] || { rm -f "$manifest"; printf 'Sync failed: selected identity no longer resolves exactly once.\n'; return 1; }
+  selected_count="$expected_count"
+  total_bytes="$refreshed_bytes"
+  rsync_args+=("${parent_rules[@]}")
+  player_rsync_payload_filters rsync_args
+  rsync_args+=("${selected_rules[@]}")
+  rsync_args+=(--exclude='*')
+  printf '\nDestination: %s\nSelected: %s album(s), %s\nAll player content not in this selection will be deleted.\n[y synchronize, any other key cancel] > ' "$player_real" "$selected_count" "$(player_human_size_label "$total_bytes")"
+  local confirm=""; tty_read_key confirm 1 || confirm="n"; printf '\n'
+  if [[ "${confirm,,}" != "y" ]]; then rm -f "$manifest"; printf 'Synchronization cancelled.\n'; return 0; fi
+  printf 'Synchronizing player...\n'
+  if "$RSYNC_BIN" "${rsync_args[@]}" "$library_real"/ "$player_real"/ && "$SYNC_BIN"; then
+    rm -f "$manifest"; printf 'Synchronization completed: %s album(s).\n' "$selected_count"; return 0
+  fi
+  rm -f "$manifest"; printf 'Synchronization failed; selection was preserved.\n'; return 1
+}
+
+player_content_creator() {
+  player_content_db_available || pause_with_result "Player Content Creator unavailable: database is missing, unreadable, or read-only."
+  player_content_selection_cleanup_stale "$AUDL_DB_PATH" || pause_with_result "Player Content Creator unavailable: cannot update database."
+  local -a artist_lcs=() album_lcs=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
+  local row artist_lc album_lc year_int artist album source_path is_checked bytes total=0 selected=0 cursor=0 offset=0 key idx previous_artist=""
+  while IFS=$'\x1f' read -r artist_lc album_lc year_int artist album source_path is_checked; do
+    [[ -n "$artist_lc$album_lc$year_int" ]] || continue
+    artist_lcs+=("$artist_lc"); album_lcs+=("$album_lc"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
+    if [[ -d "$source_path" && -r "$source_path" ]]; then bytes="$(player_payload_size_bytes_for_dir "$source_path" 2>/dev/null || true)"; [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0; available+=(1); else bytes=0; available+=(0); fi
+    sizes+=("$bytes"); if [[ "$is_checked" == 1 ]]; then selected=$((selected + 1)); total=$((total + bytes)); fi
+  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.album_lc,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
+  while true; do
+    local lines cols height view_start view_end render_row="" status
+    lines="$(player_content_term_lines)"; [[ "$lines" =~ ^[0-9]+$ ]] || lines=24; cols="$(player_content_term_cols)"; [[ "$cols" =~ ^[0-9]+$ ]] || cols=100; height=$((lines - 8)); ((height < 3)) && height=3
+    ((cursor < offset)) && offset="$cursor"; ((cursor >= offset + height)) && offset=$((cursor - height + 1))
+    printf '\033[2J\033[H%s\n%s\n' "$(paint "$C_TITLE" "Player Content Creator")" "$(paint "$C_TITLE" "----------------------")"
+    status="$(player_content_status_title "$selected" "$total")"; virtwin_set_right_hint "$status"; printf '%s\n\n' "$status"
+    view_start="$offset"; view_end=$((offset + height - 1)); ((view_end >= ${#artists[@]})) && view_end=$((${#artists[@]} - 1)); previous_artist=""
+    ((view_start > 0)) && previous_artist="${artists[$((view_start - 1))]:-}"
+    for ((idx=view_start; idx<=view_end; idx++)); do
+      if [[ "${artists[$idx]}" != "$previous_artist" ]]; then
+        previous_artist="${artists[$idx]}"; printf '%s\n' "$(paint "$C_LABEL" "$previous_artist")"
+      fi
+      render_row="  [${checked[$idx]/0/ }] ${years[$idx]} - ${albums[$idx]}"; [[ "${checked[$idx]}" == 1 ]] && render_row="  [x] ${years[$idx]} - ${albums[$idx]}"; [[ "${available[$idx]}" == 1 ]] || render_row+=" $(paint "$C_SELECT" "[unavailable]")"; [[ "$idx" == "$cursor" ]] && render_row="$(paint "$C_ACTION" ">")${render_row:1}"; printf '%s\n' "$render_row"
+    done
+    local position=0; ((${#artists[@]} > 0)) && position=$((cursor + 1))
+    printf '\nUp/Down move | Space toggle | w synchronize | q quit | %s of %s\n' "$position" "${#artists[@]}"
+    player_content_read_key key
+    case "$key" in
+      up) ((cursor > 0)) && cursor=$((cursor - 1));;
+      down) ((cursor + 1 < ${#artists[@]})) && cursor=$((cursor + 1));;
+      ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; selected=$((selected - 1)); total=$((total - sizes[cursor])); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
+      w) player_content_sync "$selected" "$total" || true; printf '[any key Continue] > '; tty_read_key key 1 || true;;
+      q) return 0;;
+    esac
+  done
 }
 
 read_crontab_raw() {
@@ -634,6 +786,9 @@ print_menu() {
   if [[ "$player_ready" == "yes" ]]; then
     printf '%s\n' "$(hint_button t "Clear Player Files")"
   fi
+  if [[ -n "$AUDL_DB_PATH" ]]; then
+    printf '%s\n' "$(hint_button c "Player Content Creator")"
+  fi
   printf '%s\n' "$(hint_button a "Album Art")"
   printf '%s\n' "$(hint_button b "Boost Gain")"
   printf '%s\n' "$(hint_button l "View Log")"
@@ -680,6 +835,12 @@ main() {
       ;;
     b)
       boost_gain_page
+      ;;
+    c)
+      if [[ -z "$AUDL_DB_PATH" ]]; then
+        pause_with_result "Player Content Creator unavailable: AUDL_DB_PATH is not set."
+      fi
+      player_content_creator
       ;;
     t)
       if [[ "$player_ready" != "yes" ]]; then

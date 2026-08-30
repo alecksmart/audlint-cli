@@ -268,6 +268,19 @@ CREATE TABLE IF NOT EXISTS album_quality (
 );
 SQL
   local needs_refresh_derived=0
+  # This small durable selection is intentionally keyed by the natural album
+  # identity; it must participate in the normal backup-refresh contract.
+  if ! sqlite3 -noheader "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='player_content_selection' LIMIT 1;" 2>/dev/null | grep -q '^1$'; then
+    needs_refresh_derived=1
+  fi
+  sqlite3 "$db" <<'SQL' >/dev/null 2>&1 || return 1
+CREATE TABLE IF NOT EXISTS player_content_selection (
+  artist_lc TEXT NOT NULL,
+  album_lc TEXT NOT NULL,
+  year_int INTEGER NOT NULL,
+  PRIMARY KEY (artist_lc, album_lc, year_int)
+);
+SQL
 
   if ! _album_quality_has_column "$db" "last_checked_at"; then
     sqlite3 "$db" "ALTER TABLE album_quality ADD COLUMN last_checked_at INTEGER;" >/dev/null 2>&1 || true
@@ -460,6 +473,29 @@ SQL
       sqlite3 "$db" "INSERT INTO album_quality_fts(album_quality_fts) VALUES('rebuild');" >/dev/null 2>&1 || true
       sqlite3 "$db" "INSERT INTO app_meta(key,value) VALUES('album_quality_fts_index_version','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value;" >/dev/null 2>&1 || true
     fi
+  fi
+}
+
+player_content_selection_cleanup_stale() {
+  local db="$1"
+  sqlite3 "$db" <<'SQL' >/dev/null 2>&1
+DELETE FROM player_content_selection AS pcs
+WHERE NOT EXISTS (
+  SELECT 1 FROM album_quality AS aq
+  WHERE aq.artist_lc=pcs.artist_lc
+    AND aq.album_lc=pcs.album_lc
+    AND aq.year_int=pcs.year_int
+);
+SQL
+}
+
+player_content_selection_toggle() {
+  local db="$1" artist_lc="$2" album_lc="$3" year_int="$4" checked="$5"
+  [[ "$year_int" =~ ^-?[0-9]+$ ]] || return 1
+  if [[ "$checked" == "1" ]]; then
+    sqlite3 "$db" "INSERT INTO player_content_selection(artist_lc,album_lc,year_int) VALUES('$(sql_escape "$artist_lc")','$(sql_escape "$album_lc")',$year_int) ON CONFLICT(artist_lc,album_lc,year_int) DO NOTHING;" >/dev/null 2>&1
+  else
+    sqlite3 "$db" "DELETE FROM player_content_selection WHERE artist_lc='$(sql_escape "$artist_lc")' AND album_lc='$(sql_escape "$album_lc")' AND year_int=$year_int;" >/dev/null 2>&1
   fi
 }
 

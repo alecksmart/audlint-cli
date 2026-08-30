@@ -30,6 +30,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/table.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/sqlite.sh"
 # shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/player.sh"
+# shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/virtwin.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/audio.sh"
@@ -3457,62 +3459,6 @@ run_album_analysis_for_row_ids() {
   show_album_analysis_page_for_row_id "${valid_ids[0]}"
 }
 
-player_path_component() {
-  local raw="$1"
-  raw="${raw//$'\n'/ }"
-  raw="${raw//$'\r'/ }"
-  raw="${raw//\//_}"
-  raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  [[ -n "$raw" ]] || raw="unknown"
-  printf '%s' "$raw"
-}
-
-player_album_dest_dir() {
-  local artist="$1"
-  local year="$2"
-  local album="$3"
-  local artist_dir album_dir release_dir index_dir
-  artist_dir="$(player_path_component "$artist")"
-  album_dir="$(player_path_component "$album")"
-  if [[ "$year" =~ ^[0-9]{4}$ ]] && ((year > 0)); then
-    release_dir="${year} - ${album_dir}"
-  else
-    release_dir="$album_dir"
-  fi
-  index_dir="$(printf '%s' "$artist_dir" | cut -c1 | tr '[:lower:]' '[:upper:]')"
-  [[ "$index_dir" =~ ^[A-Z0-9]$ ]] || index_dir="_"
-  printf '%s/%s/%s/%s' "$MEDIA_PLAYER_PATH" "$index_dir" "$artist_dir" "$release_dir"
-}
-
-player_relative_album_path_from_source() {
-  local source_path="$1"
-  local root_real source_real rel
-  [[ -n "${LIBRARY_ROOT:-}" && -n "$source_path" ]] || return 1
-  root_real="$(path_resolve "$LIBRARY_ROOT" 2>/dev/null || printf '%s' "$LIBRARY_ROOT")"
-  source_real="$(path_resolve "$source_path" 2>/dev/null || printf '%s' "$source_path")"
-  case "$source_real" in
-  "$root_real"/*) ;;
-  *) return 1 ;;
-  esac
-  rel="${source_real#"$root_real"/}"
-  [[ -n "$rel" ]] || return 1
-  printf '%s' "$rel"
-}
-
-player_album_dest_dir_for_source() {
-  local source_path="$1"
-  local artist="$2"
-  local year="$3"
-  local album="$4"
-  local rel_path=""
-  rel_path="$(player_relative_album_path_from_source "$source_path" || true)"
-  if [[ -n "$rel_path" ]]; then
-    printf '%s/%s' "$MEDIA_PLAYER_PATH" "$rel_path"
-    return 0
-  fi
-  player_album_dest_dir "$artist" "$year" "$album"
-}
-
 transfer_first_audio_file() {
   local source_path="$1"
   local files=()
@@ -3679,100 +3625,16 @@ transfer_year_for_source() {
   printf '%s' "$resolved_year"
 }
 
-transfer_size_included_for_file() {
-  local file_path="$1"
-  local base_name lowered
-  base_name="$(basename "$file_path")"
-  case "$base_name" in
-  .audlint_inspect_cache.json | .any2flac_truepeak_cache.tsv | .dff2flac_truepeak_cache.tsv | .sox_album_done | .sox_album_profile)
-    return 1
-    ;;
-  esac
-
-  lowered="$(lower_text "$base_name")"
-  case "$lowered" in
-  cover.jpg | cover.jpeg)
-    return 0
-    ;;
-  *.jpg | *.jpeg | *.png | *.gif | *.webp | *.bmp | *.tif | *.tiff)
-    return 1
-    ;;
-  esac
-
-  return 0
-}
-
 transfer_payload_size_bytes_for_dir() {
-  local dir_path="$1"
-  local total_bytes=0
-  local file_path file_bytes
-
-  [[ -d "$dir_path" ]] || {
-    printf '0'
-    return 0
-  }
-
-  while IFS= read -r -d '' file_path; do
-    transfer_size_included_for_file "$file_path" || continue
-    file_bytes="$(stat_size_bytes "$file_path" 2>/dev/null || true)"
-    [[ "$file_bytes" =~ ^[0-9]+$ ]] || continue
-    total_bytes=$((total_bytes + file_bytes))
-  done < <(find "$dir_path" -type f -print0 2>/dev/null)
-
-  printf '%s' "$total_bytes"
+  player_payload_size_bytes_for_dir "$1" 2>/dev/null || printf '0'
 }
 
 transfer_payload_total_size_bytes_for_manifest() {
-  local manifest_file="$1"
-  local total_bytes=0
-  local artist album year source_path dest_dir dir_bytes
-
-  [[ -f "$manifest_file" ]] || {
-    printf '0'
-    return 0
-  }
-
-  while IFS=$'\x1f' read -r artist album year source_path dest_dir; do
-    [[ -n "$source_path" ]] || continue
-    dir_bytes="$(transfer_payload_size_bytes_for_dir "$source_path" || true)"
-    [[ "$dir_bytes" =~ ^[0-9]+$ ]] || dir_bytes=0
-    total_bytes=$((total_bytes + dir_bytes))
-  done < "$manifest_file"
-
-  printf '%s' "$total_bytes"
+  player_payload_total_size_bytes_for_manifest "$1"
 }
 
 transfer_human_size_label() {
-  local bytes="${1:-0}"
-  local -a units=("b" "Kb" "Mb" "Gb" "Tb")
-  local unit_idx=0
-  local unit_size=1
-  local whole frac
-
-  [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
-
-  while ((bytes >= unit_size * 1024)) && ((unit_idx < ${#units[@]} - 1)); do
-    unit_size=$((unit_size * 1024))
-    unit_idx=$((unit_idx + 1))
-  done
-
-  if ((unit_idx == 0)); then
-    printf '%s%s' "$bytes" "${units[$unit_idx]}"
-    return 0
-  fi
-
-  whole=$((bytes / unit_size))
-  frac=$((((bytes % unit_size) * 10 + unit_size / 2) / unit_size))
-  if ((frac >= 10)); then
-    whole=$((whole + 1))
-    frac=0
-  fi
-
-  if ((whole >= 100 || frac == 0)); then
-    printf '%s%s' "$whole" "${units[$unit_idx]}"
-  else
-    printf '%s.%s%s' "$whole" "$frac" "${units[$unit_idx]}"
-  fi
+  player_human_size_label "$1"
 }
 
 run_transfer_for_row_ids() {
@@ -3968,8 +3830,12 @@ sync_bin="$3"
 player_path="$4"
 log_file="${5:-}"
 total_size_label="${6:-}"
+player_lib="${7:-}"
 title_row="${VIRTWIN_TITLE_ROW:-}"
 term_cols="${VIRTWIN_TERM_COLS:-0}"
+[[ -n "$player_lib" && -f "$player_lib" ]] || { printf 'player payload library unavailable\n' >&2; exit 2; }
+# shellcheck source=/dev/null
+source "$player_lib"
 log_note() {
   local msg="$1"
   [[ -n "$log_file" ]] || return 0
@@ -4035,22 +3901,8 @@ rsync_args=(
   -av
   --delete
   --itemize-changes
-  --exclude='.audlint_inspect_cache.json'
-  --exclude='.any2flac_truepeak_cache.tsv'
-  --exclude='.dff2flac_truepeak_cache.tsv'
-  --exclude='.sox_album_done'
-  --exclude='.sox_album_profile'
-  --include='[cC][oO][vV][eE][rR].[jJ][pP][gG]'
-  --include='[cC][oO][vV][eE][rR].[jJ][pP][eE][gG]'
-  --exclude='*.[jJ][pP][gG]'
-  --exclude='*.[jJ][pP][eE][gG]'
-  --exclude='*.[pP][nN][gG]'
-  --exclude='*.[gG][iI][fF]'
-  --exclude='*.[wW][eE][bB][pP]'
-  --exclude='*.[bB][mM][pP]'
-  --exclude='*.[tT][iI][fF]'
-  --exclude='*.[tT][iI][fF][fF]'
 )
+player_rsync_payload_filters rsync_args
 if "$rsync_bin" --help 2>/dev/null | grep -q -- '--info'; then
   rsync_args+=(--info=progress2,name1)
   printf 'rsync mode: verbose + itemize + progress2\n\n'
@@ -4099,7 +3951,7 @@ EOF
     fi
   fi
   if VIRTWIN_RIGHT_TITLE="$first_title" virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "transfer-player" \
-    "$runner_script" "$manifest_file" "$RSYNC_BIN" "$SYNC_BIN" "$MEDIA_PLAYER_PATH" "$transfer_log" "$total_size_label"; then
+    "$runner_script" "$manifest_file" "$RSYNC_BIN" "$SYNC_BIN" "$MEDIA_PLAYER_PATH" "$transfer_log" "$total_size_label" "$BOOTSTRAP_DIR/../lib/sh/player.sh"; then
     transfer_ok=1
     if [[ -n "$transfer_log" ]]; then
       printf '[%s] transfer rc=0\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$transfer_log" 2>/dev/null || true
@@ -5806,6 +5658,7 @@ while true; do
       AUDLINT_TASK_DISCOVERY_CACHE_FILE="$AUDLINT_TASK_DISCOVERY_CACHE_FILE" \
       AUDLINT_LIBRARY_ROOT="$LIBRARY_ROOT" \
       AUDL_MEDIA_PLAYER_PATH="$MEDIA_PLAYER_PATH" \
+      AUDL_DB_PATH="$DB_PATH" \
       AUDL_CRON_INTERVAL_MIN="$AUDLINT_CRON_INTERVAL_MIN" \
       virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "maintain" --no-wait \
         "$AUDLINT_MAINTAIN_BIN" || true

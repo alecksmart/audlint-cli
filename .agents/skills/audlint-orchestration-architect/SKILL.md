@@ -66,6 +66,16 @@ For every meaningful coordination decision, report:
 Prefer positive instructions such as "preserve X" and "implement Y".
 Reserve hard prohibitions for genuine safety boundaries.
 
+## Architectural Decisions
+
+- Treat `docs/decisions/` as the durable architectural decision ledger.
+- Before shaping a spec, identify ADRs relevant to that capability.
+- Reference applicable ADRs in the spec rather than duplicating their rationale.
+- If planning or implementation introduces a durable cross-cutting decision,
+  create or update an ADR before treating it as established architecture.
+- Do not let a feature spec silently override an accepted ADR.
+- Superseded decisions remain in the ledger with explicit status/linkage.
+
 ## Session Startup
 
 When invoked as the Architect:

@@ -31,6 +31,7 @@ R3_OUTPUT_PATH = (
     / "r3-analyzer-corpus-benchmark-baseline"
     / "corpus-manifest.json"
 )
+R3_REVIEW_DRAFT_PATH = R3_OUTPUT_PATH.with_name("corpus-manifest-review-draft.json")
 BENCHMARK_RELATIVE_PATH = Path(
     "_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/benchmark-results.json"
 )
@@ -71,12 +72,37 @@ _REQUIRED_EXPECTED_FIELDS = (
     "expected_decision",
     "expected_fake_upscale",
 )
+_RECOGNIZED_AUDIO_SUFFIXES = frozenset(
+    {
+        ".flac",
+        ".alac",
+        ".m4a",
+        ".wav",
+        ".aiff",
+        ".aif",
+        ".aifc",
+        ".caf",
+        ".dsf",
+        ".dff",
+        ".wv",
+        ".ape",
+        ".dts",
+        ".dca",
+        ".mp4",
+        ".mp3",
+        ".aac",
+        ".ogg",
+        ".opus",
+    }
+)
+_CUE_SUFFIX = ".cue"
 
 
 def usage() -> str:
     return (
         "Usage:\n"
         "  audlint_analyze_corpus.py [--json] MANIFEST.json\n"
+        "  audlint_analyze_corpus.py --bootstrap CORPUS_ROOT\n\n"
         "  audlint_analyze_corpus.py --inventory CORPUS_ROOT MANIFEST.json\n\n"
         "  audlint_analyze_corpus.py --evaluate CORPUS_ROOT MANIFEST.json [CASE_ID ...]\n\n"
         "  audlint_analyze_corpus.py --benchmark CORPUS_ROOT MANIFEST.json --iterations N\n\n"
@@ -84,6 +110,10 @@ def usage() -> str:
         "--inventory validates a strict schema-v1 manifest and writes the\n"
         "read-only inventory to _bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/\n"
         "corpus-manifest.json. It never invokes audlint-analyze.\n\n"
+        "--bootstrap reads a corpus root and atomically creates one human-review\n"
+        "draft at _bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/\n"
+        "corpus-manifest-review-draft.json. It fails if that draft already exists\n"
+        "and never invokes audlint-analyze.\n\n"
         "--finalize consumes the sibling R3.1 manifest and R3.4 result,\n"
         "reproduces declared synthetic recipes in temporary paths, and publishes\n"
         "only baseline-summary.md when every finalization gate passes.\n\n"
@@ -540,6 +570,225 @@ def _snapshot_subtree(case_root: Path) -> list[dict[str, object]]:
 
     record(case_root, ".")
     return snapshot
+
+
+def _bootstrap_root(corpus_root: Path) -> Path:
+    """Resolve an explicitly supplied directory without accepting a root symlink."""
+    try:
+        root_info = corpus_root.lstat()
+    except OSError as exc:
+        raise _error("corpus_root", f"does not exist ({exc})") from exc
+    if stat.S_ISLNK(root_info.st_mode):
+        raise _error("corpus_root", "must not be a symlink")
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise _error("corpus_root", "must be a directory")
+    try:
+        return corpus_root.resolve(strict=True)
+    except OSError as exc:
+        raise _error("corpus_root", f"could not resolve ({exc})") from exc
+
+
+def _draft_category(relative_directory: str) -> str | None:
+    family = PurePosixPath(relative_directory).parts[0]
+    return {"real": "real", "fake": "fake", "edge_cases": "edge_case"}.get(family)
+
+
+def _draft_file_role(path: Path) -> str:
+    suffix = path.suffix.casefold()
+    if suffix in _RECOGNIZED_AUDIO_SUFFIXES:
+        return "audio"
+    if suffix == _CUE_SUFFIX:
+        return "cue"
+    return "supporting-file"
+
+
+def _relative_posix(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def _bootstrap_directory_files(root: Path, directory: Path) -> list[tuple[Path, str]]:
+    """Return direct regular children, rejecting every non-regular child type."""
+    files: list[tuple[Path, str]] = []
+    try:
+        children = sorted(os.scandir(directory), key=lambda child: child.name)
+    except OSError as exc:
+        raise _error("discovery", f"could not enumerate {_relative_posix(root, directory)!r} ({exc})") from exc
+    for child in children:
+        path = Path(child.path)
+        relative = _relative_posix(root, path)
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise _error("discovery", f"could not lstat {relative!r} ({exc})") from exc
+        if stat.S_ISDIR(info.st_mode):
+            continue
+        if stat.S_ISREG(info.st_mode):
+            files.append((path, relative))
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            raise _error("discovery", f"{relative!r} is a symlink; symlinks are not supported")
+        raise _error("discovery", f"{relative!r} has an unsupported filesystem type")
+    return files
+
+
+def _walk_bootstrap_directories(root: Path) -> list[tuple[Path, str, list[tuple[Path, str]]]]:
+    """Walk with lstat only, returning each directory and its direct regular files."""
+    discovered: list[tuple[Path, str, list[tuple[Path, str]]]] = []
+
+    def visit(directory: Path) -> None:
+        try:
+            info = directory.lstat()
+        except OSError as exc:
+            raise _error("discovery", f"could not lstat {_relative_posix(root, directory)!r} ({exc})") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise _error("discovery", f"{_relative_posix(root, directory)!r} is a symlink; symlinks are not supported")
+        if not stat.S_ISDIR(info.st_mode):
+            raise _error("discovery", f"{_relative_posix(root, directory)!r} is not a directory")
+        direct_files = _bootstrap_directory_files(root, directory)
+        discovered.append((directory, _relative_posix(root, directory), direct_files))
+        try:
+            children = sorted(os.scandir(directory), key=lambda child: child.name)
+        except OSError as exc:
+            raise _error("discovery", f"could not enumerate {_relative_posix(root, directory)!r} ({exc})") from exc
+        for child in children:
+            path = Path(child.path)
+            try:
+                child_info = path.lstat()
+            except OSError as exc:
+                raise _error("discovery", f"could not lstat {_relative_posix(root, path)!r} ({exc})") from exc
+            if stat.S_ISDIR(child_info.st_mode):
+                visit(path)
+            elif stat.S_ISLNK(child_info.st_mode):
+                raise _error("discovery", f"{_relative_posix(root, path)!r} is a symlink; symlinks are not supported")
+            elif not stat.S_ISREG(child_info.st_mode):
+                raise _error("discovery", f"{_relative_posix(root, path)!r} has an unsupported filesystem type")
+
+    visit(root)
+    return discovered
+
+
+def _draft_entry(root: Path, directory_relative: str, files: list[tuple[Path, str]]) -> dict[str, object]:
+    drafted_files: list[dict[str, object]] = []
+    for path, relative in files:
+        try:
+            info = path.lstat()
+            file_item: dict[str, object] = {
+                "path": relative,
+                "role": _draft_file_role(path),
+                "sha256": _sha256_file(path),
+                "bytes": info.st_size,
+            }
+        except OSError as exc:
+            raise _error("discovery", f"could not read {relative!r} ({exc})") from exc
+        if file_item["role"] == "audio":
+            file_item.update(_objective_audio_facts(path, f"discovery {relative!r}"))
+        drafted_files.append(file_item)
+    return {
+        "id": None,
+        "album_path": directory_relative,
+        "category": _draft_category(directory_relative),
+        "case_class": None,
+        "files": drafted_files,
+        "expected_source_profile": None,
+        "expected_target_profile": None,
+        "expected_decision": None,
+        "expected_fake_upscale": None,
+        "generation_recipe": None,
+        "provenance": None,
+        "trust": None,
+    }
+
+
+def _draft_json_bytes(payload: object) -> bytes:
+    return (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _resolved_output_path(output_path: Path, corpus_root: Path) -> Path:
+    """Resolve an output target and reject every lexical or resolved root child."""
+    raw_output = output_path.absolute()
+    try:
+        resolved_output = raw_output.resolve(strict=False)
+    except OSError as exc:
+        raise _error("review_draft", f"could not resolve {output_path} ({exc})") from exc
+    for candidate in (raw_output, resolved_output):
+        try:
+            candidate.relative_to(corpus_root)
+        except ValueError:
+            continue
+        raise _error("review_draft", "must be outside the supplied corpus root")
+    return resolved_output
+
+
+def _atomic_create_bytes(output_path: Path, content: bytes) -> None:
+    """Publish an already-complete file without replacing a review draft."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, output_path)
+        except FileExistsError as exc:
+            raise _error("review_draft", f"already exists at {output_path}") from exc
+    except OSError as exc:
+        raise _error("review_draft", f"could not publish atomically ({exc})") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def bootstrap_review_draft(
+    corpus_root: Path, output_path: Path | None = None
+) -> tuple[dict[str, object], list[str]]:
+    """Discover objective facts and publish one schema-v1 human-review draft."""
+    root = _bootstrap_root(corpus_root)
+    target = _resolved_output_path(output_path or R3_REVIEW_DRAFT_PATH, root)
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise _error("review_draft", f"could not inspect {target} ({exc})") from exc
+    else:
+        raise _error("review_draft", f"already exists at {target}")
+
+    before = _snapshot_subtree(root)
+    directories = _walk_bootstrap_directories(root)
+    entries: list[dict[str, object]] = []
+    assigned: set[str] = set()
+    unassigned: list[str] = []
+    for _directory, relative, files in directories:
+        recognized = any(_draft_file_role(path) in {"audio", "cue"} for path, _file_relative in files)
+        if relative != "." and recognized:
+            entries.append(_draft_entry(root, relative, files))
+            assigned.update(file_relative for _path, file_relative in files)
+
+    for _directory, _relative, files in directories:
+        for _path, file_relative in files:
+            if file_relative not in assigned:
+                unassigned.append(file_relative)
+    unassigned.sort()
+
+    after = _snapshot_subtree(root)
+    if before != after:
+        raise _error("source_snapshot", "supplied corpus changed during bootstrap discovery")
+
+    payload: dict[str, object] = {
+        "schema_version": R3_SCHEMA_VERSION,
+        "corpus_id": None,
+        "corpus_revision": None,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "entries": entries,
+    }
+    _atomic_create_bytes(target, _draft_json_bytes(payload))
+    return payload, unassigned
 
 
 def _safe_text(value: object, corpus_root: Path | None = None, stage_root: Path | None = None) -> str:
@@ -1894,6 +2143,19 @@ def _print_text(results: list[dict[str, object]]) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--bootstrap":
+        if len(argv) != 2:
+            print(usage(), file=sys.stderr)
+            return 2
+        try:
+            _payload, unassigned = bootstrap_review_draft(Path(argv[1]))
+        except ManifestValidationError as exc:
+            print(f"R3.1A bootstrap failed: {exc}", file=sys.stderr)
+            return 1
+        for relative in unassigned:
+            print(f"R3.1A bootstrap unassigned regular file: {relative}", file=sys.stderr)
+        return 0
+
     if argv and argv[0] == "--finalize":
         if len(argv) != 2:
             print(usage(), file=sys.stderr)

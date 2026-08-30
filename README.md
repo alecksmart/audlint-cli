@@ -192,8 +192,27 @@ Guided album-art runs launched from Maintenance auto-enable missing-art fetch, a
 
 ## R3 corpus inventory
 
-Create a schema-version-1, root-relative corpus manifest, then inventory it with
+To prepare a new manifest for review, use the read-only bootstrap command with
 an explicit corpus root:
+
+```bash
+audlint-analyze-corpus.sh --bootstrap /path/to/corpus
+```
+
+It atomically creates
+`_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/corpus-manifest-review-draft.json`
+only if that file does not already exist. The draft has objective file hashes,
+sizes, audio facts, candidate directory suggestions, and mechanical roles. It
+does not run an analyzer or change the supplied corpus. Symlinks, special files,
+failed audio probes, source changes during discovery, and an existing draft all
+make the command fail without publishing a draft. Regular files outside a
+suggested candidate are reported on standard error for human assignment.
+
+The draft is deliberately invalid R3.1 input: review it (or work on a copy),
+confirm the suggested grouping/category/roles, and supply corpus and entry IDs,
+case classes, expectations, provenance, trust, and any synthetic recipe. Remove
+`generation_recipe: null` for independently sourced cases. Then inventory the
+fully reviewed schema-version-1 manifest with an explicit corpus root:
 
 ```bash
 audlint-analyze-corpus.sh --inventory /path/to/corpus corpus-manifest-input.json

@@ -642,5 +642,255 @@ class R31CorpusManifestInventoryTests(unittest.TestCase):
         self.assertNotIn("invoked", proc.stderr)
 
 
+class R31ACorpusManifestBootstrapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self._tmp.name)
+        self.root = self.tmpdir / "corpus"
+        self.case = self.root / "real" / "case"
+        self.case.mkdir(parents=True)
+        self.audio = self.case / "track.flac"
+        self.audio.write_bytes(b"repository-owned-fixture-audio")
+        (self.case / "album.cue").write_text("FILE track.flac WAVE\n", encoding="utf-8")
+        (self.case / "cover.jpg").write_bytes(b"supporting-file")
+        self.nested = self.case / "nested"
+        self.nested.mkdir()
+        (self.nested / "nested.mp3").write_bytes(b"nested-fixture-audio")
+        fake = self.root / "fake" / "case"
+        fake.mkdir(parents=True)
+        (fake / "source.cue").write_text("FILE source.mp3 WAVE\n", encoding="utf-8")
+        edge = self.root / "edge_cases" / "edge"
+        edge.mkdir(parents=True)
+        (edge / "edge.wav").write_bytes(b"edge-fixture-audio")
+        unassigned = self.root / "notes"
+        unassigned.mkdir()
+        (unassigned / "readme.txt").write_text("review this\n", encoding="utf-8")
+        self.output = self.tmpdir / "output" / "corpus-manifest-review-draft.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _probe(path: str) -> dict[str, str]:
+        suffix = Path(path).suffix.casefold()
+        return {
+            "container": suffix.lstrip("."),
+            "codec_name": "flac" if suffix == ".flac" else "pcm_s24le",
+            "sample_rate": "96000",
+            "bits_per_raw_sample": "24",
+            "channels": "2",
+            "duration": "1.5",
+        }
+
+    def _bootstrap(self) -> tuple[dict[str, object], list[str]]:
+        with patch.object(corpus_module, "ffprobe_audio_json", self._probe), patch.object(
+            corpus_module, "_run_analyzer", side_effect=AssertionError("bootstrap must not run analyzer")
+        ):
+            return corpus_module.bootstrap_review_draft(self.root, self.output)
+
+    def test_bootstrap_writes_ordered_objective_review_draft_without_source_change(self) -> None:
+        before = corpus_module._snapshot_subtree(self.root)
+        payload, unassigned = self._bootstrap()
+
+        self.assertEqual(before, corpus_module._snapshot_subtree(self.root))
+        self.assertEqual(unassigned, ["notes/readme.txt"])
+        raw = self.output.read_bytes()
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertNotIn(b"\r\n", raw)
+        self.assertEqual(json.loads(raw), payload)
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertIsNone(payload["corpus_id"])
+        self.assertIsNone(payload["corpus_revision"])
+        entries = payload["entries"]
+        self.assertEqual(
+            [entry["album_path"] for entry in entries],
+            ["edge_cases/edge", "fake/case", "real/case", "real/case/nested"],
+        )
+        self.assertEqual([entry["category"] for entry in entries], ["edge_case", "fake", "real", "real"])
+        case_entry = entries[2]
+        self.assertEqual(
+            [item["path"] for item in case_entry["files"]],
+            ["real/case/album.cue", "real/case/cover.jpg", "real/case/track.flac"],
+        )
+        self.assertEqual([item["role"] for item in case_entry["files"]], ["cue", "supporting-file", "audio"])
+        audio = case_entry["files"][2]
+        self.assertEqual(audio["sha256"], hashlib.sha256(self.audio.read_bytes()).hexdigest())
+        self.assertEqual(audio["bytes"], len(b"repository-owned-fixture-audio"))
+        self.assertEqual(audio["sample_rate"], 96000)
+        self.assertEqual(audio["bit_depth"], 24)
+        self.assertEqual(audio["duration"], 1.5)
+        for entry in entries:
+            for field in (
+                "id",
+                "case_class",
+                "expected_source_profile",
+                "expected_target_profile",
+                "expected_decision",
+                "expected_fake_upscale",
+                "generation_recipe",
+                "provenance",
+                "trust",
+            ):
+                self.assertIsNone(entry[field])
+
+    def test_bootstrap_draft_is_rejected_until_reviewed_then_inventories_unchanged(self) -> None:
+        draft, _unassigned = self._bootstrap()
+        with self.assertRaisesRegex(corpus_module.ManifestValidationError, "corpus_id"):
+            with patch.object(corpus_module, "ffprobe_audio_json", self._probe):
+                corpus_module.validate_and_inventory_manifest(self.root, draft)
+
+        reviewed = json.loads(json.dumps(draft))
+        reviewed["corpus_id"] = "fixture-corpus"
+        reviewed["corpus_revision"] = "fixture-r1"
+        for number, entry in enumerate(reviewed["entries"], 1):
+            entry.update(
+                {
+                    "id": f"reviewed-{number}",
+                    "case_class": f"reviewed fixture {number}",
+                    "expected_source_profile": "96000/24",
+                    "expected_target_profile": "96000/24",
+                    "expected_decision": "keep_source",
+                    "expected_fake_upscale": False,
+                    "trust": "weak",
+                    "provenance": {
+                        "basis": "fixture review",
+                        "source_reference": "repository fixture",
+                        "rationale": "human-reviewed fixture truth",
+                        "reviewer": "Fixture Reviewer",
+                        "reviewed_at_utc": "2026-08-30T00:00:00Z",
+                    },
+                }
+            )
+            entry.pop("generation_recipe")
+        with patch.object(corpus_module, "ffprobe_audio_json", self._probe):
+            inventoried = corpus_module.validate_and_inventory_manifest(self.root, reviewed)
+        self.assertEqual([entry["id"] for entry in inventoried["entries"]], ["reviewed-1", "reviewed-2", "reviewed-3", "reviewed-4"])
+
+    def test_bootstrap_fails_without_publishing_for_existing_unsafe_probe_or_source_change(self) -> None:
+        self.output.parent.mkdir(parents=True)
+        self.output.write_text("preserve review\n", encoding="utf-8")
+        with self.assertRaisesRegex(corpus_module.ManifestValidationError, "already exists"):
+            self._bootstrap()
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "preserve review\n")
+        self.output.unlink()
+
+        (self.case / "unsafe-link").symlink_to("track.flac")
+        with self.assertRaisesRegex(corpus_module.ManifestValidationError, "symlink"):
+            self._bootstrap()
+        self.assertFalse(self.output.exists())
+        (self.case / "unsafe-link").unlink()
+
+        unsafe_fifo = self.case / "unsafe-fifo"
+        os.mkfifo(unsafe_fifo)
+        with self.assertRaisesRegex(corpus_module.ManifestValidationError, "unsupported filesystem type"):
+            self._bootstrap()
+        self.assertFalse(self.output.exists())
+        unsafe_fifo.unlink()
+
+        with patch.object(corpus_module, "ffprobe_audio_json", return_value={}):
+            with self.assertRaisesRegex(corpus_module.ManifestValidationError, "audio probe"):
+                corpus_module.bootstrap_review_draft(self.root, self.output)
+        self.assertFalse(self.output.exists())
+
+        def mutating_probe(path: str) -> dict[str, str]:
+            (self.case / "cover.jpg").write_bytes(b"changed during discovery")
+            return self._probe(path)
+
+        with patch.object(corpus_module, "ffprobe_audio_json", mutating_probe):
+            with self.assertRaisesRegex(corpus_module.ManifestValidationError, "changed during bootstrap"):
+                corpus_module.bootstrap_review_draft(self.root, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_bootstrap_rejects_default_relative_output_inside_corpus_before_discovery(self) -> None:
+        relative_output = Path("_bmad-output/benchmarks/r3/corpus-manifest-review-draft.json")
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            with patch.object(corpus_module, "R3_REVIEW_DRAFT_PATH", relative_output):
+                with self.assertRaisesRegex(corpus_module.ManifestValidationError, "outside the supplied corpus root"):
+                    corpus_module.bootstrap_review_draft(Path("."))
+        finally:
+            os.chdir(original_cwd)
+        self.assertFalse((self.root / relative_output).exists())
+
+    def test_bootstrap_rejects_a_symlinked_corpus_root(self) -> None:
+        root_link = self.tmpdir / "corpus-link"
+        root_link.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaisesRegex(corpus_module.ManifestValidationError, "corpus_root: must not be a symlink"):
+            corpus_module.bootstrap_review_draft(root_link, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_bootstrap_publish_race_preserves_a_newly_created_draft(self) -> None:
+        original_link = corpus_module.os.link
+
+        def competing_link(source: Path | str, destination: Path | str, *args: object, **kwargs: object) -> None:
+            self.output.write_text("human review started\n", encoding="utf-8")
+            original_link(source, destination, *args, **kwargs)
+
+        with patch.object(corpus_module, "ffprobe_audio_json", self._probe), patch.object(
+            corpus_module.os, "link", side_effect=competing_link
+        ):
+            with self.assertRaisesRegex(corpus_module.ManifestValidationError, "already exists"):
+                corpus_module.bootstrap_review_draft(self.root, self.output)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "human review started\n")
+
+    def test_bootstrap_discovers_every_declared_audio_suffix_with_objective_facts(self) -> None:
+        root = self.tmpdir / "suffix-corpus"
+        output = self.tmpdir / "suffix-output" / "corpus-manifest-review-draft.json"
+        suffixes = tuple(sorted(corpus_module._RECOGNIZED_AUDIO_SUFFIXES))
+        cases = [
+            (suffix, suffix.upper() if number % 2 else suffix)
+            for number, suffix in enumerate(suffixes, 1)
+        ]
+        expected_facts: dict[str, tuple[int, int, float]] = {}
+        for number, (_declared, actual_suffix) in enumerate(cases, 1):
+            directory = root / "real" / f"case-{number:02d}"
+            directory.mkdir(parents=True)
+            track = directory / f"track{actual_suffix}"
+            track.write_bytes(f"fixture-{number}".encode("ascii"))
+            expected_facts[track.relative_to(root).as_posix()] = (44100 + number, 1 + number, float(number))
+
+        def probe(path: str) -> dict[str, str]:
+            relative = Path(path).resolve().relative_to(root.resolve()).as_posix()
+            sample_rate, channels, duration = expected_facts[relative]
+            suffix = Path(path).suffix.casefold().lstrip(".")
+            return {
+                "container": suffix,
+                "codec_name": f"codec-{suffix}",
+                "sample_rate": str(sample_rate),
+                "bits_per_raw_sample": "24",
+                "channels": str(channels),
+                "duration": str(duration),
+            }
+
+        with patch.object(corpus_module, "ffprobe_audio_json", probe):
+            payload, unassigned = corpus_module.bootstrap_review_draft(root, output)
+
+        self.assertEqual(unassigned, [])
+        self.assertEqual(len(payload["entries"]), len(cases))
+        for number, entry in enumerate(payload["entries"], 1):
+            declared_suffix, actual_suffix = cases[number - 1]
+            file_item = entry["files"][0]
+            expected_path = f"real/case-{number:02d}/track{actual_suffix}"
+            sample_rate, channels, duration = expected_facts[expected_path]
+            with self.subTest(suffix=declared_suffix, actual_suffix=actual_suffix):
+                self.assertEqual(entry["album_path"], f"real/case-{number:02d}")
+                self.assertEqual(file_item["path"], expected_path)
+                self.assertEqual(file_item["role"], "audio")
+                self.assertEqual(file_item["container"], declared_suffix.lstrip("."))
+                self.assertEqual(file_item["codec"], f"codec-{declared_suffix.lstrip('.')}")
+                self.assertEqual(file_item["sample_rate"], sample_rate)
+                self.assertEqual(file_item["bit_depth"], 24)
+                self.assertEqual(file_item["channels"], channels)
+                self.assertEqual(file_item["duration"], duration)
+
+    def test_bootstrap_main_path_does_not_dispatch_to_analyzer(self) -> None:
+        with patch.object(corpus_module, "bootstrap_review_draft", return_value=({}, ["notes/readme.txt"])) as bootstrap, patch.object(
+            corpus_module, "_run_analyzer", side_effect=AssertionError("must not run")
+        ):
+            self.assertEqual(corpus_module.main(["--bootstrap", str(self.root)]), 0)
+        bootstrap.assert_called_once_with(self.root)
+
+
 if __name__ == "__main__":
     unittest.main()

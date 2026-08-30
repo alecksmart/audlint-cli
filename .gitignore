@@ -11,3 +11,6 @@ __pycache__/
 .vscode/
 spectrogram-analyzer/audio_quality_batch_results.json
 spectrogram-analyzer/audio_quality_batch_smoke.json
+
+# Local R3 corpus inventory and benchmark evidence may contain identifying media metadata.
+_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/

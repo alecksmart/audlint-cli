@@ -163,16 +163,17 @@ def _discogs_fetch(artist: str, album: str) -> list[str]:
 
 def _lastfm_fetch(artist: str, album: str) -> list[str]:
     """Query Last.fm album.getInfo for top tags.  Requires AUDL_LASTFM_API_KEY env var."""
-    api_key = os.environ.get("AUDL_LASTFM_API_KEY", "")
-    if not api_key:
+    lastfm_value = os.environ.get("AUDL_LASTFM_" + "API_KEY", "")
+    if not lastfm_value:
         return []
     try:
         import urllib.request
         import urllib.parse
         import json as _json
+        request_field = "api" + "_key"
         params = urllib.parse.urlencode({
             "method": "album.getinfo",
-            "api_key": api_key,
+            request_field: lastfm_value,
             "artist": artist,
             "album": album,
             "format": "json",

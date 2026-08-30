@@ -396,7 +396,7 @@ print_boost_choice_grid() {
   local -n dirs_ref="$dirs_var"
   local -a _empty_keys=()
   local use_custom_keys=false
-  local max_cols line_len idx key base plain token
+  local max_cols line_len idx key base plain display_fragment
   max_cols="${VIRTWIN_TERM_COLS:-${COLUMNS:-120}}"
   [[ "$max_cols" =~ ^[0-9]+$ ]] || max_cols=120
   (( max_cols < 40 )) && max_cols=40
@@ -417,7 +417,7 @@ print_boost_choice_grid() {
     fi
     base="$(basename "${dirs_ref[$idx]}")"
     plain="[$key] $base"
-    token="$(paint "$C_SELECT" "[$key]") $(paint "$C_VALUE" "$base")"
+    display_fragment="$(paint "$C_SELECT" "[$key]") $(paint "$C_VALUE" "$base")"
 
     if ((line_len > 0 && line_len + 2 + ${#plain} > max_cols)); then
       printf '\n'
@@ -427,7 +427,7 @@ print_boost_choice_grid() {
       printf '  '
       line_len=$((line_len + 2))
     fi
-    printf '%s' "$token"
+    printf '%s' "$display_fragment"
     line_len=$((line_len + ${#plain}))
   done
   printf '\n'

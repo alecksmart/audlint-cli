@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "protected_paths": ["_bmad-output/benchmarks/r3-analyzer-corpus-benchmark-baseline/"],
+  "artifact_extensions": {
+    "SC-ART-001": [".flac", ".mp3", ".m4a", ".aac", ".opus", ".ogg", ".oga", ".wav", ".aif", ".aiff", ".alac", ".wma", ".ape", ".wv", ".dsf", ".dff", ".mp4", ".mkv", ".mov", ".avi", ".webm", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic"],
+    "SC-ART-002": [".sqlite", ".sqlite3", ".db", ".db3", ".mdb", ".accdb", ".sql", ".dump", ".sqlite-journal", ".sqlite-wal", ".sqlite-shm"],
+    "SC-ART-003": [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx"],
+    "SC-ART-004": [".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar"]
+  },
+  "artifact_basenames": {"SC-ART-001": [], "SC-ART-002": [], "SC-ART-003": ["credentials", "credentials.json", "service-account.json"], "SC-ART-004": []},
+  "credential_basename_primitives": ["ssh-private-key-basename-v1", "dotenv-basename-v1"],
+  "artifact_signatures": {"SC-ART-001": ["flac-v1", "ogg-v1", "id3-v1", "mpeg-audio-v1", "aac-adts-v1", "wave-v1", "avi-v1", "webp-v1", "aiff-v1", "png-v1", "jpeg-v1", "gif-v1", "bmp-v1", "tiff-v1", "matroska-v1", "iso-bmff-v1", "dsf-v1", "dff-v1"], "SC-ART-002": ["sqlite-v1"], "SC-ART-003": [], "SC-ART-004": ["zip-v1", "gzip-v1", "bzip2-v1", "xz-v1", "sevenzip-v1", "rar-v1", "tar-v1"]},
+  "private_key_primitives": ["pem-private-v1", "pem-encrypted-private-v1", "pem-rsa-private-v1", "pem-ec-private-v1", "pem-dsa-private-v1", "openssh-private-v1", "pgp-private-block-v1"],
+  "credential_names": ["password", "passwd", "passphrase", "token", "apikey", "accesskey", "secret", "clientsecret", "privatekey"],
+  "provider_token_primitives": ["aws-access-key-v1", "github-legacy-token-v1", "github-fine-grained-v1", "slack-token-v1", "stripe-live-secret-v1", "google-api-key-v1", "generic-sk-secret-v1"],
+  "placeholders": ["example", "example_only", "placeholder", "redacted", "changeme", "test", "dummy", "fake", "your_value_here"],
+  "placeholder_template_primitives": ["shell-variable-placeholder-v1", "mustache-placeholder-v1", "angle-placeholder-v1"],
+  "machine_path_primitives": ["posix-user-home-v1", "posix-volume-v1", "posix-mount-v1", "windows-user-home-v1", "unc-share-v1"],
+  "metadata_fields": {"artist": ["artist", "album_artist"], "release": ["album", "release"], "provenance": ["source_path", "relative_path", "file", "track", "checksum", "codec", "container", "profile"], "analysis": ["checksum", "profile", "codec", "decision", "confidence", "benchmark"]},
+  "limits": {"policy_bytes": 262144, "allowlist_bytes": 2097152, "bootstrap_json_depth": 32, "policy_entries": 4096, "allowlist_entries": 4096, "candidate_count": 100000, "path_bytes": 4096, "aggregate_path_bytes": 16777216, "aggregate_candidate_bytes": 268435456, "candidate_bytes": 8388608, "line_bytes": 65536, "record_bytes": 1048576, "json_nesting": 64, "signature_prefix_bytes": 4096, "read_chunk_bytes": 65536, "finding_count": 16384, "error_count": 1024, "diagnostic_bytes": 16777216}
+}

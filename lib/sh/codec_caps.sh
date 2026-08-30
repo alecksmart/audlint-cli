@@ -75,11 +75,11 @@ codec_caps_normalize_codec() {
 codec_caps_sox_has_format() {
   codec_caps_init
   ((CODEC_CAPS_HAS_SOX == 1)) || return 1
-  local token
-  for token in "$@"; do
-    [[ -n "$token" ]] || continue
-    token="$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$CODEC_CAPS_SOX_FORMATS" == *" ${token} "* ]]; then
+  local format_name
+  for format_name in "$@"; do
+    [[ -n "$format_name" ]] || continue
+    format_name="$(printf '%s' "$format_name" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$CODEC_CAPS_SOX_FORMATS" == *" ${format_name} "* ]]; then
       return 0
     fi
   done

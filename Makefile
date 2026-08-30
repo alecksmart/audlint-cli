@@ -4,8 +4,8 @@ SHELL := $(BASH_BIN)
 AUDL_PYTHON_BIN ?= python3
 ENV_AUDL_BIN_PATH := $(shell if [ -f .env ]; then set -a; . ./.env >/dev/null 2>&1; printf '%s' "$${AUDL_BIN_PATH:-}"; fi)
 PREFIX ?= $(if $(AUDL_BIN_PATH),$(AUDL_BIN_PATH),$(if $(ENV_AUDL_BIN_PATH),$(ENV_AUDL_BIN_PATH),$(HOME)/.local/bin))
-# Installable scripts: all bin/*.sh scripts (includes audlint-analyze.sh, audlint-value.sh, audlint-spectre.sh).
-INSTALLABLE_SCRIPTS := $(sort $(notdir $(wildcard bin/*.sh)))
+# Installable product scripts. The source audit is developer-only.
+INSTALLABLE_SCRIPTS := $(filter-out audlint-source-audit.sh,$(sort $(notdir $(wildcard bin/*.sh))))
 INSTALLABLE_ALIASES := \
 	auz:audlint-analyze.sh \
 	auv:audlint-value.sh \
@@ -18,7 +18,7 @@ SHFMT_TARGETS ?= test/sh
 SHFMT_EXTRA ?= install.sh
 SHELLCHECK_OPTS ?= -e SC2004,SC2015,SC2029,SC2034,SC2162,SC2178,SC2181,SC2221,SC2222,SC2235
 
-.PHONY: help install uninstall relink install-env lint fmt-check bash5-check test test-core test-spectre test-legacy check db-reset
+.PHONY: help install uninstall relink install-env lint fmt-check bash5-check test test-core test-spectre test-legacy source-audit check db-reset
 
 help:
 	@printf "%s\n" \
@@ -34,7 +34,8 @@ help:
 		"  test-spectre Run spectre.sh smoke tests" \
 		"  test-legacy  Run migrated legacy test suite in test/legacy" \
 		"  test         Run test-core + test-legacy" \
-		"  check        Run lint + fmt-check + bash5-check + test" \
+		"  source-audit Audit commit candidates for prohibited content" \
+		"  check        Run lint + fmt-check + bash5-check + test + source-audit" \
 		"  db-reset     Truncate album_quality + scan_roadmap (requires AUDL_DB_PATH env var)"
 
 install:
@@ -87,7 +88,17 @@ test-legacy:
 
 test: test-core test-legacy
 
-check: lint fmt-check bash5-check test
+source-audit:
+	@bin/audlint-source-audit.sh
+
+# The recipe, rather than parallel prerequisites, keeps the authoritative audit
+# strictly after the unchanged test target even under `make -j`.
+check:
+	@$(MAKE) lint
+	@$(MAKE) fmt-check
+	@$(MAKE) bash5-check
+	@$(MAKE) test
+	@$(MAKE) source-audit
 
 db-reset:
 	@test -n "$(AUDL_DB_PATH)" || { echo "Error: AUDL_DB_PATH env var is required. Run: AUDL_DB_PATH=/path/to/library.sqlite make db-reset"; exit 1; }

@@ -157,6 +157,18 @@ sudo make install PREFIX="/usr/local/bin"
 make test
 ```
 
+For a release-candidate source-control audit, stage
+`.audlint-source-audit-policy.json` and run:
+
+```bash
+bin/audlint-source-audit.sh
+make source-audit
+```
+
+`--prospective` checks only the staged index while preparing a repair; it is not
+the release gate. `make check` runs the normal tests before the authoritative
+audit. The developer-only audit command is intentionally not installed.
+
 4. Launch browser:
 
 ```bash

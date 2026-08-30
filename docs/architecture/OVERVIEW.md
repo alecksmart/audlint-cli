@@ -114,6 +114,7 @@ Dependencies are command-scoped; each command performs its own checks, and `audl
 ## Build, installation, and verification
 
 - There is no compiled build artifact. `make install` symlinks `bin/*.sh` commands and aliases into `PREFIX`; `install.sh` generates `.env` only.
-- `make check` is the local release gate: ShellCheck, formatting check, Bash 5 consistency, core tests, and legacy tests.
+- `bin/audlint-source-audit.sh` is a developer-only, fail-closed Git safety gate. Its staged policy is the runtime authority; it is not installed as a product command.
+- `make check` is the local release gate: ShellCheck, formatting check, Bash 5 consistency, core tests, legacy tests, then the authoritative source audit. `make test` remains only the core and legacy suites.
 - `make test` runs `unittest` discovery for the core and legacy test suites. Use the closest `python3 -m unittest` module or named test while iterating; reserve the complete suite for the final gate.
 - `test/distro/*_check.sh` provides targeted distribution checks. No CI workflow is tracked; the local Makefile gate remains authoritative.

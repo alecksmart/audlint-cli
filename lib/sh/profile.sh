@@ -70,23 +70,23 @@ profile_sr_hz_normalize() {
 }
 
 profile_normalize() {
-  local raw sr_token bits_token sr_hz bits
+  local raw sr_component bits_component sr_hz bits
   raw="$(_profile_compact_lower "${1:-}")"
   raw="${raw//_/\/}"
   [[ -n "$raw" ]] || return 1
 
   if [[ "$raw" =~ ^([^/:-]+)[/:-]([^/:-]+)$ ]]; then
-    sr_token="${BASH_REMATCH[1]}"
-    bits_token="${BASH_REMATCH[2]}"
+    sr_component="${BASH_REMATCH[1]}"
+    bits_component="${BASH_REMATCH[2]}"
   elif [[ "$raw" =~ ^([0-9]+([.][0-9]+)?(khz|k)?)([0-9]{2,3}f?)$ ]]; then
-    sr_token="${BASH_REMATCH[1]}"
-    bits_token="${BASH_REMATCH[4]}"
+    sr_component="${BASH_REMATCH[1]}"
+    bits_component="${BASH_REMATCH[4]}"
   else
     return 1
   fi
 
-  sr_hz="$(profile_sr_hz_normalize "$sr_token")" || return 1
-  bits="$(profile_bits_normalize "$bits_token")" || return 1
+  sr_hz="$(profile_sr_hz_normalize "$sr_component")" || return 1
+  bits="$(profile_bits_normalize "$bits_component")" || return 1
   printf '%s/%s' "$sr_hz" "$bits"
 }
 

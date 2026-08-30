@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "rule": "SC-ART-001",
+      "path": "docs/audlint-main-window.png",
+      "fingerprint": "sha256:b76f8d6cbb1cf0ac97c8fb15d8a6816954b033584eb71986bc4e0788813710d1",
+      "reason_code": "repository-asset",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": ".agents/skills/bmad-architecture/scripts/lint_spine.py",
+      "fingerprint": "sha256:0601887b95c65488e62ec6f05c14c4d1ae4e693b437211dc7c99513477e85ad7",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": ".agents/skills/bmad-retrospective/scripts/tests/test_git_evidence.py",
+      "fingerprint": "sha256:18e9496888795438a84eb685105fb7154f1bf2bffafbecb5d4781b6d8470fc61",
+      "reason_code": "synthetic-test-source",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": ".agents/skills/bmad-retrospective/scripts/tests/test_git_evidence.py",
+      "fingerprint": "sha256:d20213836027adee64fe2762fd02f577a96ae7d793da14302964bc1a49d141ec",
+      "reason_code": "synthetic-test-source",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": ".claude/skills/bmad-architecture/scripts/lint_spine.py",
+      "fingerprint": "sha256:ff39d4d856365b96446d4f648b6c835f2332e226b0407f5dc73f61b807bb577a",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": ".claude/skills/bmad-retrospective/scripts/tests/test_git_evidence.py",
+      "fingerprint": "sha256:f8d51136f64f079f93783ee209a491789029aee1041f0ea84010f69eb23b3d7b",
+      "reason_code": "synthetic-test-source",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": ".claude/skills/bmad-retrospective/scripts/tests/test_git_evidence.py",
+      "fingerprint": "sha256:c0401d874eb46c96ea2f9fab3eb99d73a8d4cc214c187e53d3d6dd0a19a33f5f",
+      "reason_code": "synthetic-test-source",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "_bmad/scripts/render_skill.py",
+      "fingerprint": "sha256:1498799da96336868b33eead83ce4c14c3696a5c3559f754d14f9adf2f136e52",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "_bmad/scripts/render_skill.py",
+      "fingerprint": "sha256:a49c85a390e253c64767c0ee0f7a0888909502546dca99108db2b41d844480ee",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-product-roadmap/.memlog.md",
+      "fingerprint": "sha256:df4bb5c625816b30183c7d7874e9836101d95cd7c40dff225bafada3ad61bd72",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-r10-source-control-safety-gate/.memlog.md",
+      "fingerprint": "sha256:6affb8730153f41f282a9425ddf1eb303a08936caa86e3090a294476f6dbce11",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-r3-1-corpus-manifest-safe-inventory/.memlog.md",
+      "fingerprint": "sha256:56642db8e6b3f1345b4514e0d2cfacd63e8275ea624714b79fa2062a4516cfa5",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-r3-1a-corpus-manifest-bootstrap-human-review/.memlog.md",
+      "fingerprint": "sha256:efed3f9f5ae58aea47bff8609179eaa2842b24b1f25d02841c4d4bb3a8266f01",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-r3-1a-corpus-manifest-bootstrap-human-review/.memlog.md",
+      "fingerprint": "sha256:3f6d790bbeafeef9f70f2afab3f6cfc2f4e311c604908d53d5fa6d436e47a692",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-r3-2-immutable-staging-accuracy-verdict/.memlog.md",
+      "fingerprint": "sha256:290c5da8dff41f32b7abad1a5881fd4cf152ade0a714a58aae4c95245c9f1616",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-r3-4-cold-warm-serial-benchmark-execution/.memlog.md",
+      "fingerprint": "sha256:007f24219a9d452048a15765054a1a9b17caf444b0529f2e013dad9aa3d8c336",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "_bmad-output/specs/spec-r3-analyzer-corpus-benchmark-baseline/.memlog.md",
+      "fingerprint": "sha256:1de713d05c14c48ebbcd32a310a04febf6776c279317c9a7e6853b40011c3ba2",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "bin/audlint-maintain.sh",
+      "fingerprint": "sha256:f1eaebff5e74585677bdac726bde89f95a86b90c53696a239b7492e5c09d5160",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "install.sh",
+      "fingerprint": "sha256:f30bad0c11cdbca6e2c0a72c3a590ff5069d31f4ce7b91e1d579ba34fcff4786",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/py/genre_lookup.py",
+      "fingerprint": "sha256:647fb17dcd2d0602254cac92d33c2fd5c3036815e204911bc129921bbe1559e8",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/py/genre_lookup.py",
+      "fingerprint": "sha256:31c9c35c2f6f539c70aee73aa5e17448fe7c9c95b9b1596292e0c32e050353dd",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/py/profile_norm.py",
+      "fingerprint": "sha256:c351de4ca44ba8451dcddfadebc8ac1caf431b9fa2a26f40c9323c5d716c9cba",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/py/profile_norm.py",
+      "fingerprint": "sha256:0437dc463d8f653c8184dffc78a063fec80754c559a56d6e603d086ea7015134",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/py/profile_norm.py",
+      "fingerprint": "sha256:114f4a4c63ddc558acfb44861d34e0da42cfd7d9a761a4165097d6f7c544c8f0",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/sh/codec_caps.sh",
+      "fingerprint": "sha256:eb6993db453b4e42886afe9236393947e4e7c9c0ec06f70de584e3195f920703",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/sh/profile.sh",
+      "fingerprint": "sha256:dc8230f1cd34c8c6f28128b898c7356505fec9b44e4cd60207b2c64c0acb11b9",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/sh/profile.sh",
+      "fingerprint": "sha256:9615e7eaac75568c0f23d958f1f5a868a63e021b98cd2de97936fb6ad7e955c0",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/sh/profile.sh",
+      "fingerprint": "sha256:c08bd0fbae31177b8059669b28f5493348213635b3c96c4bf9f656d83cde001b",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-CRED-002",
+      "path": "lib/sh/profile.sh",
+      "fingerprint": "sha256:7c13257d5787ad2ab2503fa40f0d935104bcee184d05ce9d95b4280e24b19f43",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "bin/audlint-maintain.sh",
+      "fingerprint": "sha256:b04232f1479ffb863cbec79620990b4989f1b0650af3c034a00c35832e2c74c3",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "bin/audlint-maintain.sh",
+      "fingerprint": "sha256:ffab87958797b2fecd84cbd64e3ec2e99c886f431adaf254bdc03853442612ca",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "bin/audlint-value.sh",
+      "fingerprint": "sha256:62a6544c0094b7bd120db6e4386e424bcc653d744762d15c545257a46c1c76f0",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "lib/py/audlint_analyze_corpus.py",
+      "fingerprint": "sha256:f53ce35b9c035ff8de14af5af01792a1cb6764f12864de772ac12ef14c8fc66a",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    },
+    {
+      "rule": "SC-PATH-004",
+      "path": "lib/py/audlint_source_audit.py",
+      "fingerprint": "sha256:2d828dff0963eeb64cdc50ea486f0fcb493ece99163a085e7a279d3165367d74",
+      "reason_code": "reviewed-false-positive",
+      "review_ref": "R10-ADOPTION-20260830"
+    }
+  ]
+}

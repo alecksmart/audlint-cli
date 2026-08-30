@@ -36,7 +36,10 @@ Use the smallest process and implementation that safely satisfies the requested 
 ## Verification
 
 - Reduced process must not mean reduced correctness.
-- Add focused tests for behavior being changed.
+- Implement the minimum focused automated test set that convincingly proves the changed behavior.
+- Combine related acceptance cases where practical.
+- Avoid exhaustive permutation matrices and duplicated coverage already provided by existing tests.
+- Give extra test coverage to destructive, safety-critical, and regression-prone behavior.
 - Run targeted verification during implementation.
 - Run the project's full required verification once near completion unless an intermediate full run is specifically justified.
 - Avoid repeatedly running expensive whole-project verification after trivial edits.

@@ -141,16 +141,20 @@ player_content_term_cols() {
 }
 
 player_content_read_key() {
-  local out_var="$1"
-  player_content_read_key_timed "$out_var" "" || printf -v "$out_var" '%s' "q"
+  local out_var="$1" read_key="" rest=""
+  tty_read_key read_key 1 || read_key="q"
+  if [[ "$read_key" == $'\e' ]]; then
+    tty_read_key rest 1 || true
+    if [[ "$rest" == "[" || "$rest" == "O" ]]; then
+      tty_read_key rest 1 || true
+      case "$rest" in A) read_key="up";; B) read_key="down";; esac
+    fi
+  fi
+  printf -v "$out_var" '%s' "$read_key"
 }
 
 player_content_read_key_poll() {
-  player_content_read_key_timed "$1" "${2:-0.1}" || true
-}
-
-player_content_read_key_timed() {
-  local out_var="$1" timeout_sec="${2:-}" read_key="" rest="" tty_fd="" tty_state="" read_rc=1
+  local out_var="$1" timeout_sec="${2:-0.1}" read_key="" rest="" tty_fd="" tty_state=""
   if ! tty_open_input_fd tty_fd; then
     printf -v "$out_var" '%s' ""
     return 1
@@ -158,25 +162,17 @@ player_content_read_key_timed() {
   tty_state="$(stty -g 0<&"$tty_fd" 2>/dev/null || true)"
   [[ -n "$tty_state" ]] || { tty_close_input_fd "$tty_fd"; printf -v "$out_var" '%s' ""; return 1; }
   stty -echo -icanon min 1 time 0 0<&"$tty_fd" 2>/dev/null || true
-  if [[ -n "$timeout_sec" ]]; then
-    IFS= read -r -t "$timeout_sec" -n 1 -u "$tty_fd" read_key 2>/dev/null && read_rc=0
-  else
-    IFS= read -r -n 1 -u "$tty_fd" read_key 2>/dev/null && read_rc=0
-  fi
+  IFS= read -r -t "$timeout_sec" -n 1 -u "$tty_fd" read_key 2>/dev/null || true
   if [[ "$read_key" == $'\e' ]]; then
-    read_key=""
     IFS= read -r -t 0.05 -n 1 -u "$tty_fd" rest 2>/dev/null || true
     if [[ "$rest" == "[" || "$rest" == "O" ]]; then
       IFS= read -r -t 0.05 -n 1 -u "$tty_fd" rest 2>/dev/null || true
       case "$rest" in A) read_key="up";; B) read_key="down";; esac
-    elif [[ "$rest" =~ ^[A-Za-z]$ ]]; then
-      read_key="jump:${rest,,}"
     fi
   fi
   stty "$tty_state" 0<&"$tty_fd" 2>/dev/null || true
   tty_close_input_fd "$tty_fd"
   printf -v "$out_var" '%s' "$read_key"
-  return "$read_rc"
 }
 
 player_content_size_at() {
@@ -282,44 +278,34 @@ player_content_sync() {
 player_content_creator() {
   player_content_db_available || pause_with_result "Player Content Creator unavailable: database is missing, unreadable, or read-only."
   player_content_selection_cleanup_stale "$AUDL_DB_PATH" || pause_with_result "Player Content Creator unavailable: cannot update database."
-  local -a artist_lcs=() artist_norms=() album_lcs=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
-  local row artist_lc artist_norm album_lc year_int artist album source_path is_checked total=0 selected=0 cursor=0 offset=0 key idx previous_artist="" sizing_pending=0 sizing_cursor=0 redraw_needed=1 sized_since_redraw=0
-  while IFS=$'\x1f' read -r artist_lc artist_norm album_lc year_int artist album source_path is_checked; do
+  local -a artist_lcs=() album_lcs=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
+  local row artist_lc album_lc year_int artist album source_path is_checked total=0 selected=0 cursor=0 offset=0 key idx previous_artist="" sizing_pending=0 sizing_cursor=0
+  while IFS=$'\x1f' read -r artist_lc album_lc year_int artist album source_path is_checked; do
     [[ -n "$artist_lc$album_lc$year_int" ]] || continue
-    artist_lcs+=("$artist_lc"); artist_norms+=("$artist_norm"); album_lcs+=("$album_lc"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
+    artist_lcs+=("$artist_lc"); album_lcs+=("$album_lc"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
     if [[ -d "$source_path" && -r "$source_path" ]]; then sizes+=(-1); available+=(1); sizing_pending=$((sizing_pending + 1)); else sizes+=(0); available+=(0); fi
     [[ "$is_checked" == 1 ]] && selected=$((selected + 1))
-  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.artist_norm,aq.album_lc,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
+  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.album_lc,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
   while true; do
     local lines cols height view_start view_end render_row="" status
-    if ((redraw_needed)); then
-      lines="$(player_content_term_lines)"; [[ "$lines" =~ ^[0-9]+$ ]] || lines=24; cols="$(player_content_term_cols)"; [[ "$cols" =~ ^[0-9]+$ ]] || cols=100; height=$((lines - 8)); ((height < 3)) && height=3
-      ((cursor < offset)) && offset="$cursor"; ((cursor >= offset + height)) && offset=$((cursor - height + 1))
-      if [[ "${VIRTWIN_TITLE_ROW:-}" =~ ^[0-9]+$ ]]; then
-        printf '\033[%s;1H\033[J' "$((VIRTWIN_TITLE_ROW + 3))"
-      else
-        printf '\033[H\033[J'
+    lines="$(player_content_term_lines)"; [[ "$lines" =~ ^[0-9]+$ ]] || lines=24; cols="$(player_content_term_cols)"; [[ "$cols" =~ ^[0-9]+$ ]] || cols=100; height=$((lines - 8)); ((height < 3)) && height=3
+    ((cursor < offset)) && offset="$cursor"; ((cursor >= offset + height)) && offset=$((cursor - height + 1))
+    printf '\033[2J\033[H%s\n%s\n' "$(paint "$C_TITLE" "Player Content Creator")" "$(paint "$C_TITLE" "----------------------")"
+    status="$(player_content_status_title "$selected" "$total" "$sizing_pending" "${#artists[@]}")"; virtwin_set_right_hint "$status"; printf '%s\n\n' "$status"
+    view_start="$offset"; view_end=$((offset + height - 1)); ((view_end >= ${#artists[@]})) && view_end=$((${#artists[@]} - 1)); previous_artist=""
+    ((view_start > 0)) && previous_artist="${artists[$((view_start - 1))]:-}"
+    for ((idx=view_start; idx<=view_end; idx++)); do
+      if [[ "${artists[$idx]}" != "$previous_artist" ]]; then
+        previous_artist="${artists[$idx]}"; printf '%s\n' "$(paint "$C_LABEL" "$previous_artist")"
       fi
-      printf '%s\n%s\n' "$(paint "$C_TITLE" "Player Content Creator")" "$(paint "$C_TITLE" "----------------------")"
-      status="$(player_content_status_title "$selected" "$total" "$sizing_pending" "${#artists[@]}")"; virtwin_set_right_hint "$status"; printf '%s\n\n' "$status"
-      view_start="$offset"; view_end=$((offset + height - 1)); ((view_end >= ${#artists[@]})) && view_end=$((${#artists[@]} - 1)); previous_artist=""
-      ((view_start > 0)) && previous_artist="${artists[$((view_start - 1))]:-}"
-      for ((idx=view_start; idx<=view_end; idx++)); do
-        if [[ "${artists[$idx]}" != "$previous_artist" ]]; then
-          previous_artist="${artists[$idx]}"; printf '%s\n' "$(paint "$C_LABEL" "$previous_artist")"
-        fi
-        render_row="  [${checked[$idx]/0/ }] ${years[$idx]} - ${albums[$idx]}"; [[ "${checked[$idx]}" == 1 ]] && render_row="  [x] ${years[$idx]} - ${albums[$idx]}"; [[ "${available[$idx]}" == 1 ]] || render_row+=" $(paint "$C_SELECT" "[unavailable]")"; [[ "$idx" == "$cursor" ]] && render_row="$(paint "$C_ACTION" ">")${render_row:1}"; printf '%s\n' "$render_row"
-      done
-      local position=0; ((${#artists[@]} > 0)) && position=$((cursor + 1))
-      printf '\nUp/Down move | Space toggle | Esc+letter jump artists | w synchronize | q quit | %s of %s\n' "$position" "${#artists[@]}"
-      redraw_needed=0
-    fi
+      render_row="  [${checked[$idx]/0/ }] ${years[$idx]} - ${albums[$idx]}"; [[ "${checked[$idx]}" == 1 ]] && render_row="  [x] ${years[$idx]} - ${albums[$idx]}"; [[ "${available[$idx]}" == 1 ]] || render_row+=" $(paint "$C_SELECT" "[unavailable]")"; [[ "$idx" == "$cursor" ]] && render_row="$(paint "$C_ACTION" ">")${render_row:1}"; printf '%s\n' "$render_row"
+    done
+    local position=0; ((${#artists[@]} > 0)) && position=$((cursor + 1))
+    printf '\nUp/Down move | Space toggle | w synchronize | q quit | %s of %s\n' "$position" "${#artists[@]}"
     if ((sizing_pending > 0)); then
       player_content_read_key_poll key 0.1
       if [[ -z "$key" ]]; then
         player_content_size_batch 1
-        sized_since_redraw=$((sized_since_redraw + 1))
-        if ((sized_since_redraw >= 4 || sizing_pending == 0)); then redraw_needed=1; sized_since_redraw=0; fi
         continue
       fi
     else
@@ -328,21 +314,10 @@ player_content_creator() {
     case "$key" in
       up) ((cursor > 0)) && cursor=$((cursor - 1));;
       down) ((cursor + 1 < ${#artists[@]})) && cursor=$((cursor + 1));;
-      jump:*)
-        local jump_letter="${key#jump:}" jump_step=0 jump_index=0
-        for ((jump_step=1; jump_step<=${#artists[@]}; jump_step++)); do
-          jump_index=$(((cursor + jump_step) % ${#artists[@]}))
-          if [[ "${artist_norms[$jump_index]:0:1}" == "$jump_letter" ]] && { ((jump_index == 0)) || [[ "${artist_lcs[$jump_index]}" != "${artist_lcs[$((jump_index - 1))]}" ]]; }; then
-            cursor="$jump_index"
-            break
-          fi
-        done
-        ;;
       ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; [[ "${sizes[cursor]:-0}" == "-1" ]] || total=$((total - sizes[cursor])); selected=$((selected - 1)); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_size_at "$cursor"; [[ "${available[$cursor]}" == 1 ]] && player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
       w) player_content_sync "$selected" "$total" || true; printf '[any key Continue] > '; tty_read_key key 1 || true;;
       q) return 0;;
     esac
-    redraw_needed=1
   done
 }
 

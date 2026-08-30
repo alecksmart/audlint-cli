@@ -1,0 +1,4 @@
+[workflow]
+persistent_facts = [
+  "file:{project-root}/docs/ai/bmad-lite.md",
+]

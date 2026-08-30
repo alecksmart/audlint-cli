@@ -122,8 +122,13 @@ player_content_db_available() {
 }
 
 player_content_status_title() {
-  local selected="$1" total="$2" card="not mounted"
+  local selected="$1" total="$2" sizing_pending="${3:-0}" sizing_total="${4:-0}" card="not mounted" sized=0
   [[ -n "$MEDIA_PLAYER_PATH" && -d "$MEDIA_PLAYER_PATH" ]] && card="mounted"
+  if [[ "$sizing_pending" =~ ^[0-9]+$ && "$sizing_total" =~ ^[0-9]+$ ]] && ((sizing_pending > 0)); then
+    sized=$((sizing_total - sizing_pending))
+    printf 'SD: %s | Selected: %s | Total: sizing… (%s/%s albums)' "$card" "$selected" "$sized" "$sizing_total"
+    return 0
+  fi
   printf 'SD: %s | Selected: %s | Total: %s' "$card" "$selected" "$(player_human_size_label "$total")"
 }
 
@@ -146,6 +151,54 @@ player_content_read_key() {
     fi
   fi
   printf -v "$out_var" '%s' "$read_key"
+}
+
+player_content_read_key_poll() {
+  local out_var="$1" timeout_sec="${2:-0.1}" read_key="" rest="" tty_fd="" tty_state=""
+  if ! tty_open_input_fd tty_fd; then
+    printf -v "$out_var" '%s' ""
+    return 1
+  fi
+  tty_state="$(stty -g 0<&"$tty_fd" 2>/dev/null || true)"
+  [[ -n "$tty_state" ]] || { tty_close_input_fd "$tty_fd"; printf -v "$out_var" '%s' ""; return 1; }
+  stty -echo -icanon min 1 time 0 0<&"$tty_fd" 2>/dev/null || true
+  IFS= read -r -t "$timeout_sec" -n 1 -u "$tty_fd" read_key 2>/dev/null || true
+  if [[ "$read_key" == $'\e' ]]; then
+    IFS= read -r -t 0.05 -n 1 -u "$tty_fd" rest 2>/dev/null || true
+    if [[ "$rest" == "[" || "$rest" == "O" ]]; then
+      IFS= read -r -t 0.05 -n 1 -u "$tty_fd" rest 2>/dev/null || true
+      case "$rest" in A) read_key="up";; B) read_key="down";; esac
+    fi
+  fi
+  stty "$tty_state" 0<&"$tty_fd" 2>/dev/null || true
+  tty_close_input_fd "$tty_fd"
+  printf -v "$out_var" '%s' "$read_key"
+}
+
+player_content_size_at() {
+  local index="$1" bytes=""
+  [[ "${sizes[$index]:--1}" == "-1" ]] || return 0
+  if bytes="$(player_payload_size_bytes_for_dir "${sources[$index]}" 2>/dev/null)" && [[ "$bytes" =~ ^[0-9]+$ ]]; then
+    sizes[$index]="$bytes"
+  else
+    sizes[$index]=0
+    available[$index]=0
+  fi
+  sizing_pending=$((sizing_pending - 1))
+  [[ "${checked[$index]}" == 1 ]] && total=$((total + sizes[index]))
+  return 0
+}
+
+player_content_size_batch() {
+  local batch_size="${1:-4}" index
+  while ((batch_size > 0 && sizing_cursor < ${#artists[@]})); do
+    index="$sizing_cursor"
+    sizing_cursor=$((sizing_cursor + 1))
+    [[ "${sizes[$index]}" == "-1" ]] || continue
+    player_content_size_at "$index"
+    batch_size=$((batch_size - 1))
+  done
+  return 0
 }
 
 player_content_filter_escape() {
@@ -226,19 +279,19 @@ player_content_creator() {
   player_content_db_available || pause_with_result "Player Content Creator unavailable: database is missing, unreadable, or read-only."
   player_content_selection_cleanup_stale "$AUDL_DB_PATH" || pause_with_result "Player Content Creator unavailable: cannot update database."
   local -a artist_lcs=() album_lcs=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
-  local row artist_lc album_lc year_int artist album source_path is_checked bytes total=0 selected=0 cursor=0 offset=0 key idx previous_artist=""
+  local row artist_lc album_lc year_int artist album source_path is_checked total=0 selected=0 cursor=0 offset=0 key idx previous_artist="" sizing_pending=0 sizing_cursor=0
   while IFS=$'\x1f' read -r artist_lc album_lc year_int artist album source_path is_checked; do
     [[ -n "$artist_lc$album_lc$year_int" ]] || continue
     artist_lcs+=("$artist_lc"); album_lcs+=("$album_lc"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
-    if [[ -d "$source_path" && -r "$source_path" ]]; then bytes="$(player_payload_size_bytes_for_dir "$source_path" 2>/dev/null || true)"; [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0; available+=(1); else bytes=0; available+=(0); fi
-    sizes+=("$bytes"); if [[ "$is_checked" == 1 ]]; then selected=$((selected + 1)); total=$((total + bytes)); fi
+    if [[ -d "$source_path" && -r "$source_path" ]]; then sizes+=(-1); available+=(1); sizing_pending=$((sizing_pending + 1)); else sizes+=(0); available+=(0); fi
+    [[ "$is_checked" == 1 ]] && selected=$((selected + 1))
   done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.album_lc,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
   while true; do
     local lines cols height view_start view_end render_row="" status
     lines="$(player_content_term_lines)"; [[ "$lines" =~ ^[0-9]+$ ]] || lines=24; cols="$(player_content_term_cols)"; [[ "$cols" =~ ^[0-9]+$ ]] || cols=100; height=$((lines - 8)); ((height < 3)) && height=3
     ((cursor < offset)) && offset="$cursor"; ((cursor >= offset + height)) && offset=$((cursor - height + 1))
     printf '\033[2J\033[H%s\n%s\n' "$(paint "$C_TITLE" "Player Content Creator")" "$(paint "$C_TITLE" "----------------------")"
-    status="$(player_content_status_title "$selected" "$total")"; virtwin_set_right_hint "$status"; printf '%s\n\n' "$status"
+    status="$(player_content_status_title "$selected" "$total" "$sizing_pending" "${#artists[@]}")"; virtwin_set_right_hint "$status"; printf '%s\n\n' "$status"
     view_start="$offset"; view_end=$((offset + height - 1)); ((view_end >= ${#artists[@]})) && view_end=$((${#artists[@]} - 1)); previous_artist=""
     ((view_start > 0)) && previous_artist="${artists[$((view_start - 1))]:-}"
     for ((idx=view_start; idx<=view_end; idx++)); do
@@ -249,11 +302,19 @@ player_content_creator() {
     done
     local position=0; ((${#artists[@]} > 0)) && position=$((cursor + 1))
     printf '\nUp/Down move | Space toggle | w synchronize | q quit | %s of %s\n' "$position" "${#artists[@]}"
-    player_content_read_key key
+    if ((sizing_pending > 0)); then
+      player_content_read_key_poll key 0.1
+      if [[ -z "$key" ]]; then
+        player_content_size_batch 1
+        continue
+      fi
+    else
+      player_content_read_key key
+    fi
     case "$key" in
       up) ((cursor > 0)) && cursor=$((cursor - 1));;
       down) ((cursor + 1 < ${#artists[@]})) && cursor=$((cursor + 1));;
-      ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; selected=$((selected - 1)); total=$((total - sizes[cursor])); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
+      ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; [[ "${sizes[cursor]:-0}" == "-1" ]] || total=$((total - sizes[cursor])); selected=$((selected - 1)); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_size_at "$cursor"; [[ "${available[$cursor]}" == 1 ]] && player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
       w) player_content_sync "$selected" "$total" || true; printf '[any key Continue] > '; tty_read_key key 1 || true;;
       q) return 0;;
     esac

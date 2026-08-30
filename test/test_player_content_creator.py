@@ -61,7 +61,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
             con.close()
         return folder
 
-    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8) -> tuple[int, str]:
+    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None) -> tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "TERM": "xterm", "NO_COLOR": "1", "AUDLINT_LIBRARY_ROOT": str(self.library),
@@ -77,11 +77,15 @@ class PlayerContentCreatorTests(unittest.TestCase):
         master, slave = pty.openpty()
         proc = subprocess.Popen([str(MAINTAIN)], cwd=REPO_ROOT, env=env, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
         os.close(slave)
+        pending = list(followups or ([] if followup is None else [followup]))
         output = bytearray(); sent = False; deadline = time.monotonic() + timeout_s
         try:
             while time.monotonic() < deadline:
                 if not sent and b"choice >" in output:
                     os.write(master, keys); sent = True
+                if sent and pending and pending[0][0] in output:
+                    _, followup_keys = pending.pop(0)
+                    os.write(master, followup_keys)
                 ready, _, _ = select.select([master], [], [], .1)
                 if ready:
                     try: chunk = os.read(master, 8192)
@@ -99,7 +103,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
     def test_schema_creation_and_selection_persist_through_selector(self) -> None:
         self._add_album(1, "Artist", "Album", 2001, b"x" * 20)
         # c opens creator, Space checks its first album, q returns to menu, q exits.
-        rc, output = self._pty(b"c q q")
+        rc, output = self._pty(b"c", followup=(b"1 of 1", b" q q"))
         self.assertEqual(rc, 0, output)
         self.assertIn("Player Content Creator", output)
         con = sqlite3.connect(self.db)
@@ -119,6 +123,21 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(first.stdout, "1")
         self.assertEqual(second.stdout, "0")
+
+    def test_deselecting_unsized_persisted_album_keeps_zero_total(self) -> None:
+        self._add_album(1, "Artist", "Album", 2001, b"x" * 20)
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT INTO player_content_selection VALUES('artist','album',2001)")
+        con.commit(); con.close()
+        rc, output = self._pty(
+            b"c",
+            followups=[
+                (b"1 of 1", b" "),
+                (b"Selected: 0 | Total: 0b", b"qq"),
+            ],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("Selected: 0 | Total: 0b", output)
 
     def test_cancelled_and_accepted_manifest_mirror(self) -> None:
         source = self._add_album(1, "Artist", "Selected", 2001, b"selected")
@@ -206,9 +225,9 @@ class PlayerContentCreatorTests(unittest.TestCase):
     def test_status_and_live_total_work_without_a_player(self) -> None:
         self._add_album(1, "Artist", "Album", 2001, b"x" * 10)
         # The initial title is unselected/zero; Space immediately updates it.
-        rc, output = self._pty(b"c q q", {"AUDL_MEDIA_PLAYER_PATH": ""})
+        rc, output = self._pty(b"c", {"AUDL_MEDIA_PLAYER_PATH": ""}, followup=(b"1 of 1", b" q q"))
         self.assertEqual(rc, 0, output)
-        self.assertIn("SD: not mounted | Selected: 0 | Total: 0b", output)
+        self.assertIn("Total: sizing… (0/1 albums)", output)
         self.assertIn("SD: not mounted | Selected: 1 | Total: 15b", output)
         missing = self.root / "missing-player"
         rc, output = self._pty(b"cqq", {"AUDL_MEDIA_PLAYER_PATH": str(missing)})

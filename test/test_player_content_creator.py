@@ -1,15 +1,20 @@
 import errno
+import fcntl
 import os
 import pty
 import select
 import shutil
 import sqlite3
 import stat
+import struct
 import subprocess
 import tempfile
+import termios
 import time
 import unittest
 from pathlib import Path
+
+from test import test_ui_regression
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -61,7 +66,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
             con.close()
         return folder
 
-    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None) -> tuple[int, str]:
+    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None) -> tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "TERM": "xterm", "NO_COLOR": "1", "AUDLINT_LIBRARY_ROOT": str(self.library),
@@ -75,17 +80,23 @@ class PlayerContentCreatorTests(unittest.TestCase):
                 else:
                     env[name] = value
         master, slave = pty.openpty()
+        if rows is not None and columns is not None:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
         proc = subprocess.Popen([str(MAINTAIN)], cwd=REPO_ROOT, env=env, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
         os.close(slave)
         pending = list(followups or ([] if followup is None else [followup]))
-        output = bytearray(); sent = False; deadline = time.monotonic() + timeout_s
+        delayed = list(delayed_keys or [])
+        output = bytearray(); sent = False; sent_at = 0.0; deadline = time.monotonic() + timeout_s
         try:
             while time.monotonic() < deadline:
                 if not sent and b"choice >" in output:
-                    os.write(master, keys); sent = True
+                    os.write(master, keys); sent = True; sent_at = time.monotonic()
                 if sent and pending and pending[0][0] in output:
                     _, followup_keys = pending.pop(0)
                     os.write(master, followup_keys)
+                while sent and delayed and time.monotonic() - sent_at >= delayed[0][0]:
+                    _, delayed_bytes = delayed.pop(0)
+                    os.write(master, delayed_bytes)
                 ready, _, _ = select.select([master], [], [], .1)
                 if ready:
                     try: chunk = os.read(master, 8192)
@@ -329,3 +340,82 @@ class PlayerContentCreatorTests(unittest.TestCase):
         rc, output = self._pty(b"c\x1b[B\x1b[B\x1b[Bqq")
         self.assertEqual(rc, 0, output)
         self.assertIn("3 of 3", output)
+
+    def test_selector_sizes_without_repainting_its_fixed_rows(self) -> None:
+        for ident in range(3):
+            self._add_album(ident + 1, f"Artist {ident}", f"Album {ident}", 2000 + ident)
+        rc, output = self._pty(b"c", followup=(b"sizing\xe2\x80\xa6 (2/3 albums)", b"qq"), rows=16, columns=100)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("sizing… (0/3 albums)", output)
+        self.assertIn("sizing… (2/3 albums)", output)
+        self.assertNotIn("\x1b[J", output)
+        self.assertNotIn("\x1b[2J", output)
+        self.assertEqual(output.count("Artist 0"), 1, output)
+        selector_source = MAINTAIN.read_text(encoding="utf-8").split("player_content_creator() {", 1)[1].split("\nread_crontab_raw()", 1)[0]
+        for forbidden in (r"\033[H", r"\033[J", r"\033[2J"):
+            self.assertNotIn(forbidden, selector_source)
+
+    def test_selector_keeps_one_visible_marker_across_physical_row_boundaries(self) -> None:
+        for ident in range(5):
+            self._add_album(ident + 1, f"Artist {ident}", f"Album {ident}", 2000 + ident)
+        rc, output = self._pty(b"c" + (b"\x1b[B" * 4) + b"\x1b[Aqq", rows=12, columns=100)
+        self.assertEqual(rc, 0, output)
+        selector_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
+        screen = test_ui_regression.UiRegressionTests._render_terminal(selector_output, columns=100, rows=12)
+        visible = "\n".join(screen)
+        self.assertEqual(visible.count("> ["), 1, visible)
+        self.assertIn("Artist 3", visible)
+        self.assertIn("Album 3", visible)
+        self.assertLess(output.index("\x1b[?25l"), output.index("\x1b[?25h"))
+
+    def test_selector_long_labels_are_sanitized_and_cannot_wrap_the_footer(self) -> None:
+        self._add_album(1, "Seed", "Seed", 2000)
+        artist = "Artist\r\n\x1b[31m with a very long display label"
+        album = "Album\n\x1b[2J with a very long display label"
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "UPDATE album_quality SET artist=?,artist_lc=?,artist_norm=?,album=?,album_lc=?,album_norm=?",
+            (artist, "seed", "seed", album, "seed", "seed"),
+        )
+        con.commit(); con.close()
+        rc, output = self._pty(b"cqq", rows=12, columns=32)
+        self.assertEqual(rc, 0, output)
+        selector_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
+        screen = test_ui_regression.UiRegressionTests._render_terminal(selector_output, columns=32, rows=12)
+        self.assertTrue(screen[10].startswith("Up/Down move"), screen)
+        self.assertEqual(screen[11], "", screen)
+        self.assertTrue(all(len(line) <= 32 for line in screen), screen)
+
+    def test_selector_rejects_a_terminal_too_short_for_its_fixed_canvas(self) -> None:
+        self._add_album(1, "Artist", "Album", 2000)
+        rc, output = self._pty(b"cqq", rows=11, columns=100)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("terminal is too short", output)
+        self.assertNotIn("\x1b[?25l", output)
+
+    def test_selector_escape_letter_jumps_groups_after_human_delays_and_wraps(self) -> None:
+        self._add_album(1, "Alpha", "First", 2000)
+        self._add_album(2, "Zappa", "Second", 2001)
+        self._add_album(3, "Zebra", "Third", 2002)
+        rc, output = self._pty(
+            b"c",
+            rows=16,
+            columns=100,
+            delayed_keys=[
+                # Bare Escape and an unmatched Escape+letter do not move the
+                # cursor before the matching Z jump cycle begins.
+                (0.20, b"\x1b"),
+                (1.40, b"\x1b"), (1.65, b"x"),
+                (1.90, b"\x1b"), (2.15, b"z"),
+                (2.40, b"\x1b"), (2.65, b"z"),
+                (2.90, b"\x1b"), (3.15, b"z"),
+                (3.40, b"qq"),
+            ],
+        )
+        self.assertEqual(rc, 0, output)
+        before_first_match = output.split("2 of 3", 1)[0]
+        self.assertEqual(before_first_match.count("1 of 3"), 1, output)
+        self.assertNotIn("3 of 3", before_first_match, output)
+        self.assertIn("2 of 3", output)
+        self.assertIn("3 of 3", output)
+        self.assertGreaterEqual(output.count("2 of 3"), 2, output)

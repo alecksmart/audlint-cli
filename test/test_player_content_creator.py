@@ -61,7 +61,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
             con.close()
         return folder
 
-    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None) -> tuple[int, str]:
+    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, delayed_keys: list[tuple[float, bytes]] | None = None) -> tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "TERM": "xterm", "NO_COLOR": "1", "AUDLINT_LIBRARY_ROOT": str(self.library),
@@ -78,14 +78,18 @@ class PlayerContentCreatorTests(unittest.TestCase):
         proc = subprocess.Popen([str(MAINTAIN)], cwd=REPO_ROOT, env=env, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
         os.close(slave)
         pending = list(followups or ([] if followup is None else [followup]))
-        output = bytearray(); sent = False; deadline = time.monotonic() + timeout_s
+        output = bytearray(); sent = False; sent_at = 0.0; deadline = time.monotonic() + timeout_s
+        delayed = list(delayed_keys or [])
         try:
             while time.monotonic() < deadline:
                 if not sent and b"choice >" in output:
-                    os.write(master, keys); sent = True
+                    os.write(master, keys); sent = True; sent_at = time.monotonic()
                 if sent and pending and pending[0][0] in output:
                     _, followup_keys = pending.pop(0)
                     os.write(master, followup_keys)
+                while sent and delayed and time.monotonic() - sent_at >= delayed[0][0]:
+                    _, delayed_key = delayed.pop(0)
+                    os.write(master, delayed_key)
                 ready, _, _ = select.select([master], [], [], .1)
                 if ready:
                     try: chunk = os.read(master, 8192)
@@ -246,7 +250,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         rows = []
         for ident in range(1600):
             artist_index, album_index = divmod(ident, 20)
-            artist = f"Artist {artist_index:03d}"
+            artist = "Zappa" if artist_index == 78 else "Zebra" if artist_index == 79 else f"Artist {artist_index:03d}"
             album = f"Album {album_index:02d}"
             rows.append((ident + 1, artist, artist.lower(), artist.lower(), album, album.lower(), album.lower(), 2000 + album_index, str(self.library / "missing" / str(ident))))
         con = sqlite3.connect(self.db)
@@ -255,13 +259,26 @@ class PlayerContentCreatorTests(unittest.TestCase):
         # No per-album directories are needed: unavailable rows stay visible but cannot be toggled.
         # Up at the first row is a no-op; enough Down actions cross an artist
         # boundary and force viewport scrolling without turning this into a
-        # slow 1,600-key PTY test.
-        keys = b"c\x1b[A" + (b"\x1b[B" * 20) + b"qq"
-        rc, output = self._pty(keys, {"LINES": "12", "COLUMNS": "100", "AUDL_MEDIA_PLAYER_PATH": ""})
+        # slow 1,600-key PTY test.  Escape+y has no matching artist and the
+        # following bare Escape is delayed past the decoder timeout, then
+        # repeated Escape+z cycles Zappa, Zebra, and wraps back to Zappa.
+        keys = b"c\x1b[A" + (b"\x1b[B" * 20) + b"\x1by\x1b"
+        rc, output = self._pty(
+            keys,
+            {"LINES": "12", "COLUMNS": "100", "AUDL_MEDIA_PLAYER_PATH": ""},
+            delayed_keys=[(0.15, b"\x1bz"), (0.25, b"\x1bz"), (0.35, b"\x1bz"), (0.45, b"qq")],
+        )
         self.assertEqual(rc, 0, output[-4000:])
         self.assertIn("Artist 000", output)
         self.assertIn("Artist 001", output)
         self.assertIn("21 of 1600", output)
+        self.assertIn("Zappa", output)
+        self.assertIn("Zebra", output)
+        self.assertIn("1561 of 1600", output)
+        self.assertIn("1581 of 1600", output)
+        self.assertNotIn("\x1b[2J", output)
+        selector_source = MAINTAIN.read_text(encoding="utf-8").split("player_content_creator() {", 1)[1].split("\nread_crontab_raw()", 1)[0]
+        self.assertNotIn("\\033[2J", selector_source)
         # With a 12-line terminal each render is bounded; this catches a single
         # attempt to print the 1,600-row inventory as one terminal page.
         self.assertNotIn("Artist 000\n  [ ] 2000 - Album 00\n  [ ] 2001 - Album 01\n  [ ] 2002 - Album 02\n  [ ] 2003 - Album 03\n  [ ] 2004 - Album 04\n  [ ] 2005 - Album 05\n  [ ] 2006 - Album 06\n  [ ] 2007 - Album 07\n  [ ] 2008 - Album 08\n  [ ] 2009 - Album 09\n  [ ] 2010 - Album 10\n  [ ] 2011 - Album 11", output)

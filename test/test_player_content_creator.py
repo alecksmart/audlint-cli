@@ -49,24 +49,25 @@ class PlayerContentCreatorTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def _add_album(self, ident: int, artist: str, album: str, year: int, payload: bytes = b"audio") -> Path:
+    def _add_album(self, ident: int, artist: str, album: str, year: int, payload: bytes = b"audio", db_artist: str | None = None) -> Path:
         folder = self.library / artist / f"{year} - {album}"
         folder.mkdir(parents=True)
         (folder / "01 track.flac").write_bytes(payload)
         (folder / "cover.jpg").write_bytes(b"cover")
         (folder / "front.jpg").write_bytes(b"not copied")
+        db_artist = db_artist or artist
         con = sqlite3.connect(self.db)
         try:
             con.execute(
                 "INSERT INTO album_quality(id,artist,artist_lc,artist_norm,album,album_lc,album_norm,year_int,source_path) VALUES(?,?,?,?,?,?,?,?,?)",
-                (ident, artist, artist.lower(), artist.lower(), album, album.lower(), album.lower(), year, str(folder)),
+                (ident, db_artist, db_artist.lower(), db_artist.lower(), album, album.lower(), album.lower(), year, str(folder)),
             )
             con.commit()
         finally:
             con.close()
         return folder
 
-    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None) -> tuple[int, str]:
+    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None, resizes: list[tuple[float, int, int]] | None = None) -> tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "TERM": "xterm", "NO_COLOR": "1", "AUDLINT_LIBRARY_ROOT": str(self.library),
@@ -86,6 +87,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         os.close(slave)
         pending = list(followups or ([] if followup is None else [followup]))
         delayed = list(delayed_keys or [])
+        resize_events = list(resizes or [])
         output = bytearray(); sent = False; sent_at = 0.0; deadline = time.monotonic() + timeout_s
         try:
             while time.monotonic() < deadline:
@@ -97,6 +99,9 @@ class PlayerContentCreatorTests(unittest.TestCase):
                 while sent and delayed and time.monotonic() - sent_at >= delayed[0][0]:
                     _, delayed_bytes = delayed.pop(0)
                     os.write(master, delayed_bytes)
+                while sent and resize_events and time.monotonic() - sent_at >= resize_events[0][0]:
+                    _, resize_rows, resize_columns = resize_events.pop(0)
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", resize_rows, resize_columns, 0, 0))
                 ready, _, _ = select.select([master], [], [], .1)
                 if ready:
                     try: chunk = os.read(master, 8192)
@@ -121,6 +126,78 @@ class PlayerContentCreatorTests(unittest.TestCase):
         try:
             self.assertEqual(con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(), [("artist", "album", 2001)])
             self.assertEqual(con.execute("SELECT sql FROM sqlite_master WHERE name='player_content_selection'").fetchone() is not None, True)
+        finally:
+            con.close()
+
+    def test_directory_artist_name_orders_headings_and_escape_jumps(self) -> None:
+        self._add_album(1, "Kinks, The", "First", 2000, db_artist="The Kinks")
+        self._add_album(2, "Knopfler, Mark", "Second", 2001, db_artist="Mark Knopfler")
+        self._add_album(3, "Zebra", "Third", 2002)
+        rc, output = self._pty(
+            b"c",
+            rows=16,
+            columns=100,
+            delayed_keys=[
+                (0.20, b"\x1bk"),
+                (0.35, b" "),
+                (0.50, b"\x1bk"),
+                (0.70, b"qq"),
+            ],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("Knopfler, Mark", output)
+        self.assertNotIn("Mark Knopfler", output)
+        self.assertLess(output.index("Kinks, The"), output.index("Knopfler, Mark"), output)
+        self.assertIn("2 of 3", output)
+        self.assertGreaterEqual(output.count("1 of 3"), 2, output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(), [("mark knopfler", "second", 2001)])
+        finally:
+            con.close()
+
+    def test_selector_title_status_and_controls_use_fixed_colored_rows(self) -> None:
+        self._add_album(1, "Artist", "Album", 2001)
+        rc, output = self._pty(
+            b"c",
+            {"NO_COLOR": None},
+            rows=16,
+            columns=100,
+            delayed_keys=[(0.45, b"qq")],
+            resizes=[(0.15, 16, 80)],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("\x1b[1;32mSD: mounted", output)
+        self.assertIn("\x1b[1;36mPlayer Content Creator", output)
+        self.assertIn("\x1b[1;33mUp/Down move", output)
+        selector_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
+        screen = test_ui_regression.UiRegressionTests._render_terminal(selector_output, columns=80, rows=16)
+        self.assertIn("SD: mounted", screen[5])
+        self.assertIn("Player Content Creator", screen[7])
+        self.assertIn("Up/Down move", screen[14])
+        self.assertIn("\x1b[6;25H\x1b[K", selector_output)
+        source = MAINTAIN.read_text(encoding="utf-8")
+        self.assertNotIn(r"\033[s\033[", source)
+        self.assertIn('if [[ "$selector_cols" != "$cols" ]]', source)
+
+    def test_space_persists_selection_before_confirmed_root_mirror(self) -> None:
+        self._add_album(1, "Artist", "Album", 2001, b"selected")
+        calls = self.root / "rsync-calls"
+        write_exec(self.bin / "rsync", "#!/usr/bin/env bash\nset -eu\nprintf x >>\"${RSYNC_CALLS:?}\"\n")
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+        # c opens the selector; Space commits the selection before w receives
+        # its confirmation and performs its one guarded root mirror.
+        rc, output = self._pty(
+            b"c w",
+            {"RSYNC_CALLS": str(calls)},
+            followup=(b"[y synchronize, any other key cancel] > ", b"yqqq"),
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("Synchronization completed", output)
+        self.assertEqual(calls.read_text(encoding="utf-8"), "x", output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(), [("artist", "album", 2001)])
         finally:
             con.close()
 

@@ -35,6 +35,19 @@ player_relative_album_path_from_source() {
   printf '%s' "$rel"
 }
 
+# Print the source-library artist directory containing a validated album path.
+# Source paths directly beneath the library root have no artist directory and
+# are deliberately treated as unavailable by the player-content selector.
+player_artist_directory_label_from_source() {
+  local source_path="$1" rel parent
+  rel="$(player_relative_album_path_from_source "$source_path" || true)"
+  [[ "$rel" == */* ]] || return 1
+  parent="${rel%/*}"
+  parent="${parent##*/}"
+  [[ -n "$parent" && "$parent" != *[[:cntrl:]]* ]] || return 1
+  printf '%s' "$parent"
+}
+
 player_album_dest_dir_for_source() {
   local source_path="$1" artist="$2" year="$3" album="$4" rel_path=""
   rel_path="$(player_relative_album_path_from_source "$source_path" || true)"

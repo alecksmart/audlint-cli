@@ -77,17 +77,33 @@ virtwin_set_right_hint() {
   local text="$1"
   [[ "${VIRTWIN_TITLE_ROW:-}" =~ ^[0-9]+$ ]] || return 0
   [[ "${VIRTWIN_TERM_COLS:-}" =~ ^[0-9]+$ ]] || return 0
-  local row cols plain col rendered
+  local row cols plain col rendered hint_width hint_start body_row clear_start
   row="$VIRTWIN_TITLE_ROW"
   cols="$VIRTWIN_TERM_COLS"
   plain="${text//$'\n'/ }"
   plain="${plain//$'\r'/ }"
   (( ${#plain} > 0 )) || return 0
-  (( ${#plain} < cols )) || return 0
+  # A normal virtual-window title is short; reserve 24 columns for it so the
+  # full live status remains readable on ordinary terminals.  Small windows
+  # split their single title row evenly and clip the status safely.
+  if ((cols > 48)); then hint_width=$((cols - 24)); else hint_width=$((cols / 2)); fi
+  ((hint_width > 0)) || return 0
+  if ((${#plain} > hint_width)); then
+    if ((hint_width == 1)); then plain="${plain:0:1}"; else plain="${plain:0:$((hint_width - 1))}…"; fi
+  fi
+  hint_start=$((cols - hint_width + 1))
   col=$(( cols - ${#plain} + 1 ))
-  (( col >= 1 )) || col=1
   rendered="$(paint "$C_RESULT" "$plain")"
-  printf '\033[s\033[%s;%sH%s\033[u' "$row" "$col" "$rendered"
+  body_row=$((row + 3))
+  clear_start="$hint_start"
+  if [[ "${virtwin_right_hint_row:-}" == "$row" && "${virtwin_right_hint_start:-}" =~ ^[0-9]+$ ]]; then
+    clear_start="$virtwin_right_hint_start"
+  fi
+  # Clear from the previous reserved right field, never from column one, then
+  # redraw and leave the cursor at the selector's scroll-region origin.
+  printf '\033[%s;%sH\033[K\033[%s;%sH%s\033[%s;1H' "$row" "$clear_start" "$row" "$col" "$rendered" "$body_row"
+  virtwin_right_hint_row="$row"
+  virtwin_right_hint_start="$hint_start"
 }
 
 pause_with_result() {
@@ -205,6 +221,7 @@ player_content_selector_restore_terminal() {
 
 player_content_selector_cleanup() {
   player_content_selector_restore_terminal
+  [[ "${selector_scroll_region_active:-false}" == true ]] && printf '\033[;r'
   [[ -n "${selector_fd:-}" ]] && tty_close_input_fd "$selector_fd"
   selector_fd=""
 }
@@ -221,20 +238,64 @@ player_content_selector_enter_raw() {
 
 player_content_selector_jump() {
   local letter="${1,,}" current="$2" current_identity="" idx candidate=-1 next_group=0 normalized
-  [[ "$current" =~ ^[0-9]+$ && "$current" -lt ${#artist_lcs[@]} ]] && current_identity="${artist_lcs[$current],,}"
+  [[ "$current" =~ ^[0-9]+$ && "$current" -lt ${#artist_norms[@]} ]] && current_identity="${artist_norms[$current],,}"
   for ((idx=0; idx<${#artists[@]}; idx++)); do
     normalized="${artist_norms[$idx],,}"
-    ((idx == 0)) || [[ "${artist_lcs[$idx],,}" != "${artist_lcs[$((idx - 1))],,}" ]] || continue
+    ((idx == 0)) || [[ "$normalized" != "${artist_norms[$((idx - 1))],,}" ]] || continue
     [[ "${normalized:0:1}" == "$letter" ]] || continue
     if ((next_group == 1)); then
       printf '%s' "$idx"
       return 0
     fi
     ((candidate < 0)) && candidate="$idx"
-    [[ "${artist_lcs[$idx],,}" == "$current_identity" ]] && next_group=1
+    [[ "$normalized" == "$current_identity" ]] && next_group=1
   done
   ((candidate >= 0)) && printf '%s' "$candidate"
   return 0
+}
+
+player_content_selector_row_before() {
+  local left="$1" right="$2"
+  if [[ "${artist_norms[$left]}" != "${artist_norms[$right]}" ]]; then
+    [[ "${artist_norms[$left]}" < "${artist_norms[$right]}" ]]
+  elif [[ "${album_norms[$left]}" != "${album_norms[$right]}" ]]; then
+    [[ "${album_norms[$left]}" < "${album_norms[$right]}" ]]
+  elif ((years[left] != years[right])); then
+    ((years[left] < years[right]))
+  else
+    ((left < right))
+  fi
+}
+
+player_content_selector_sort_rows() {
+  local count width start middle finish left right array_name ordered_idx
+  local -a row_order=() merged_order=()
+  count="${#artists[@]}"
+  for ((left=0; left<count; left++)); do row_order[$left]="$left"; done
+  for ((width=1; width<count; width=$((width * 2)))); do
+    merged_order=()
+    for ((start=0; start<count; start=$((start + width * 2)))); do
+      middle=$((start + width)); ((middle > count)) && middle="$count"
+      finish=$((start + width * 2)); ((finish > count)) && finish="$count"
+      left="$start"; right="$middle"
+      while ((left < middle && right < finish)); do
+        if player_content_selector_row_before "${row_order[$left]}" "${row_order[$right]}"; then
+          merged_order+=("${row_order[$left]}"); left=$((left + 1))
+        else
+          merged_order+=("${row_order[$right]}"); right=$((right + 1))
+        fi
+      done
+      while ((left < middle)); do merged_order+=("${row_order[$left]}"); left=$((left + 1)); done
+      while ((right < finish)); do merged_order+=("${row_order[$right]}"); right=$((right + 1)); done
+    done
+    row_order=("${merged_order[@]}")
+  done
+  for array_name in artist_lcs artist_norms album_lcs album_norms years artists albums sources checked sizes available; do
+    local -n selector_rows="$array_name"
+    local -a selector_snapshot=("${selector_rows[@]}")
+    selector_rows=()
+    for ordered_idx in "${row_order[@]}"; do selector_rows+=("${selector_snapshot[$ordered_idx]}"); done
+  done
 }
 
 player_content_size_at() {
@@ -340,16 +401,25 @@ player_content_sync() {
 player_content_creator() {
   player_content_db_available || pause_with_result "Player Content Creator unavailable: database is missing, unreadable, or read-only."
   player_content_selection_cleanup_stale "$AUDL_DB_PATH" || pause_with_result "Player Content Creator unavailable: cannot update database."
-  local -a artist_lcs=() artist_norms=() album_lcs=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
+  local -a artist_lcs=() artist_norms=() album_lcs=() album_norms=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
   local -a selector_drawn=()
-  local row artist_lc artist_norm album_lc year_int artist album source_path is_checked total=0 selected=0 cursor=0 offset=0 key idx sizing_pending=0 sizing_cursor=0
-  local selector_fd="" selector_state="" selector_active=false selector_footer="" selector_status="" selector_needs_status=true done=false
-  while IFS=$'\x1f' read -r artist_lc artist_norm album_lc year_int artist album source_path is_checked; do
+  local row artist_lc artist_norm album_lc album_norm year_int artist album source_path is_checked directory_artist total=0 selected=0 cursor=0 offset=0 key idx sizing_pending=0 sizing_cursor=0
+  local selector_fd="" selector_state="" selector_active=false selector_footer="" selector_body_title="" selector_status="" selector_needs_status=true selector_cols=0 selector_scroll_region_active=false done=false
+  while IFS=$'\x1f' read -r artist_lc artist_norm album_lc album_norm year_int artist album source_path is_checked; do
     [[ -n "$artist_lc$album_lc$year_int" ]] || continue
-    artist_lcs+=("$artist_lc"); artist_norms+=("$artist_norm"); album_lcs+=("$album_lc"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
-    if [[ -d "$source_path" && -r "$source_path" ]]; then sizes+=(-1); available+=(1); sizing_pending=$((sizing_pending + 1)); else sizes+=(0); available+=(0); fi
+    directory_artist=""
+    if [[ -d "$source_path" && -r "$source_path" ]]; then
+      directory_artist="$(LIBRARY_ROOT="$AUDLINT_LIBRARY_ROOT" player_artist_directory_label_from_source "$source_path" || true)"
+    fi
+    if [[ -n "$directory_artist" ]]; then
+      artist="$directory_artist"
+      artist_norm="${directory_artist,,}"
+    fi
+    artist_lcs+=("$artist_lc"); artist_norms+=("$artist_norm"); album_lcs+=("$album_lc"); album_norms+=("$album_norm"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
+    if [[ -n "$directory_artist" && -d "$source_path" && -r "$source_path" ]]; then sizes+=(-1); available+=(1); sizing_pending=$((sizing_pending + 1)); else sizes+=(0); available+=(0); fi
     [[ "$is_checked" == 1 ]] && selected=$((selected + 1))
-  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.artist_norm,aq.album_lc,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
+  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.artist_norm,aq.album_lc,aq.album_norm,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
+  player_content_selector_sort_rows
   if ! tty_open_input_fd selector_fd; then
     pause_with_result "Player Content Creator unavailable: no terminal input is available."
   fi
@@ -377,7 +447,7 @@ player_content_creator() {
   trap 'player_content_selector_cleanup' EXIT
   trap 'player_content_selector_cleanup; exit 130' HUP INT TERM
   while [[ "$done" == false ]]; do
-    local lines cols list_top list_bottom footer_row status_row list_height list_row render_row="" desired="" previous_artist="" position=0 rendered=0 status="" visible=false
+    local lines cols list_top list_bottom footer_row body_title_row list_height list_row render_row="" desired="" previous_artist="" position=0 rendered=0 status="" visible=false
     lines="$(player_content_term_lines)"; [[ "$lines" =~ ^[0-9]+$ ]] || lines=24
     cols="$(player_content_term_cols)"; [[ "$cols" =~ ^[0-9]+$ ]] || cols=100
     # virtwin starts its scroll region three rows below its title.  Its title
@@ -386,13 +456,21 @@ player_content_creator() {
     list_top=$(( ${VIRTWIN_TITLE_ROW:-6} + 3 ))
     list_bottom=$((lines - 2))
     footer_row=$((lines - 1))
-    status_row=$((list_top - 1))
+    body_title_row=$((list_top - 1))
     list_height=$((list_bottom - list_top + 1))
     if ((cols < 20 || list_height < 2)); then
       player_content_selector_restore_terminal
       printf 'Player Content Creator unavailable: terminal is too short (need at least 12 rows and 20 columns).\n'
       done=true
       continue
+    fi
+    if [[ "$selector_cols" != "$cols" ]]; then
+      selector_cols="$cols"
+      selector_needs_status=true
+    fi
+    if [[ "${VIRTWIN_COMPACT_TOP:-0}" == "1" ]]; then
+      printf '\033[%s;%sr\033[%s;1H' "$list_top" "$list_bottom" "$list_top"
+      selector_scroll_region_active=true
     fi
 
     # Keep the selected album inside the physical canvas.  Artist headings
@@ -415,11 +493,16 @@ player_content_creator() {
       done
     fi
 
-    status="$(player_content_selector_clean_label "$(player_content_status_title "$selected" "$total" "$sizing_pending" "${#artists[@]}")" "$cols")"
+    status="$(player_content_status_title "$selected" "$total" "$sizing_pending" "${#artists[@]}")"
     if [[ "$selector_needs_status" == true || "$status" != "$selector_status" ]]; then
-      player_content_selector_write_row "$status_row" "$status"
+      VIRTWIN_TITLE_ROW="${VIRTWIN_TITLE_ROW:-6}" VIRTWIN_TERM_COLS="$cols" virtwin_set_right_hint "$status"
       selector_status="$status"
       selector_needs_status=false
+    fi
+    desired="$(paint "$C_TITLE" "$(player_content_selector_clean_label 'Player Content Creator' "$cols")")"
+    if [[ "$selector_body_title" != "$desired" ]]; then
+      player_content_selector_write_row "$body_title_row" "$desired"
+      selector_body_title="$desired"
     fi
 
     rendered=0; previous_artist=""
@@ -455,7 +538,7 @@ player_content_creator() {
       rendered=$((rendered + 1))
     done
     (( ${#artists[@]} > 0 )) && position=$((cursor + 1))
-    desired="$(player_content_selector_clean_label "Up/Down move | Space toggle | Esc+letter jump | w synchronize | q quit | ${position} of ${#artists[@]}" "$cols")"
+    desired="$(paint "$C_ACTION" "$(player_content_selector_clean_label "Up/Down move | Space toggle | Esc+letter jump | w synchronize | q quit | ${position} of ${#artists[@]}" "$cols")")"
     if [[ "$selector_footer" != "$desired" ]]; then
       player_content_selector_write_row "$footer_row" "$desired"
       selector_footer="$desired"
@@ -471,7 +554,7 @@ player_content_creator() {
       down) ((cursor + 1 < ${#artists[@]})) && cursor=$((cursor + 1));;
       ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; [[ "${sizes[cursor]:-0}" == "-1" ]] || total=$((total - sizes[cursor])); selected=$((selected - 1)); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_size_at "$cursor"; [[ "${available[$cursor]}" == 1 ]] && player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
       jump:*) idx="$(player_content_selector_jump "${key#jump:}" "$cursor")"; [[ "$idx" =~ ^[0-9]+$ ]] && cursor="$idx" ;;
-      w) player_content_selector_restore_terminal; player_content_sync "$selected" "$total" || true; printf '[any key Continue] > '; tty_read_key key 1 || true; player_content_selector_enter_raw || { printf 'Player Content Creator unavailable: terminal input cannot enter raw mode.\n'; done=true; }; selector_drawn=(); selector_footer=""; selector_needs_status=true;;
+      w) player_content_selector_restore_terminal; printf '\033[%s;1H' "$list_top"; player_content_sync "$selected" "$total" || true; printf '[any key Continue] > '; tty_read_key key 1 || true; player_content_selector_enter_raw || { printf 'Player Content Creator unavailable: terminal input cannot enter raw mode.\n'; done=true; }; selector_drawn=(); selector_footer=""; selector_body_title=""; selector_needs_status=true;;
       q) done=true;;
     esac
   done

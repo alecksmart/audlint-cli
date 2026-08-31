@@ -156,6 +156,66 @@ class PlayerContentCreatorTests(unittest.TestCase):
         finally:
             con.close()
 
+    def test_nested_va_grouping_uses_one_va_heading(self) -> None:
+        direct = self.library / "_VA" / "Direct Compilation"
+        nested = self.library / "_VA" / "2002" / "Nested Compilation"
+        for folder in (direct, nested):
+            folder.mkdir(parents=True)
+            (folder / "01 track.flac").write_bytes(b"audio")
+        self._add_album(3, "Artist", "Ordinary Album", 2001)
+        con = sqlite3.connect(self.db)
+        try:
+            con.executemany(
+                "INSERT INTO album_quality(id,artist,artist_lc,artist_norm,album,album_lc,album_norm,year_int,source_path) VALUES(?,?,?,?,?,?,?,?,?)",
+                [
+                    (1, "Various Artists", "various artists", "various artists", "Direct Compilation", "direct compilation", "direct compilation", 2003, str(direct)),
+                    (2, "Various Artists", "various artists", "various artists", "Nested Compilation", "nested compilation", "nested compilation", 2002, str(nested)),
+                ],
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        rc, output = self._pty(b"c", followup=(b"1 of 3", b"\x1b[B qq"), rows=16, columns=100)
+        self.assertEqual(rc, 0, output)
+        selector_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
+        visible = "\n".join(test_ui_regression.UiRegressionTests._render_terminal(selector_output, columns=100, rows=16))
+        self.assertEqual(visible.count("_VA"), 1, visible)
+        self.assertNotIn("\n2002\n", visible)
+        self.assertIn("Artist", visible)
+        self.assertLess(visible.index("Direct Compilation"), visible.index("Nested Compilation"), visible)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(
+                con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(),
+                [("various artists", "nested compilation", 2002)],
+            )
+        finally:
+            con.close()
+
+        command = (
+            f'source "{REPO_ROOT / "lib" / "sh" / "bootstrap.sh"}"; '
+            f'source "{REPO_ROOT / "lib" / "sh" / "player.sh"}"; '
+            f'LIBRARY_ROOT="{self.library}" MEDIA_PLAYER_PATH="{self.player}" '
+            f'player_album_dest_dir_for_source "{nested}" "Various Artists" 2002 "Nested Compilation"'
+        )
+        destination = subprocess.run(["bash", "-lc", command], text=True, capture_output=True, check=False)
+        self.assertEqual(destination.returncode, 0, destination.stderr)
+        self.assertEqual(destination.stdout, f"{self.player}/_VA/2002/Nested Compilation")
+
+        outside = self.root / "outside"
+        outside.mkdir()
+        unavailable_command = (
+            f'source "{REPO_ROOT / "lib" / "sh" / "bootstrap.sh"}"; '
+            f'source "{REPO_ROOT / "lib" / "sh" / "player.sh"}"; '
+            f'LIBRARY_ROOT="{self.library}"; '
+            f'player_artist_directory_label_from_source "{outside}" >/dev/null || printf outside; '
+            f'player_artist_directory_label_from_source "{self.library}" >/dev/null || printf root'
+        )
+        unavailable = subprocess.run(["bash", "-lc", unavailable_command], text=True, capture_output=True, check=False)
+        self.assertEqual(unavailable.returncode, 0, unavailable.stderr)
+        self.assertEqual(unavailable.stdout, "outsideroot")
+
     def test_selector_title_status_and_controls_use_fixed_colored_rows(self) -> None:
         self._add_album(1, "Artist", "Album", 2001)
         rc, output = self._pty(

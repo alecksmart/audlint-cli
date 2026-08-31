@@ -35,13 +35,16 @@ player_relative_album_path_from_source() {
   printf '%s' "$rel"
 }
 
-# Print the source-library artist directory containing a validated album path.
-# Source paths directly beneath the library root have no artist directory and
-# are deliberately treated as unavailable by the player-content selector.
+# Print the display grouping label for a validated source-library album path.
+# Descendants of the top-level `_VA` namespace share its heading; other paths
+# use their immediate parent. Source paths directly beneath the library root
+# have no artist directory and are deliberately unavailable to the selector.
 player_artist_directory_label_from_source() {
-  local source_path="$1" rel parent
+  local source_path="$1" rel parent top_level
   rel="$(player_relative_album_path_from_source "$source_path" || true)"
   [[ "$rel" == */* ]] || return 1
+  top_level="${rel%%/*}"
+  [[ "$top_level" == "_VA" ]] && { printf '%s' "$top_level"; return 0; }
   parent="${rel%/*}"
   parent="${parent##*/}"
   [[ -n "$parent" && "$parent" != *[[:cntrl:]]* ]] || return 1

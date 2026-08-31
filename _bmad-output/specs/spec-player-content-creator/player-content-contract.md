@@ -32,7 +32,7 @@ A Space toggle is one SQLite statement: insert the natural key with conflict ign
 
 Maintenance always shows `[c Player Content Creator]` when its database path can be resolved; player attachment does not control this entry.
 
-The selector loads current `album_quality` rows with nonempty `source_path`, ordered by display artist, `album_norm`, `year_int`, then `id`. Use the validated library-relative source layout for display grouping: albums anywhere under the top-level `_VA` subtree group as `_VA`, while ordinary artist directories retain their current directory-derived labels. Do not change catalog membership, natural identity, stored metadata, source paths, or source-relative synchronization layout. Render a terminal-height scrolling viewport with artist headers and album rows in this form:
+The selector loads current `album_quality` rows with nonempty `source_path`, ordered by display artist, `year_int`, `album_norm`, then `id`. Use the validated library-relative source layout for display grouping: albums anywhere under the top-level `_VA` subtree group as `_VA`, while ordinary artist directories retain their current directory-derived labels. Do not change catalog membership, natural identity, stored metadata, source paths, or source-relative synchronization layout. Render a terminal-height scrolling viewport with artist headers and album rows in this form:
 
 ```text
 Artist

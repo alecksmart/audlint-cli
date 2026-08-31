@@ -25,14 +25,56 @@ player_album_dest_dir() {
 # rejects the root itself and paths that escape it through symlinks.
 player_relative_album_path_from_source() {
   local source_path="$1" root_real source_real rel
+  local LC_ALL=C
   [[ -n "${LIBRARY_ROOT:-}" && -n "$source_path" ]] || return 1
   root_real="$(path_resolve "$LIBRARY_ROOT" 2>/dev/null || true)"
   source_real="$(path_resolve "$source_path" 2>/dev/null || true)"
   [[ -n "$root_real" && -n "$source_real" ]] || return 1
   case "$source_real" in "$root_real"/*) ;; *) return 1 ;; esac
   rel="${source_real#"$root_real"/}"
-  [[ -n "$rel" && "$rel" != /* && "$rel" != *$'\n'* && "$rel" != *$'\r'* ]] || return 1
+  [[ -n "$rel" && "$rel" != /* ]] || return 1
+  [[ "$rel" != *[[:cntrl:]]* ]] || return 1
   printf '%s' "$rel"
+}
+
+# Print a complete Player Content inventory row for one candidate directory:
+# relative path, resolved source, display artist, artist sort key, year, title,
+# and title sort key. Field separators are safe because control characters in
+# the validated relative path and display names are rejected.
+player_content_inventory_row_from_dir() {
+  local source_path="$1" root="$2" rel artist album year title artist_norm album_norm nested_dir=""
+  local -a parts=()
+  source_path="$(cd "$source_path" 2>/dev/null && pwd -P)"
+  [[ -n "$source_path" && -n "$root" && -d "$source_path" && -r "$source_path" ]] || return 1
+  case "$source_path" in "$root"/*) ;; *) return 1 ;; esac
+  rel="${source_path#"$root"/}"
+  [[ -n "$rel" && "$rel" != /* && "$rel" != *[[:cntrl:]]* ]] || return 1
+  IFS='/' read -r -a parts <<<"$rel"
+  if [[ "${#parts[@]}" == 2 && "${parts[0]}" == "_VA" ]]; then
+    artist="_VA"
+    album="${parts[1]}"
+    if [[ "$album" =~ ^[0-9]{4}$ ]]; then
+      nested_dir="$(find "$source_path" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null || true)"
+      [[ -z "$nested_dir" ]] || return 1
+    fi
+  elif [[ "${#parts[@]}" == 3 && "${parts[0]}" != "_VA" ]]; then
+    artist="${parts[1]}"
+    album="${parts[2]}"
+  else
+    return 1
+  fi
+  [[ -n "$artist" && -n "$album" && "$artist" != *[[:cntrl:]]* && "$album" != *[[:cntrl:]]* ]] || return 1
+
+  year=0
+  title="$album"
+  if [[ "$album" =~ ^([0-9]{4})[[:space:]]-[[:space:]](.+)$ ]]; then
+    year=$((10#${BASH_REMATCH[1]}))
+    title="${BASH_REMATCH[2]}"
+  fi
+  artist_norm="${artist,,}"
+  album_norm="${title,,}"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+    "$rel" "$source_path" "$artist" "$artist_norm" "$year" "$title" "$album_norm"
 }
 
 # Print the display grouping label for a validated source-library album path.
@@ -67,16 +109,38 @@ player_payload_includes_file() {
 }
 
 player_payload_size_bytes_for_dir() {
-  local dir_path="$1" total_bytes=0 file_path file_bytes
+  local dir_path="$1" total_bytes=0 file_path file_bytes files_file="" measurement_status=0
   [[ -d "$dir_path" && -r "$dir_path" ]] || return 1
+  files_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_files.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$files_file" ]] || return 1
+  if ! find "$dir_path" -type f -print0 >"$files_file" 2>/dev/null; then
+    rm -f "$files_file"
+    return 1
+  fi
   while IFS= read -r -d '' file_path; do
     player_payload_includes_file "$file_path" || continue
-    [[ -r "$file_path" ]] || return 1
+    if [[ ! -r "$file_path" ]]; then
+      measurement_status=1
+      break
+    fi
     file_bytes="$(stat_size_bytes "$file_path" 2>/dev/null || true)"
-    [[ "$file_bytes" =~ ^[0-9]+$ ]] || return 1
+    if [[ ! "$file_bytes" =~ ^[0-9]+$ ]]; then
+      measurement_status=1
+      break
+    fi
     total_bytes=$((total_bytes + file_bytes))
-  done < <(find "$dir_path" -type f -print0 2>/dev/null)
+  done <"$files_file"
+  rm -f "$files_file"
+  ((measurement_status == 0)) || return 1
   printf '%s' "$total_bytes"
+}
+
+player_filesystem_free_bytes() {
+  local path="$1" available=""
+  [[ -e "$path" && -d "$path" ]] || return 1
+  available="$(df -Pk "$path" 2>/dev/null | awk 'NR == 2 { print $4 * 1024; exit }')"
+  [[ "$available" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$available"
 }
 
 player_payload_total_size_bytes_for_manifest() {

@@ -25,6 +25,8 @@ source "$BOOTSTRAP_DIR/../lib/sh/ui.sh"
 source "$BOOTSTRAP_DIR/../lib/sh/sqlite.sh"
 # shellcheck source=/dev/null
 source "$BOOTSTRAP_DIR/../lib/sh/player.sh"
+# shellcheck source=/dev/null
+source "$BOOTSTRAP_DIR/../lib/sh/seek.sh"
 
 bootstrap_resolve_paths "${BASH_SOURCE[0]}"
 
@@ -138,14 +140,8 @@ player_content_db_available() {
 }
 
 player_content_status_title() {
-  local selected="$1" total="$2" sizing_pending="${3:-0}" sizing_total="${4:-0}" card="not mounted" sized=0
-  [[ -n "$MEDIA_PLAYER_PATH" && -d "$MEDIA_PLAYER_PATH" ]] && card="mounted"
-  if [[ "$sizing_pending" =~ ^[0-9]+$ && "$sizing_total" =~ ^[0-9]+$ ]] && ((sizing_pending > 0)); then
-    sized=$((sizing_total - sizing_pending))
-    printf 'SD: %s | Selected: %s | Size: sizing… (%s/%s albums)' "$card" "$selected" "$sized" "$sizing_total"
-    return 0
-  fi
-  printf 'SD: %s | Selected: %s | Size: %s' "$card" "$selected" "$(player_human_size_label "$total")"
+  local selected="$1" total="$2" sd_status="${3:-unavailable}"
+  printf 'SD: %s | Selected: %s | Size: %s' "$sd_status" "$selected" "$(player_human_size_label "$total")"
 }
 
 player_content_term_lines() {
@@ -290,7 +286,7 @@ player_content_selector_sort_rows() {
     done
     row_order=("${merged_order[@]}")
   done
-  for array_name in artist_lcs artist_norms album_lcs album_norms years artists albums sources checked sizes available; do
+  for array_name in relative_paths artist_norms album_norms years artists albums sources checked sizes available; do
     local -n selector_rows="$array_name"
     local -a selector_snapshot=("${selector_rows[@]}")
     selector_rows=()
@@ -299,32 +295,21 @@ player_content_selector_sort_rows() {
 }
 
 player_content_size_at() {
-  local index="$1" bytes="" was_pending=false
+  local index="$1" bytes="" resolved_source expected_relative
   case "${sizes[$index]:--3}" in
-    -1) was_pending=true ;;
     -2) ;;
     *) return 0 ;;
   esac
-  if bytes="$(player_payload_size_bytes_for_dir "${sources[$index]}" 2>/dev/null)" && [[ "$bytes" =~ ^[0-9]+$ ]]; then
+  resolved_source="$(path_resolve "${sources[$index]}" 2>/dev/null || true)"
+  expected_relative="$(LIBRARY_ROOT="$library_real" player_relative_album_path_from_source "$resolved_source" 2>/dev/null || true)"
+  [[ -n "$resolved_source" && "$expected_relative" == "${relative_paths[$index]}" ]] || return 1
+  sources[$index]="$resolved_source"
+  if bytes="$(player_payload_size_bytes_for_dir "$resolved_source" 2>/dev/null)" && [[ "$bytes" =~ ^[0-9]+$ ]]; then
     sizes[$index]="$bytes"
   else
-    sizes[$index]=0
-    available[$index]=0
+    return 1
   fi
-  [[ "$was_pending" == true ]] && sizing_pending=$((sizing_pending - 1))
-  [[ "${checked[$index]}" == 1 ]] && total=$((total + sizes[index]))
-  return 0
-}
-
-player_content_size_batch() {
-  local batch_size="${1:-4}" index
-  while ((batch_size > 0 && sizing_cursor < ${#artists[@]})); do
-    index="$sizing_cursor"
-    sizing_cursor=$((sizing_cursor + 1))
-    [[ "${sizes[$index]}" == "-1" ]] || continue
-    player_content_size_at "$index"
-    batch_size=$((batch_size - 1))
-  done
+  [[ "${checked[$index]}" == 1 ]] && total=$((total + sizes[$index]))
   return 0
 }
 
@@ -348,7 +333,7 @@ player_content_safe_destination() {
 
 player_content_sync() {
   local selected_count="$1" total_bytes="$2"
-  local library_real player_real db_real db_dir_real repo_real row artist_lc album_lc year_int artist album source_path rel escaped prefix refreshed_bytes=0 source_bytes=0
+  local library_real player_real db_real db_dir_real repo_real rel source_path expected_relative escaped prefix source_bytes=0
   library_real="$(path_resolve "$AUDLINT_LIBRARY_ROOT" 2>/dev/null || true)"
   player_real="$(path_resolve "$MEDIA_PLAYER_PATH" 2>/dev/null || true)"
   db_real="$(path_resolve "$AUDL_DB_PATH" 2>/dev/null || true)"
@@ -360,76 +345,163 @@ player_content_sync() {
   command -v "$RSYNC_BIN" >/dev/null 2>&1 || { printf 'Sync failed: rsync not found (%s).\n' "$RSYNC_BIN"; return 1; }
   command -v "$SYNC_BIN" >/dev/null 2>&1 || { printf 'Sync failed: sync command not found (%s).\n' "$SYNC_BIN"; return 1; }
 
-  local manifest
+  local inventory_file selected_file sizes_file manifest expected_count=0 actual_count=0 sync_error=""
+  inventory_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_inventory.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$inventory_file" ]] || { printf 'Sync failed: unable to create inventory.\n'; return 1; }
+  if ! seek_walk_player_content "$library_real" player_content_inventory_row_from_dir >"$inventory_file"; then
+    rm -f "$inventory_file"
+    printf 'Sync failed: library inventory could not be completed.\n'
+    return 1
+  fi
+  local -A inventory_sources=()
+  local inventory_artist inventory_norm inventory_year inventory_album inventory_album_norm
+  while IFS=$'\x1f' read -r rel source_path inventory_artist inventory_norm inventory_year inventory_album inventory_album_norm; do
+    [[ -n "$rel" ]] || continue
+    inventory_sources["$rel"]="$source_path"
+  done <"$inventory_file"
+
+  sizes_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_sizes.XXXXXX" 2>/dev/null || true)"
   manifest="$(mktemp "${TMPDIR:-/tmp}/audlint_player_manifest.XXXXXX" 2>/dev/null || true)"
-  [[ -n "$manifest" ]] || { printf 'Sync failed: unable to create manifest.\n'; return 1; }
+  if [[ -z "$sizes_file" || -z "$manifest" ]]; then
+    rm -f "$inventory_file" "$sizes_file" "$manifest"
+    printf 'Sync failed: unable to create manifest.\n'
+    return 1
+  fi
   local -a rsync_args=(-av --delete --delete-excluded --itemize-changes) parent_rules=() selected_rules=()
   # Directory rules make only the checked source-relative albums traversable;
   # shared payload filters then retain exactly the browser transfer payload.
-  while IFS=$'\x1f' read -r artist_lc album_lc year_int artist album source_path; do
-    source_path="$(path_resolve "$source_path" 2>/dev/null || true)"
-    [[ -n "$source_path" && -d "$source_path" && -r "$source_path" ]] || { rm -f "$manifest"; printf 'Sync failed: selected source is unreadable.\n'; return 1; }
-    rel="$(LIBRARY_ROOT="$library_real" player_relative_album_path_from_source "$source_path" || true)"
-    [[ -n "$rel" ]] || { rm -f "$manifest"; printf 'Sync failed: selected source escapes library root.\n'; return 1; }
+  selected_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_selection.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$selected_file" ]] || ! sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT relative_path,size_bytes FROM player_content_selection ORDER BY relative_path;" >"$selected_file" 2>/dev/null; then
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+    printf 'Sync failed: selected state could not be read.\n'
+    return 1
+  fi
+  expected_count="$(wc -l <"$selected_file" | tr -d '[:space:]')"
+  [[ "$expected_count" =~ ^[0-9]+$ ]] || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"; printf 'Sync failed: selected state could not be counted.\n'; return 1; }
+  while IFS=$'\x1f' read -r rel _cached_size; do
+    [[ -n "$rel" ]] || continue
+    if [[ -z "${inventory_sources[$rel]+present}" ]]; then
+      sync_error="checked path is absent from the live inventory ($rel)"
+      break
+    fi
+    source_path="$(path_resolve "${inventory_sources[$rel]}" 2>/dev/null || true)"
+    expected_relative="$(LIBRARY_ROOT="$library_real" player_relative_album_path_from_source "$source_path" 2>/dev/null || true)"
+    if [[ -z "$source_path" || ! -d "$source_path" || ! -r "$source_path" || "$expected_relative" != "$rel" ]]; then
+      sync_error="checked path changed or is unreadable ($rel)"
+      break
+    fi
     source_bytes="$(player_payload_size_bytes_for_dir "$source_path" 2>/dev/null || true)"
-    [[ "$source_bytes" =~ ^[0-9]+$ ]] || { rm -f "$manifest"; printf 'Sync failed: selected source payload cannot be sized.\n'; return 1; }
-    refreshed_bytes=$((refreshed_bytes + source_bytes))
+    if [[ ! "$source_bytes" =~ ^[0-9]+$ ]]; then
+      sync_error="checked path cannot be sized ($rel)"
+      break
+    fi
+    printf '%s\x1f%s\n' "$rel" "$source_bytes" >>"$sizes_file"
+    printf '%s\x1f%s\n' "$source_path" "$rel" >>"$manifest"
     escaped="$(player_content_filter_escape "$rel")"
     prefix=""
-    IFS='/' read -r -a _pcs_parts <<< "$escaped"
+    IFS='/' read -r -a _pcs_parts <<<"$escaped"
     local _pcs_part
     for _pcs_part in "${_pcs_parts[@]}"; do prefix="${prefix:+$prefix/}${_pcs_part}"; parent_rules+=("--include=/${prefix}/"); done
     selected_rules+=("--include=/${escaped}/***")
-    printf '%s\x1f%s\n' "$source_path" "$rel" >>"$manifest"
-  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT pcs.artist_lc,pcs.album_lc,pcs.year_int,aq.artist,aq.album,aq.source_path FROM player_content_selection pcs LEFT JOIN album_quality aq ON aq.artist_lc=pcs.artist_lc AND aq.album_lc=pcs.album_lc AND aq.year_int=pcs.year_int ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
-  local manifest_count expected_count
-  manifest_count="$(wc -l <"$manifest" | tr -d '[:space:]')"
-  expected_count="$(sqlite3 -noheader "$AUDL_DB_PATH" "SELECT COUNT(*) FROM player_content_selection;" 2>/dev/null || true)"
-  [[ "$expected_count" =~ ^[0-9]+$ && "$manifest_count" =~ ^[0-9]+$ && "$manifest_count" == "$expected_count" ]] || { rm -f "$manifest"; printf 'Sync failed: selected identity no longer resolves exactly once.\n'; return 1; }
-  selected_count="$expected_count"
-  total_bytes="$refreshed_bytes"
+    actual_count=$((actual_count + 1))
+  done <"$selected_file"
+  if [[ -n "$sync_error" ]]; then
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+    printf 'Sync failed: %s.\n' "$sync_error"
+    return 1
+  fi
+  [[ "$actual_count" == "$expected_count" ]] || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"; printf 'Sync failed: checked state changed during inventory.\n'; return 1; }
+  if ! player_content_selection_update_sizes "$AUDL_DB_PATH" "$sizes_file"; then
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+    printf 'Sync failed: cached sizes could not be updated.\n'
+    return 1
+  fi
   rsync_args+=("${parent_rules[@]}")
   player_rsync_payload_filters rsync_args
   rsync_args+=("${selected_rules[@]}")
   rsync_args+=(--exclude='*')
   # The selector owns the visible outcome.  Discard verbose tool output so a
   # large rsync listing cannot be retained in memory or leak into its canvas.
-  if "$RSYNC_BIN" "${rsync_args[@]}" "$library_real"/ "$player_real"/ >/dev/null 2>&1 && "$SYNC_BIN" >/dev/null 2>&1; then
-    rm -f "$manifest"; printf 'Sync complete: %s album(s).\n' "$selected_count"; return 0
+  local command_status
+  if "$RSYNC_BIN" "${rsync_args[@]}" "$library_real"/ "$player_real"/ >/dev/null 2>&1; then
+    if "$SYNC_BIN" >/dev/null 2>&1; then
+      rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+      printf 'Sync complete: %s album(s).\n' "$actual_count"
+      return 0
+    fi
+    command_status=$?
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+    printf 'Sync failed: sync command exited %s; selection was preserved.\n' "$command_status"
+    return 1
   fi
-  rm -f "$manifest"; printf 'Sync failed; selection was preserved.\n'; return 1
+  command_status=$?
+  rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+  printf 'Sync failed: rsync exited %s; selection was preserved.\n' "$command_status"
+  return 1
 }
 
 player_content_creator() {
   player_content_db_available || pause_with_result "Player Content Creator unavailable: database is missing, unreadable, or read-only."
-  player_content_selection_cleanup_stale "$AUDL_DB_PATH" || pause_with_result "Player Content Creator unavailable: cannot update database."
-  local -a artist_lcs=() artist_norms=() album_lcs=() album_norms=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
+  local selection_kind legacy_answer=""
+  selection_kind="$(player_content_selection_schema_kind "$AUDL_DB_PATH")"
+  if [[ "$selection_kind" == "legacy" ]]; then
+    ui_prompt_key "Legacy Player Content selections found. Delete them and start fresh? [y/N] " legacy_answer 0 1 || legacy_answer=""
+    if [[ "${legacy_answer,,}" != "y" ]]; then
+      printf 'Player Content Creator unchanged: legacy selections were preserved.\n'
+      return 0
+    fi
+    player_content_selection_replace_legacy "$AUDL_DB_PATH" || pause_with_result "Player Content Creator unavailable: cannot replace the legacy selection table."
+  elif [[ "$selection_kind" != "path" ]]; then
+    pause_with_result "Player Content Creator unavailable: selection table has an unsupported schema."
+  fi
+
+  local library_real inventory_file selection_totals reconcile_status
+  library_real="$(path_resolve "$AUDLINT_LIBRARY_ROOT" 2>/dev/null || true)"
+  [[ -n "$library_real" && -d "$library_real" && -r "$library_real" ]] || pause_with_result "Player Content Creator unavailable: library root is not a readable directory."
+  inventory_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_inventory.XXXXXX" 2>/dev/null || true)"
+  [[ -n "$inventory_file" ]] || pause_with_result "Player Content Creator unavailable: unable to create library inventory."
+  if ! seek_walk_player_content "$library_real" player_content_inventory_row_from_dir >"$inventory_file"; then
+    rm -f "$inventory_file"
+    pause_with_result "Player Content Creator unavailable: library inventory could not be completed."
+  fi
+  if player_content_selection_reconcile_inventory "$AUDL_DB_PATH" "$inventory_file"; then
+    :
+  else
+    reconcile_status=$?
+    if [[ "$reconcile_status" == 2 ]]; then
+      rm -f "$inventory_file"
+      pause_with_result "Player Content Creator unavailable: live inventory is suspiciously empty; checked paths were preserved."
+    fi
+    rm -f "$inventory_file"
+    pause_with_result "Player Content Creator unavailable: cannot reconcile the completed library inventory."
+  fi
+
+  local -a relative_paths=() artist_norms=() album_norms=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
   local -a selector_drawn=()
-  local row artist_lc artist_norm album_lc album_norm year_int artist album source_path is_checked directory_artist total=0 selected=0 cursor=0 offset=0 key idx sizing_pending=0 sizing_cursor=0
+  local row relative_path source_path artist artist_norm year album album_norm selected_size is_checked total=0 selected=0 cursor=0 offset=0 key idx
   local selector_fd="" selector_state="" selector_active=false selector_footer="" selector_body_title="" selector_status="" selector_result="" selector_needs_status=true selector_cols=0 selector_scroll_region_active=false done=false
-  while IFS=$'\x1f' read -r artist_lc artist_norm album_lc album_norm year_int artist album source_path is_checked; do
-    [[ -n "$artist_lc$album_lc$year_int" ]] || continue
-    directory_artist=""
-    if [[ -d "$source_path" && -r "$source_path" ]]; then
-      directory_artist="$(LIBRARY_ROOT="$AUDLINT_LIBRARY_ROOT" player_artist_directory_label_from_source "$source_path" || true)"
-    fi
-    if [[ -n "$directory_artist" ]]; then
-      artist="$directory_artist"
-      artist_norm="${directory_artist,,}"
-    fi
-    artist_lcs+=("$artist_lc"); artist_norms+=("$artist_norm"); album_lcs+=("$album_lc"); album_norms+=("$album_norm"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
-    if [[ -n "$directory_artist" && -d "$source_path" && -r "$source_path" ]]; then
-      if [[ "$is_checked" == 1 ]]; then
-        sizes+=(-1); sizing_pending=$((sizing_pending + 1))
-      else
-        sizes+=(-2)
-      fi
-      available+=(1)
+  local -A selected_sizes=()
+  while IFS=$'\x1f' read -r relative_path selected_size; do
+    [[ -n "$relative_path" ]] || continue
+    selected_sizes["$relative_path"]="$selected_size"
+  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT relative_path,size_bytes FROM player_content_selection;" 2>/dev/null)
+  while IFS=$'\x1f' read -r relative_path source_path artist artist_norm year album album_norm; do
+    [[ -n "$relative_path" ]] || continue
+    if [[ -n "${selected_sizes[$relative_path]+present}" ]]; then
+      is_checked=1
+      selected_size="${selected_sizes[$relative_path]}"
+      sizes+=("$selected_size")
+      selected=$((selected + 1))
     else
-      sizes+=(0); available+=(0)
+      is_checked=0
+      sizes+=(-2)
     fi
-    [[ "$is_checked" == 1 ]] && selected=$((selected + 1))
-  done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.artist_norm,aq.album_lc,aq.album_norm,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
+    relative_paths+=("$relative_path"); artist_norms+=("$artist_norm"); album_norms+=("$album_norm"); years+=("$year"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked"); available+=(1)
+  done <"$inventory_file"
+  selection_totals="$(player_content_selection_totals "$AUDL_DB_PATH" 2>/dev/null || true)"
+  IFS=$'\x1f' read -r selected total <<<"$selection_totals"
+  [[ "$selected" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]] || { rm -f "$inventory_file"; pause_with_result "Player Content Creator unavailable: selected totals could not be read."; }
+  rm -f "$inventory_file"
   player_content_selector_sort_rows
   if ! tty_open_input_fd selector_fd; then
     pause_with_result "Player Content Creator unavailable: no terminal input is available."
@@ -504,7 +576,11 @@ player_content_creator() {
       done
     fi
 
-    status="$(player_content_status_title "$selected" "$total" "$sizing_pending" "$selected")"
+    local sd_status="unavailable" sd_free=""
+    if sd_free="$(player_filesystem_free_bytes "$MEDIA_PLAYER_PATH" 2>/dev/null || true)" && [[ "$sd_free" =~ ^[0-9]+$ ]]; then
+      sd_status="$(player_human_size_label "$sd_free") free"
+    fi
+    status="$(player_content_status_title "$selected" "$total" "$sd_status")"
     if [[ "$selector_needs_status" == true || "$status" != "$selector_status" ]]; then
       VIRTWIN_TITLE_ROW="${VIRTWIN_TITLE_ROW:-6}" VIRTWIN_TERM_COLS="$cols" virtwin_set_right_hint "$status"
       selector_status="$status"
@@ -557,15 +633,34 @@ player_content_creator() {
     fi
 
     player_content_read_selector_key key "$selector_fd" 0.1
-    if [[ -z "$key" ]]; then
-      ((sizing_pending > 0)) && player_content_size_batch 1
-      continue
-    fi
+    [[ -n "$key" ]] || continue
     case "$key" in up|down|' '|jump:*|w) selector_result="";; esac
     case "$key" in
       up) ((cursor > 0)) && cursor=$((cursor - 1));;
       down) ((cursor + 1 < ${#artists[@]})) && cursor=$((cursor + 1));;
-      ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; if [[ "${sizes[cursor]:-0}" == "-1" ]]; then sizes[$cursor]=-2; sizing_pending=$((sizing_pending - 1)); else total=$((total - sizes[cursor])); fi; selected=$((selected - 1)); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_size_at "$cursor"; [[ "${available[$cursor]}" == 1 ]] && player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
+      ' ')
+        if ((cursor >= ${#artists[@]})); then
+          :
+        elif [[ "${checked[$cursor]}" == 1 ]]; then
+          if player_content_selection_toggle "$AUDL_DB_PATH" "${relative_paths[$cursor]}" 0 0; then
+            checked[$cursor]=0
+            total=$((total - sizes[$cursor]))
+            selected=$((selected - 1))
+            sizes[$cursor]=-2
+          fi
+        elif [[ "${available[$cursor]:-0}" == 1 ]]; then
+          if player_content_size_at "$cursor"; then
+            if player_content_selection_toggle "$AUDL_DB_PATH" "${relative_paths[$cursor]}" "${sizes[$cursor]}" 1; then
+              checked[$cursor]=1
+              selected=$((selected + 1))
+              total=$((total + sizes[$cursor]))
+            fi
+          else
+            selector_result="Player Content Creator unavailable: cannot measure checked path (${relative_paths[$cursor]})."
+            done=true
+          fi
+        fi
+        ;;
       jump:*) idx="$(player_content_selector_jump "${key#jump:}" "$cursor")"; [[ "$idx" =~ ^[0-9]+$ ]] && cursor="$idx" ;;
       w)
         for ((idx=body_title_row; idx<=footer_row; idx++)); do
@@ -594,6 +689,9 @@ player_content_creator() {
   done
   trap - EXIT HUP INT TERM
   player_content_selector_cleanup
+  if [[ "$selector_result" == Player\ Content\ Creator\ unavailable:* ]]; then
+    printf '%s\n' "$selector_result"
+  fi
   return 0
 }
 

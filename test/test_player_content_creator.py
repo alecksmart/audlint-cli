@@ -51,7 +51,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def _add_album(self, ident: int, artist: str, album: str, year: int, payload: bytes = b"audio", db_artist: str | None = None) -> Path:
-        folder = self.library / artist / f"{year} - {album}"
+        folder = self.library / artist[:1].upper() / artist / f"{year} - {album}"
         folder.mkdir(parents=True)
         (folder / "01 track.flac").write_bytes(payload)
         (folder / "cover.jpg").write_bytes(b"cover")
@@ -67,6 +67,17 @@ class PlayerContentCreatorTests(unittest.TestCase):
         finally:
             con.close()
         return folder
+
+    def _select(self, *folders: Path) -> None:
+        con = sqlite3.connect(self.db)
+        try:
+            con.executemany(
+                "INSERT INTO player_content_selection(relative_path,size_bytes) VALUES(?,?)",
+                [(str(folder.relative_to(self.library)), sum(path.stat().st_size for path in folder.rglob("*") if path.is_file() and path.name not in {"front.jpg", ".audlint_inspect_cache.json"})) for folder in folders],
+            )
+            con.commit()
+        finally:
+            con.close()
 
     def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None, resizes: list[tuple[float, int, int]] | None = None, callbacks: list[tuple[float, Callable[[], None]]] | None = None) -> tuple[int, str]:
         env = os.environ.copy()
@@ -129,7 +140,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("Player Content Creator", output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(), [("artist", "album", 2001)])
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 25)])
             self.assertEqual(con.execute("SELECT sql FROM sqlite_master WHERE name='player_content_selection'").fetchone() is not None, True)
         finally:
             con.close()
@@ -138,6 +149,12 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self._add_album(1, "Kinks, The", "First", 2000, db_artist="The Kinks")
         self._add_album(2, "Knopfler, Mark", "Second", 2001, db_artist="Mark Knopfler")
         self._add_album(3, "Zebra", "Third", 2002)
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "INSERT INTO album_quality(id,artist,artist_lc,artist_norm,album,album_lc,album_norm,year_int,source_path) VALUES(?,?,?,?,?,?,?,?,?)",
+            (99, "Stale Metadata", "stale metadata", "stale metadata", "Stale Release", "stale release", "stale release", 1999, str(self.library / "missing")),
+        )
+        con.commit(); con.close()
         rc, output = self._pty(
             b"c",
             rows=16,
@@ -152,12 +169,13 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         self.assertIn("Knopfler, Mark", output)
         self.assertNotIn("Mark Knopfler", output)
+        self.assertNotIn("Stale Release", output)
         self.assertLess(output.index("Kinks, The"), output.index("Knopfler, Mark"), output)
         self.assertIn("2 of 3", output)
         self.assertGreaterEqual(output.count("1 of 3"), 2, output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(), [("mark knopfler", "second", 2001)])
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("K/Knopfler, Mark/2001 - Second", 10)])
         finally:
             con.close()
 
@@ -181,19 +199,19 @@ class PlayerContentCreatorTests(unittest.TestCase):
         finally:
             con.close()
 
-        rc, output = self._pty(b"c", followup=(b"1 of 3", b"\x1b[B qq"), rows=16, columns=100)
+        rc, output = self._pty(b"c", followup=(b"1 of 2", b" qq"), rows=16, columns=100)
         self.assertEqual(rc, 0, output)
         selector_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
         visible = "\n".join(test_ui_regression.UiRegressionTests._render_terminal(selector_output, columns=100, rows=16))
         self.assertEqual(visible.count("_VA"), 1, visible)
-        self.assertNotIn("\n2002\n", visible)
+        self.assertNotIn("Nested Compilation", visible)
         self.assertIn("Artist", visible)
-        self.assertLess(visible.index("Nested Compilation"), visible.index("Direct Compilation"), visible)
+        self.assertIn("Direct Compilation", visible)
         con = sqlite3.connect(self.db)
         try:
             self.assertEqual(
-                con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(),
-                [("various artists", "direct compilation", 2003)],
+                con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(),
+                [("_VA/Direct Compilation", 5)],
             )
         finally:
             con.close()
@@ -207,6 +225,19 @@ class PlayerContentCreatorTests(unittest.TestCase):
         destination = subprocess.run(["bash", "-lc", command], text=True, capture_output=True, check=False)
         self.assertEqual(destination.returncode, 0, destination.stderr)
         self.assertEqual(destination.stdout, f"{self.player}/_VA/2002/Nested Compilation")
+
+    def test_direct_numeric_va_album_is_supported(self) -> None:
+        folder = self.library / "_VA" / "2000"
+        folder.mkdir(parents=True)
+        (folder / "01 track.flac").write_bytes(b"audio")
+        rc, output = self._pty(b"c", followup=(b"1 of 1", b" qq"))
+        self.assertEqual(rc, 0, output)
+        self.assertIn("2000", output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("_VA/2000", 5)])
+        finally:
+            con.close()
 
         outside = self.root / "outside"
         outside.mkdir()
@@ -232,12 +263,12 @@ class PlayerContentCreatorTests(unittest.TestCase):
             resizes=[(0.15, 16, 80)],
         )
         self.assertEqual(rc, 0, output)
-        self.assertIn("\x1b[1;32mSD: mounted", output)
+        self.assertIn("\x1b[1;32mSD:", output)
         self.assertIn("\x1b[1;36mPlayer Content Creator", output)
         self.assertIn("\x1b[1;33mUp/Down move", output)
         selector_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
         screen = test_ui_regression.UiRegressionTests._render_terminal(selector_output, columns=80, rows=16)
-        self.assertIn("SD: mounted", screen[5])
+        self.assertIn("SD:", screen[5])
         self.assertIn("Player Content Creator", screen[7])
         self.assertIn("Up/Down move", screen[14])
         self.assertIn("\x1b[6;25H\x1b[K", selector_output)
@@ -260,7 +291,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(calls.read_text(encoding="utf-8"), "x", output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(), [("artist", "album", 2001)])
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 13)])
         finally:
             con.close()
 
@@ -275,11 +306,33 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(first.stdout, "1")
         self.assertEqual(second.stdout, "0")
 
-    def test_deselecting_unsized_persisted_album_keeps_zero_total(self) -> None:
-        self._add_album(1, "Artist", "Album", 2001, b"x" * 20)
+    def test_legacy_selection_requires_refusal_or_explicit_replacement(self) -> None:
         con = sqlite3.connect(self.db)
-        con.execute("INSERT INTO player_content_selection VALUES('artist','album',2001)")
+        con.executescript(
+            "DROP TABLE player_content_selection;"
+            "CREATE TABLE player_content_selection(artist_lc TEXT NOT NULL, album_lc TEXT NOT NULL, year_int INTEGER NOT NULL, PRIMARY KEY(artist_lc,album_lc,year_int));"
+        )
+        con.execute("INSERT INTO player_content_selection VALUES('old artist','old album',1999)")
         con.commit(); con.close()
+
+        rc, output = self._pty(b"cnq")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("legacy selections were preserved", output)
+        con = sqlite3.connect(self.db)
+        self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("old artist", "old album", 1999)])
+        con.close()
+
+        rc, output = self._pty(b"cyqq")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("Player Content Creator", output)
+        con = sqlite3.connect(self.db)
+        self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [])
+        self.assertEqual([row[1] for row in con.execute("PRAGMA table_info(player_content_selection)")], ["relative_path", "size_bytes"])
+        con.close()
+
+    def test_deselecting_unsized_persisted_album_keeps_zero_total(self) -> None:
+        source = self._add_album(1, "Artist", "Album", 2001, b"x" * 20)
+        self._select(source)
         rc, output = self._pty(
             b"c",
             followups=[
@@ -293,10 +346,8 @@ class PlayerContentCreatorTests(unittest.TestCase):
     def test_direct_manifest_mirror_clears_canvas_restores_tty_and_drains_repeated_w(self) -> None:
         source = self._add_album(1, "Artist", "Selected", 2001, b"selected")
         unchecked = self._add_album(2, "Artist", "Unchecked", 2002, b"unchecked")
-        con = sqlite3.connect(self.db)
-        con.execute("INSERT INTO player_content_selection VALUES('artist','selected',2001)")
-        con.commit(); con.close()
-        stale = self.player / "Artist" / "2002 - Unchecked"
+        self._select(source)
+        stale = self.player / "A" / "Artist" / "2002 - Unchecked"
         stale.mkdir(parents=True); (stale / "old.flac").write_bytes(b"old")
         (self.player / "extra.txt").write_text("extra", encoding="utf-8")
         calls = self.root / "rsync-calls"
@@ -342,7 +393,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
 
     def test_unsafe_sync_never_calls_rsync(self) -> None:
         source = self._add_album(1, "Artist", "Album", 2001)
-        con = sqlite3.connect(self.db); con.execute("INSERT INTO player_content_selection VALUES('artist','album',2001)"); con.commit(); con.close()
+        self._select(source)
         calls = self.root / "rsync-calls"
         write_exec(self.bin / "rsync", "#!/usr/bin/env bash\nprintf x >>\"${RSYNC_CALLS:?}\"\n")
 
@@ -358,18 +409,6 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("not a writable mounted directory", attempt("missing destination", {"AUDL_MEDIA_PLAYER_PATH": str(self.root / "missing-player")}))
         self.assertIn("rsync not found", attempt("missing rsync", {"RSYNC_BIN": "audlint-no-rsync"}))
 
-        outside = self.root / "outside"; outside.mkdir(); (outside / "track.flac").write_bytes(b"x")
-        con = sqlite3.connect(self.db); con.execute("UPDATE album_quality SET source_path=?", (str(outside),)); con.commit(); con.close()
-        self.assertIn("escapes library root", attempt("escaping source"))
-        con = sqlite3.connect(self.db); con.execute("UPDATE album_quality SET source_path=?", (str(self.library / "missing-source"),)); con.commit(); con.close()
-        self.assertIn("selected source is unreadable", attempt("missing source"))
-
-        con = sqlite3.connect(self.db)
-        con.execute("UPDATE album_quality SET source_path=?", (str(source),))
-        con.execute("DROP INDEX idx_album_quality_key")
-        con.execute("INSERT INTO album_quality(id,artist,artist_lc,artist_norm,album,album_lc,album_norm,year_int,source_path) VALUES(2,'Artist','artist','artist','Album','album','album',2001,?)", (str(source),))
-        con.commit(); con.close()
-        self.assertIn("resolves exactly once", attempt("duplicate identity"))
 
     def test_real_rsync_mirror_copies_only_checked_payload_and_deletes_extra(self) -> None:
         if shutil.which("rsync") is None:
@@ -377,10 +416,8 @@ class PlayerContentCreatorTests(unittest.TestCase):
         selected = self._add_album(1, "Artist", "Selected", 2001, b"selected-audio")
         (selected / ".audlint_inspect_cache.json").write_bytes(b"cache")
         unchecked = self._add_album(2, "Artist", "Unchecked", 2002, b"unchecked-audio")
-        con = sqlite3.connect(self.db)
-        con.execute("INSERT INTO player_content_selection VALUES('artist','selected',2001)")
-        con.commit(); con.close()
-        stale = self.player / "Artist" / "2002 - Unchecked"
+        self._select(selected)
+        stale = self.player / "A" / "Artist" / "2002 - Unchecked"
         stale.mkdir(parents=True)
         (stale / "old.flac").write_bytes(b"old")
         (self.player / "extra.txt").write_text("extra", encoding="utf-8")
@@ -388,7 +425,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         # c, w, q selector, q Maintenance.
         rc, output = self._pty(b"cw", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
-        target = self.player / "Artist" / "2001 - Selected"
+        target = self.player / "A" / "Artist" / "2001 - Selected"
         self.assertEqual((target / "01 track.flac").read_bytes(), b"selected-audio")
         self.assertTrue((target / "cover.jpg").exists())
         self.assertFalse((target / "front.jpg").exists())
@@ -404,29 +441,28 @@ class PlayerContentCreatorTests(unittest.TestCase):
         rc, output = self._pty(b"c", {"AUDL_MEDIA_PLAYER_PATH": ""}, followup=(b"1 of 1", b" q q"))
         self.assertEqual(rc, 0, output)
         self.assertNotIn("sizing…", output)
-        self.assertIn("SD: not mounted | Selected: 1 | Size: 15b", output)
+        self.assertIn("SD: unavailable | Selected: 1 | Size: 15b", output)
         missing = self.root / "missing-player"
         rc, output = self._pty(b"cqq", {"AUDL_MEDIA_PLAYER_PATH": str(missing)})
         self.assertEqual(rc, 0, output)
-        self.assertIn("SD: not mounted", output)
+        self.assertIn("SD: unavailable", output)
         file_player = self.root / "player-file"
         file_player.write_text("not a directory", encoding="utf-8")
         rc, output = self._pty(b"cqq", {"AUDL_MEDIA_PLAYER_PATH": str(file_player)})
         self.assertEqual(rc, 0, output)
-        self.assertIn("SD: not mounted", output)
+        self.assertIn("SD: unavailable", output)
         rc, output = self._pty(b"cqq")
         self.assertEqual(rc, 0, output)
-        self.assertIn("SD: mounted", output)
+        self.assertRegex(output, r"SD: [0-9.]+[bKMGT]b? free")
+        descendant = self.player / "volume" / "nested"
+        descendant.mkdir(parents=True)
+        rc, output = self._pty(b"cqq", {"AUDL_MEDIA_PLAYER_PATH": str(descendant)})
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"SD: [0-9.]+[bKMGT]b? free")
 
     def test_selected_size_checked_subset_progress_uses_checked_denominator(self) -> None:
-        for ident in range(41):
-            self._add_album(ident + 1, f"Artist {ident:02d}", "Album", 2000, b"x" * 10)
-        con = sqlite3.connect(self.db)
-        con.executemany(
-            "INSERT INTO player_content_selection VALUES(?,?,?)",
-            [(f"artist {ident:02d}", "album", 2000) for ident in range(39)],
-        )
-        con.commit(); con.close()
+        folders = [self._add_album(ident + 1, f"Artist {ident:02d}", "Album", 2000, b"x" * 10) for ident in range(41)]
+        self._select(*folders[:39])
 
         rc, output = self._pty(
             b"c",
@@ -434,16 +470,17 @@ class PlayerContentCreatorTests(unittest.TestCase):
             timeout_s=12,
         )
         self.assertEqual(rc, 0, output)
-        self.assertIn("Size: sizing… (0/39 albums)", output)
-        self.assertIn("SD: mounted | Selected: 39 | Size: 585b", output)
-        self.assertNotIn("/41 albums", output)
+        self.assertIn("SD: ", output)
+        self.assertIn("Selected: 39 | Size: 585b", output)
+        self.assertNotIn("sizing…", output)
 
     def test_selected_size_zero_selection_skips_sizing(self) -> None:
         for ident in range(3):
             self._add_album(ident + 1, f"Artist {ident}", "Album", 2000, b"x" * 10)
         rc, output = self._pty(b"c", followup=(b"Selected: 0 | Size: 0b", b"qq"))
         self.assertEqual(rc, 0, output)
-        self.assertIn("SD: mounted | Selected: 0 | Size: 0b", output)
+        self.assertIn("SD: ", output)
+        self.assertIn("Selected: 0 | Size: 0b", output)
         self.assertNotIn("sizing…", output)
 
     def test_selected_size_toggle_applies_exact_payload_delta_immediately(self) -> None:
@@ -463,36 +500,32 @@ class PlayerContentCreatorTests(unittest.TestCase):
 
     def test_selected_size_toggle_keeps_disappeared_source_unchecked(self) -> None:
         source = self._add_album(1, "Artist", "Album", 2001, b"x" * 20)
+        self._select(source)
         rc, output = self._pty(
             b"c",
-            callbacks=[(0.15, lambda: shutil.rmtree(source))],
-            delayed_keys=[(0.3, b" "), (0.6, b"qq")],
+            callbacks=[(0.5, lambda: shutil.rmtree(source))],
+            delayed_keys=[(0.8, b"w")],
+            followup=(b"absent from the live inventory", b"qq"),
         )
         self.assertEqual(rc, 0, output)
-        self.assertIn("> [ ] 2001 - Album [unavailable]", output)
-        self.assertIn("Selected: 0 | Size: 0b", output)
+        self.assertIn("absent from the live inventory", output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [])
+            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 25)])
         finally:
             con.close()
 
     def test_large_selector_is_ordered_bounded_and_reaches_both_boundaries(self) -> None:
-        rows = []
+        folders = []
         for ident in range(1600):
             artist_index, album_index = divmod(ident, 20)
             artist = f"Artist {artist_index:03d}"
             album = f"Album {album_index:02d}"
-            rows.append((ident + 1, artist, artist.lower(), artist.lower(), album, album.lower(), album.lower(), 2000 + album_index, str(self.library / "missing" / str(ident))))
-        con = sqlite3.connect(self.db)
-        con.executemany("INSERT INTO album_quality(id,artist,artist_lc,artist_norm,album,album_lc,album_norm,year_int,source_path) VALUES(?,?,?,?,?,?,?,?,?)", rows)
-        con.commit(); con.close()
-        # No per-album directories are needed: unavailable rows stay visible but cannot be toggled.
+            folders.append(self._add_album(ident + 1, artist, album, 2000 + album_index))
         # Up at the first row is a no-op; enough Down actions cross an artist
-        # boundary and force viewport scrolling without turning this into a
-        # slow 1,600-key PTY test.
+        # boundary and force viewport scrolling.
         keys = b"c\x1b[A" + (b"\x1b[B" * 20) + b"qq"
-        rc, output = self._pty(keys, {"LINES": "12", "COLUMNS": "100", "AUDL_MEDIA_PLAYER_PATH": ""})
+        rc, output = self._pty(keys, {"LINES": "12", "COLUMNS": "100", "AUDL_MEDIA_PLAYER_PATH": ""}, timeout_s=24)
         self.assertEqual(rc, 0, output[-4000:])
         self.assertIn("Artist 000", output)
         self.assertIn("Artist 001", output)
@@ -501,17 +534,43 @@ class PlayerContentCreatorTests(unittest.TestCase):
         # attempt to print the 1,600-row inventory as one terminal page.
         self.assertNotIn("Artist 000\n  [ ] 2000 - Album 00\n  [ ] 2001 - Album 01\n  [ ] 2002 - Album 02\n  [ ] 2003 - Album 03\n  [ ] 2004 - Album 04\n  [ ] 2005 - Album 05\n  [ ] 2006 - Album 06\n  [ ] 2007 - Album 07\n  [ ] 2008 - Album 08\n  [ ] 2009 - Album 09\n  [ ] 2010 - Album 10\n  [ ] 2011 - Album 11", output)
 
-    def test_checked_unavailable_row_can_be_recovered_and_stale_rows_are_cleaned(self) -> None:
+    def test_completed_inventory_purges_dropped_checked_paths(self) -> None:
         source = self._add_album(1, "Artist", "Gone", 2001)
-        con = sqlite3.connect(self.db)
-        con.executemany("INSERT INTO player_content_selection VALUES(?,?,?)", [("artist", "gone", 2001), ("missing", "identity", 1999)])
-        con.commit(); con.close()
+        live = self._add_album(2, "Artist", "Live", 2002)
+        self._select(source)
         shutil.rmtree(source)
-        rc, output = self._pty(b"c q q")
+        rc, output = self._pty(b"cqq")
         self.assertEqual(rc, 0, output)
-        self.assertIn("[x] 2001 - Gone [unavailable]", output)
+        self.assertIn("Live", output)
+        self.assertNotIn("Gone", output)
         con = sqlite3.connect(self.db)
-        self.assertEqual(con.execute("SELECT * FROM player_content_selection ORDER BY artist_lc").fetchall(), [])
+        self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [])
+        con.close()
+
+    def test_renamed_album_is_new_unchecked_path(self) -> None:
+        source = self._add_album(1, "Artist", "Old", 2001)
+        self._select(source)
+        renamed = source.with_name("2001 - New")
+        source.rename(renamed)
+        rc, output = self._pty(b"cqq")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("New", output)
+        self.assertNotIn("Old", output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [])
+        finally:
+            con.close()
+
+    def test_suspicious_empty_inventory_preserves_checked_paths(self) -> None:
+        source = self._add_album(1, "Artist", "Gone", 2001)
+        self._select(source)
+        shutil.rmtree(source)
+        rc, output = self._pty(b"c", followup=(b"checked paths were preserved", b"q"))
+        self.assertEqual(rc, 0, output)
+        self.assertIn("suspiciously empty", output)
+        con = sqlite3.connect(self.db)
+        self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Gone", 10)])
         con.close()
 
     def test_empty_selection_directly_empties_player(self) -> None:
@@ -524,8 +583,8 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(list(self.player.iterdir()), [])
 
     def test_rsync_and_sync_failures_preserve_selection_then_retry(self) -> None:
-        self._add_album(1, "Artist", "Album", 2001)
-        con = sqlite3.connect(self.db); con.execute("INSERT INTO player_content_selection VALUES('artist','album',2001)"); con.commit(); con.close()
+        source = self._add_album(1, "Artist", "Album", 2001)
+        self._select(source)
         write_exec(self.bin / "rsync", "#!/usr/bin/env bash\n[[ ${1:-} == --help ]] && exit 0\n[[ ${FAIL_RSYNC:-0} == 1 ]] && exit 7\nexit 0\n")
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\n[[ ${FAIL_SYNC:-0} == 1 ]] && exit 9\nexit 0\n")
         for failure_env in ({"FAIL_RSYNC": "1"}, {"FAIL_SYNC": "1"}):
@@ -534,17 +593,27 @@ class PlayerContentCreatorTests(unittest.TestCase):
             self.assertIn("Sync failed", output)
             self.assertNotIn("Sync complete", output)
             con = sqlite3.connect(self.db)
-            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("artist", "album", 2001)])
+            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 10)])
             con.close()
         rc, output = self._pty(b"cw", followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
         self.assertIn("Sync complete", output)
 
-    def test_failure_retry_replaces_result_and_narrow_canvas_keeps_outcome_readable(self) -> None:
-        self._add_album(1, "Artist", "Album", 2001)
+    def test_sync_refreshes_cached_payload_size(self) -> None:
+        source = self._add_album(1, "Artist", "Album", 2001, b"x")
+        self._select(source)
+        (source / "01 track.flac").write_bytes(b"x" * 10)
+        rc, output = self._pty(b"cw", followup=(b"Sync complete:", b"qq"))
+        self.assertEqual(rc, 0, output)
         con = sqlite3.connect(self.db)
-        con.execute("INSERT INTO player_content_selection VALUES('artist','album',2001)")
-        con.commit(); con.close()
+        try:
+            self.assertEqual(con.execute("SELECT size_bytes FROM player_content_selection").fetchone(), (15,))
+        finally:
+            con.close()
+
+    def test_failure_retry_replaces_result_and_narrow_canvas_keeps_outcome_readable(self) -> None:
+        source = self._add_album(1, "Artist", "Album", 2001)
+        self._select(source)
         calls = self.root / "rsync-calls"
         write_exec(
             self.bin / "rsync",
@@ -576,12 +645,10 @@ class PlayerContentCreatorTests(unittest.TestCase):
             self.skipTest("rsync is required for the real mirror test")
         artist, album = "Artist *?[", "Album *?[\\"
         source = self._add_album(1, artist, album, 2001, b"literal")
-        con = sqlite3.connect(self.db)
-        con.execute("INSERT INTO player_content_selection VALUES(?,?,?)", (artist.lower(), album.lower(), 2001))
-        con.commit(); con.close()
+        self._select(source)
         rc, output = self._pty(b"cw", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
-        self.assertEqual((self.player / artist / f"2001 - {album}" / "01 track.flac").read_bytes(), b"literal")
+        self.assertEqual((self.player / source.relative_to(self.library) / "01 track.flac").read_bytes(), b"literal")
         # Direct Maintenance still resolves the conventional database path.
         rc, output = self._pty(b"cqq", {"AUDL_DB_PATH": None, "AUDL_PATH": str(self.root)})
         self.assertEqual(rc, 0, output)
@@ -595,24 +662,36 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("3 of 3", output)
 
     def test_selector_sizes_without_repainting_its_fixed_rows(self) -> None:
-        for ident in range(3):
-            self._add_album(ident + 1, f"Artist {ident}", f"Album {ident}", 2000 + ident)
-        con = sqlite3.connect(self.db)
-        con.executemany(
-            "INSERT INTO player_content_selection VALUES(?,?,?)",
-            [(f"artist {ident}", f"album {ident}", 2000 + ident) for ident in range(3)],
-        )
-        con.commit(); con.close()
-        rc, output = self._pty(b"c", followup=(b"sizing\xe2\x80\xa6 (2/3 albums)", b"qq"), rows=16, columns=100)
+        folders = [self._add_album(ident + 1, f"Artist {ident}", f"Album {ident}", 2000 + ident) for ident in range(3)]
+        self._select(*folders)
+        rc, output = self._pty(b"c", followup=(b"Selected: 3 | Size: 30b", b"qq"), rows=16, columns=100)
         self.assertEqual(rc, 0, output)
-        self.assertIn("Size: sizing… (0/3 albums)", output)
-        self.assertIn("Size: sizing… (2/3 albums)", output)
+        self.assertIn("Selected: 3 | Size: 30b", output)
+        self.assertNotIn("sizing…", output)
         self.assertNotIn("\x1b[J", output)
         self.assertNotIn("\x1b[2J", output)
         self.assertEqual(output.count("Artist 0"), 1, output)
         selector_source = MAINTAIN.read_text(encoding="utf-8").split("player_content_creator() {", 1)[1].split("\nread_crontab_raw()", 1)[0]
         for forbidden in (r"\033[H", r"\033[J", r"\033[2J"):
             self.assertNotIn(forbidden, selector_source)
+        self.assertNotIn("album_quality", selector_source)
+
+    def test_inventory_rejects_control_paths_and_symlink_escapes(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        escape = self.library / "E"
+        escape.symlink_to(outside, target_is_directory=True)
+        control = self.library / "C" / "Bad\x1bArtist" / "2000 - Album"
+        control.mkdir(parents=True)
+        command = (
+            f'source "{REPO_ROOT / "lib" / "sh" / "bootstrap.sh"}"; '
+            f'source "{REPO_ROOT / "lib" / "sh" / "player.sh"}"; '
+            'if player_content_inventory_row_from_dir "$2" "$1"; then printf control-bad; else printf control-ok; fi; '
+            'if player_content_inventory_row_from_dir "$3" "$1"; then printf symlink-bad; else printf symlink-ok; fi'
+        )
+        result = subprocess.run(["bash", "-c", command, "bash", str(self.library), str(control), str(escape)], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "control-oksymlink-ok")
 
     def test_selector_keeps_one_visible_marker_across_physical_row_boundaries(self) -> None:
         for ident in range(5):
@@ -629,14 +708,9 @@ class PlayerContentCreatorTests(unittest.TestCase):
 
     def test_selector_long_labels_are_sanitized_and_cannot_wrap_the_footer(self) -> None:
         self._add_album(1, "Seed", "Seed", 2000)
-        artist = "Artist\r\n\x1b[31m with a very long display label"
-        album = "Album\n\x1b[2J with a very long display label"
-        con = sqlite3.connect(self.db)
-        con.execute(
-            "UPDATE album_quality SET artist=?,artist_lc=?,artist_norm=?,album=?,album_lc=?,album_norm=?",
-            (artist, "seed", "seed", album, "seed", "seed"),
-        )
-        con.commit(); con.close()
+        artist = "Artist with a very long display label"
+        album = "Album with a very long display label"
+        self._add_album(2, artist, album, 2001)
         rc, output = self._pty(b"cqq", rows=12, columns=32)
         self.assertEqual(rc, 0, output)
         selector_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
@@ -704,10 +778,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(
-                con.execute("SELECT artist_lc, album_lc, year_int FROM player_content_selection").fetchall(),
-                [("zeta", "first", 2000)],
-            )
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("Z/Zeta/2000 - First", 10)])
         finally:
             con.close()
         before_first_match = output.split("2 of 3", 1)[0]

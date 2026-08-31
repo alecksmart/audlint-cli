@@ -226,6 +226,52 @@ album_quality_inventory_rows() {
      ORDER BY sort_group ASC, ${order_sql};" 2>/dev/null || true
 }
 
+player_content_selection_schema_kind() {
+  local db="$1" rows="" has_path=0 has_size=0 has_path_pk=0 has_path_notnull=0 has_size_notnull=0 has_artist=0 has_album=0 has_year=0
+  rows="$(sqlite3 -separator '|' -noheader "$db" \
+    "PRAGMA table_info(player_content_selection);" 2>/dev/null || true)"
+  while IFS='|' read -r _cid name _type _notnull _default _pk; do
+    case "$name" in
+    relative_path) has_path=1; [[ "$_notnull" == 1 ]] && has_path_notnull=1; [[ "$_pk" == 1 ]] && has_path_pk=1 ;;
+    size_bytes) has_size=1; [[ "$_notnull" == 1 ]] && has_size_notnull=1 ;;
+    artist_lc) has_artist=1 ;;
+    album_lc) has_album=1 ;;
+    year_int) has_year=1 ;;
+    esac
+  done <<<"$rows"
+  if ((has_path == 1 && has_size == 1 && has_path_pk == 1 && has_path_notnull == 1 && has_size_notnull == 1)); then
+    printf 'path'
+  elif ((has_artist == 1 && has_album == 1 && has_year == 1)); then
+    printf 'legacy'
+  else
+    printf 'unknown'
+  fi
+}
+
+player_content_selection_create() {
+  local db="$1"
+  sqlite3 "$db" <<'SQL' >/dev/null 2>&1
+CREATE TABLE IF NOT EXISTS player_content_selection (
+  relative_path TEXT NOT NULL PRIMARY KEY,
+  size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0)
+);
+SQL
+}
+
+player_content_selection_replace_legacy() {
+  local db="$1"
+  sqlite3 "$db" <<'SQL' >/dev/null 2>&1 || return 1
+BEGIN IMMEDIATE;
+DROP TABLE player_content_selection;
+CREATE TABLE player_content_selection (
+  relative_path TEXT NOT NULL PRIMARY KEY,
+  size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0)
+);
+COMMIT;
+SQL
+  ALBUM_QUALITY_DB_SCHEMA_CHANGED=1
+}
+
 album_quality_db_init() {
   local db="$1"
   local db_dir
@@ -267,20 +313,24 @@ CREATE TABLE IF NOT EXISTS album_quality (
   recode_source_profile TEXT
 );
 SQL
-  local needs_refresh_derived=0
-  # This small durable selection is intentionally keyed by the natural album
-  # identity; it must participate in the normal backup-refresh contract.
+  local needs_refresh_derived=0 selection_kind=""
+  # This small durable selection is intentionally keyed by the validated live
+  # relative path; it must participate in the normal backup-refresh contract.
   if ! sqlite3 -noheader "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='player_content_selection' LIMIT 1;" 2>/dev/null | grep -q '^1$'; then
     needs_refresh_derived=1
+    player_content_selection_create "$db" || return 1
+  else
+    selection_kind="$(player_content_selection_schema_kind "$db")"
+    if [[ "$selection_kind" == "path" ]]; then
+      :
+    elif [[ "$selection_kind" == "legacy" ]]; then
+      # Legacy natural-key tables are intentionally left untouched until the
+      # interactive Player Content entry obtains an explicit yes.
+      :
+    else
+      return 1
+    fi
   fi
-  sqlite3 "$db" <<'SQL' >/dev/null 2>&1 || return 1
-CREATE TABLE IF NOT EXISTS player_content_selection (
-  artist_lc TEXT NOT NULL,
-  album_lc TEXT NOT NULL,
-  year_int INTEGER NOT NULL,
-  PRIMARY KEY (artist_lc, album_lc, year_int)
-);
-SQL
 
   if ! _album_quality_has_column "$db" "last_checked_at"; then
     sqlite3 "$db" "ALTER TABLE album_quality ADD COLUMN last_checked_at INTEGER;" >/dev/null 2>&1 || true
@@ -476,27 +526,51 @@ SQL
   fi
 }
 
-player_content_selection_cleanup_stale() {
-  local db="$1"
-  sqlite3 "$db" <<'SQL' >/dev/null 2>&1
-DELETE FROM player_content_selection AS pcs
-WHERE NOT EXISTS (
-  SELECT 1 FROM album_quality AS aq
-  WHERE aq.artist_lc=pcs.artist_lc
-    AND aq.album_lc=pcs.album_lc
-    AND aq.year_int=pcs.year_int
-);
-SQL
+player_content_selection_toggle() {
+  local db="$1" relative_path="$2" size_bytes="$3" checked="$4"
+  [[ -n "$relative_path" && "$relative_path" != *[[:cntrl:]]* ]] || return 1
+  [[ "$size_bytes" =~ ^[0-9]+$ ]] || return 1
+  if [[ "$checked" == "1" ]]; then
+    sqlite3 "$db" "INSERT INTO player_content_selection(relative_path,size_bytes) VALUES('$(sql_escape "$relative_path")',$size_bytes) ON CONFLICT(relative_path) DO UPDATE SET size_bytes=excluded.size_bytes;" >/dev/null 2>&1
+  else
+    sqlite3 "$db" "DELETE FROM player_content_selection WHERE relative_path='$(sql_escape "$relative_path")';" >/dev/null 2>&1
+  fi
 }
 
-player_content_selection_toggle() {
-  local db="$1" artist_lc="$2" album_lc="$3" year_int="$4" checked="$5"
-  [[ "$year_int" =~ ^-?[0-9]+$ ]] || return 1
-  if [[ "$checked" == "1" ]]; then
-    sqlite3 "$db" "INSERT INTO player_content_selection(artist_lc,album_lc,year_int) VALUES('$(sql_escape "$artist_lc")','$(sql_escape "$album_lc")',$year_int) ON CONFLICT(artist_lc,album_lc,year_int) DO NOTHING;" >/dev/null 2>&1
-  else
-    sqlite3 "$db" "DELETE FROM player_content_selection WHERE artist_lc='$(sql_escape "$artist_lc")' AND album_lc='$(sql_escape "$album_lc")' AND year_int=$year_int;" >/dev/null 2>&1
+player_content_selection_totals() {
+  local db="$1"
+  sqlite3 -separator $'\x1f' -noheader "$db" \
+    "SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM player_content_selection;" 2>/dev/null
+}
+
+player_content_selection_update_sizes() {
+  local db="$1" sizes_file="$2" rel size sql=""
+  [[ -f "$sizes_file" ]] || return 1
+  sql='BEGIN IMMEDIATE;'
+  while IFS=$'\x1f' read -r rel size; do
+    [[ -n "$rel" && "$size" =~ ^[0-9]+$ ]] || return 1
+    sql+=" UPDATE player_content_selection SET size_bytes=$size WHERE relative_path='$(sql_escape "$rel")';"
+  done <"$sizes_file"
+  sql+=' COMMIT;'
+  sqlite3 "$db" "$sql" >/dev/null 2>&1
+}
+
+player_content_selection_reconcile_inventory() {
+  local db="$1" inventory_file="$2" inventory_count checked_count rel source_path artist artist_norm year album album_norm sql=""
+  [[ -f "$inventory_file" ]] || return 1
+  inventory_count="$(wc -l <"$inventory_file" | tr -d '[:space:]')"
+  checked_count="$(sqlite3 -noheader "$db" "SELECT COUNT(*) FROM player_content_selection;" 2>/dev/null || true)"
+  [[ "$inventory_count" =~ ^[0-9]+$ && "$checked_count" =~ ^[0-9]+$ ]] || return 1
+  if ((inventory_count == 0 && checked_count > 0)); then
+    return 2
   fi
+  sql='BEGIN IMMEDIATE; CREATE TEMP TABLE player_content_inventory(relative_path TEXT PRIMARY KEY);'
+  while IFS=$'\x1f' read -r rel source_path artist artist_norm year album album_norm; do
+    [[ -n "$rel" ]] || continue
+    sql+=" INSERT INTO player_content_inventory(relative_path) VALUES('$(sql_escape "$rel")');"
+  done <"$inventory_file"
+  sql+=' DELETE FROM player_content_selection WHERE NOT EXISTS (SELECT 1 FROM player_content_inventory WHERE player_content_inventory.relative_path=player_content_selection.relative_path); DROP TABLE player_content_inventory; COMMIT;'
+  sqlite3 "$db" "$sql" >/dev/null 2>&1
 }
 
 album_quality_normalize_profile_columns() {

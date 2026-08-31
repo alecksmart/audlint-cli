@@ -56,7 +56,7 @@ target named in the next column, rather than repeatedly in isolation.
 | `test/test_install_sh_smoke.py` | 8 | FAST group | FAST | `test-all` | Isolated installer rendering. |
 | `test/test_makefile_contract.py` | 3 | 0.054s focused | FAST | `test-all` | Guards tier coverage, disjointness, and `check` ordering. |
 | `test/test_lyrics_smoke.py` | 5 | FAST group | FAST | `test-all` | Small lyrics command fixtures. |
-| `test/test_player_content_creator.py` | 21 | FAST group | FAST | `test-all` | Deterministic content-creator behavior. |
+| `test/test_player_content_creator.py` | 34 | FAST group | FAST | `test-all` | Deterministic content-creator behavior. |
 | `test/test_profile_norm.py` | 5 | FAST group | FAST | `test-all` | Profile normalization unit coverage. |
 | `test/test_secure_backup.py` | 4 | FAST group | FAST | `test-all` | Focused backup safety checks. |
 | `test/test_spectre_calibration_cases.py` | 1 | FAST group | FAST | `test-all` | Single calibration assertion. |

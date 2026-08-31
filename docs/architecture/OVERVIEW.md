@@ -57,7 +57,7 @@ The normal dependency direction is `bin/*` orchestration → `lib/sh/*` policy a
 | State | Owner and role |
 | --- | --- |
 | Music library | Authoritative audio, embedded tags, artwork, and album layout. Analysis and maintenance read it; action commands and genre enrichment may mutate it. |
-| `AUDL_DB_PATH` SQLite database | `album_quality` stores derived browser/index data plus operator-managed state; `scan_roadmap` is the persisted work queue; `lyrics_cache` stores found/not-found outcomes and fetched text; `app_meta` and optional FTS5 support internal contracts and search. WAL is requested for concurrent read-heavy browsing and batch writes. |
+| `AUDL_DB_PATH` SQLite database | `album_quality` stores derived browser/index data plus operator-managed state; `player_content_selection` stores checked Player Content library-relative paths and cached payload bytes; `scan_roadmap` is the persisted work queue; `lyrics_cache` stores found/not-found outcomes and fetched text; `app_meta` and optional FTS5 support internal contracts and search. WAL is requested for concurrent read-heavy browsing and batch writes. |
 | Derived sidecars | Album-local `.sox_album_profile`, `.sox_album_done`, `.audlint_album_art`, `.audlint_inspect_cache.json`, and `any2flac.sh` true-peak TSV files cache analysis or post-process results. The DFF true-peak TSV lives in its configured output directory. Analysis is not strictly read-only. |
 | Operational state | A discovery timestamp beside the database, a global scan lock under `/tmp`, a task log, adjacent daily/weekly/monthly DB ZIP bundles, and album-local `before-recode/` staging owned by `boost_album.sh`. |
 | Configuration and scheduling | Most commands source trusted shell `.env` configuration with command-specific discovery rules. `audlint-maintain.sh` consumes inherited `AUDL_*` values and owns a delimited crontab block that invokes `audlint-task.sh`. |
@@ -78,13 +78,23 @@ The normal dependency direction is `bin/*` orchestration → `lib/sh/*` policy a
 2. Mutating actions delegate to focused commands such as `any2flac.sh`, `lyrics_seek.sh`, and `sync_music.sh`; shared libraries provide the relevant format, profile, backup, and terminal mechanics.
 3. File mutations change the music library directly. Later maintenance reconciles derived SQLite state; some browser actions also update rows immediately.
 
+### Player Content
+
+Player Content is a deliberate path-identity exception to the catalog's
+natural album identity. Maintenance first completes a bounded inventory of
+`<index>/<artist>/<album>` and `_VA/<album>` directories, derives display names
+from those relative paths, and then overlays checked rows from
+`player_content_selection(relative_path, size_bytes)`. The browser and scanner
+continue to use `album_quality` and its natural identity. A rename is therefore
+a dropped checked path plus a new unchecked path, not an inferred continuation.
+
 ## Cross-component contracts
 
 - Profile normalization produces `SR_HZ/BITS`, where `BITS` can be an integer, `32f`, or `64f`. Analyzer and recode machine boundaries currently require targets with integer `BITS` values.
-- Album identity comes from the first recognized track, prefers `album_artist`, falls back to path names, and normalizes an invalid year to `0`. `(artist_lc, album_lc, year_int)` is unique; `source_path` is indexed but not unique, and the task prunes stale identities for a path. See [ADR-0002](../decisions/0002-ADR-natural-album-identity.md).
+- Catalog album identity comes from the first recognized track, prefers `album_artist`, falls back to path names, and normalizes an invalid year to `0`. `(artist_lc, album_lc, year_int)` is unique; `source_path` is indexed but not unique, and the task prunes stale identities for a path. Player Content deliberately does not use that identity: its checked state is keyed by a validated library-relative filesystem path. See [ADR-0002](../decisions/0002-ADR-natural-album-identity.md).
 - In default mode, `audlint-analyze.sh` can emit a canonical target or the successful literal `Re-encoding not needed`; consumers that require a target then read `.sox_album_profile`. JSON mode is the detailed analysis boundary.
 - `audlint-value.sh` emits the quality JSON consumed by the scanner, comparison flow, and browser inspection. Scanner success requires nonempty `recodeTo`, `drTotal`, and `grade` values; consumers supply defaults for other fields.
-- `lib/sh/sqlite.sh` owns schema migration and primary upsert behavior. Callers preserve its normalization and derived-index columns rather than defining competing schema contracts.
+- `lib/sh/sqlite.sh` owns schema migration, primary upsert behavior, and the path-keyed Player Content selection schema. Callers preserve its normalization and derived-index columns rather than defining competing schema contracts.
 - Exit status is part of command composition: recursive seekers aggregate album failures, and parents treat nonzero child status as failure unless a command defines a successful no-op.
 - Conversion paths use `encoder.sh` functions where implemented; commands still contain format-specific FFmpeg and tag logic. Shared artwork post-processing remains the common completed-album contract.
 
@@ -95,7 +105,7 @@ The normal dependency direction is `bin/*` orchestration → `lib/sh/*` policy a
 - When the database is read-only, the browser disables database-dependent mutations such as row edits, recode, lyrics, full remove, and purge. Independent filesystem or operational actions—including sync, player transfer, inspection-cache generation, and maintenance—remain available with their own safeguards.
 - `AUDL_PARANOIA_MODE=1` activates the shared pre-write album backup guard. It verifies the configured paths and copied audio files, but it is opt-in, does not cover every mutation command, and does not prove that the backup path is on a distinct device or outside the library.
 - `any2flac.sh` rejects lossy sources unless explicitly overridden, blocks target profiles above the source, and stages each replacement through a temporary FLAC. `cue2flac.sh` caps its output profile to the lowest referenced source. Other conversion and rewrite commands have command-specific safeguards.
-- `sync_music.sh` uses `rsync --delete` and checks only that the destination is a writable directory. Its `--dry-run` still removes `._*` and `.DS_Store` files from the source before invoking rsync.
+- `sync_music.sh` uses `rsync --delete` and checks only that the destination is a writable directory. Its `--dry-run` still removes `._*` and `.DS_Store` files from the source before invoking rsync. Player Content performs its own source-relative mirror preflight and does not use the scanner's catalog identity or destination contents as inventory.
 - Default unit and smoke tests use temporary fixtures and stub external tools. An end-to-end test that uses the real crontab requires explicit `AUDLINT_USE_REAL_CRONTAB=1` opt-in; repository policy still forbids automated verification against real music libraries, databases, backup destinations, or sync targets. See [ADR-0004](../decisions/0004-ADR-real-resource-verification-safety.md).
 
 ## External dependencies

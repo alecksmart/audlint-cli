@@ -245,20 +245,18 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertNotIn(r"\033[s\033[", source)
         self.assertIn('if [[ "$selector_cols" != "$cols" ]]', source)
 
-    def test_space_persists_selection_before_confirmed_root_mirror(self) -> None:
+    def test_space_persists_selection_before_direct_root_mirror(self) -> None:
         self._add_album(1, "Artist", "Album", 2001, b"selected")
         calls = self.root / "rsync-calls"
         write_exec(self.bin / "rsync", "#!/usr/bin/env bash\nset -eu\nprintf x >>\"${RSYNC_CALLS:?}\"\n")
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
-        # c opens the selector; Space commits the selection before w receives
-        # its confirmation and performs its one guarded root mirror.
-        rc, output = self._pty(
-            b"c w",
-            {"RSYNC_CALLS": str(calls)},
-            followup=(b"[y synchronize, any other key cancel] > ", b"yqqq"),
-        )
+        # c opens the selector; Space commits the selection before w starts
+        # its one guarded root mirror, then q immediately exits the selector.
+        rc, output = self._pty(b"c w", {"RSYNC_CALLS": str(calls)}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
-        self.assertIn("Synchronization completed", output)
+        self.assertIn("Sync complete", output)
+        self.assertNotIn("[y synchronize, any other key cancel]", output)
+        self.assertNotIn("[any key Continue]", output)
         self.assertEqual(calls.read_text(encoding="utf-8"), "x", output)
         con = sqlite3.connect(self.db)
         try:
@@ -292,7 +290,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         self.assertIn("Selected: 0 | Size: 0b", output)
 
-    def test_cancelled_and_accepted_manifest_mirror(self) -> None:
+    def test_direct_manifest_mirror_clears_canvas_restores_tty_and_drains_repeated_w(self) -> None:
         source = self._add_album(1, "Artist", "Selected", 2001, b"selected")
         unchecked = self._add_album(2, "Artist", "Unchecked", 2002, b"unchecked")
         con = sqlite3.connect(self.db)
@@ -302,18 +300,43 @@ class PlayerContentCreatorTests(unittest.TestCase):
         stale.mkdir(parents=True); (stale / "old.flac").write_bytes(b"old")
         (self.player / "extra.txt").write_text("extra", encoding="utf-8")
         calls = self.root / "rsync-calls"
-        write_exec(self.bin / "rsync", "#!/usr/bin/env bash\nset -eu\n[[ ${1:-} == --help ]] && exit 0\nprintf x >>\"${RSYNC_CALLS:?}\"\nexit 0\n")
+        release = self.root / "release-rsync"
+        tty_state = self.root / "rsync-tty-state"
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --help ]] && exit 0\n"
+            "printf x >>\"${RSYNC_CALLS:?}\"\n"
+            "stty -a >\"${RSYNC_TTY_STATE:?}\"\n"
+            "while [[ ! -e ${RSYNC_RELEASE:?} ]]; do sleep 0.02; done\n"
+            "for _ in $(seq 1 1000); do printf 'verbose rsync line\\n'; done\n",
+        )
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
-        # First confirmation is cancelled, so rsync is not invoked and stale data survives.
-        rc, output = self._pty(b"cw nq q", {"RSYNC_CALLS": str(calls)})
-        self.assertEqual(rc, 0, output)
-        self.assertFalse(calls.exists(), output)
-        self.assertTrue((stale / "old.flac").exists())
-        # The accepted path invokes exactly one root mirror.  The stub records its one call.
-        rc, output = self._pty(b"cwyqqq", {"RSYNC_CALLS": str(calls)})
+        # The second w is queued while rsync blocks.  It must be discarded
+        # before the selector redraws; q is sent only after that redraw.
+        rc, output = self._pty(
+            b"cww",
+            {"RSYNC_CALLS": str(calls), "RSYNC_RELEASE": str(release), "RSYNC_TTY_STATE": str(tty_state)},
+            callbacks=[(0.3, lambda: release.touch())],
+            followup=(b"Sync complete:", b"qq"),
+        )
         self.assertEqual(rc, 0, output)
         self.assertEqual(calls.read_text(encoding="utf-8"), "x", output)
-        self.assertIn("Synchronization completed", output)
+        self.assertIn("icanon", tty_state.read_text(encoding="utf-8"), output)
+        self.assertNotIn("verbose rsync line", output)
+        running_at = output.index("Synchronizing player...")
+        for row in range(8, 16):
+            self.assertIn(f"\x1b[{row};1H\x1b[2K", output[:running_at])
+        running_output = output.split("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
+        running_screen = test_ui_regression.UiRegressionTests._render_terminal(running_output, columns=100, rows=16)
+        self.assertIn("Synchronizing player...", running_screen[7])
+        self.assertTrue(all(not line for line in running_screen[8:15]), running_screen)
+        self.assertNotIn("Artist", "\n".join(running_screen))
+        final_output = output.rsplit("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
+        final_screen = test_ui_regression.UiRegressionTests._render_terminal(final_output, columns=100, rows=16)
+        self.assertEqual("\n".join(final_screen).count("Sync complete:"), 1, final_screen)
+        self.assertNotIn("[y synchronize, any other key cancel]", output)
+        self.assertNotIn("[any key Continue]", output)
         self.assertTrue((source / "01 track.flac").exists())
         self.assertTrue((unchecked / "01 track.flac").exists())
 
@@ -325,7 +348,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
 
         def attempt(name: str, env_more: dict[str, str] | None = None) -> str:
             calls.unlink(missing_ok=True)
-            rc, output = self._pty(b"cwyqqq", {"RSYNC_CALLS": str(calls), **(env_more or {})})
+            rc, output = self._pty(b"cw", {"RSYNC_CALLS": str(calls), **(env_more or {})}, followup=(b"Sync failed", b"qq"))
             self.assertEqual(rc, 0, f"{name}: {output}")
             self.assertFalse(calls.exists(), f"{name}: {output}")
             return output
@@ -362,8 +385,8 @@ class PlayerContentCreatorTests(unittest.TestCase):
         (stale / "old.flac").write_bytes(b"old")
         (self.player / "extra.txt").write_text("extra", encoding="utf-8")
 
-        # c, w, y, dismiss result, q selector, q Maintenance.
-        rc, output = self._pty(b"cwyqqq", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"})
+        # c, w, q selector, q Maintenance.
+        rc, output = self._pty(b"cw", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
         target = self.player / "Artist" / "2001 - Selected"
         self.assertEqual((target / "01 track.flac").read_bytes(), b"selected-audio")
@@ -491,15 +514,13 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(con.execute("SELECT * FROM player_content_selection ORDER BY artist_lc").fetchall(), [])
         con.close()
 
-    def test_empty_selection_cancel_then_accept_empty_player(self) -> None:
+    def test_empty_selection_directly_empties_player(self) -> None:
         if shutil.which("rsync") is None:
             self.skipTest("rsync is required for the real mirror test")
-        (self.player / "existing.txt").write_text("keep", encoding="utf-8")
-        rc, output = self._pty(b"cw nqq", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"})
+        (self.player / "existing.txt").write_text("remove", encoding="utf-8")
+        rc, output = self._pty(b"cw", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
-        self.assertTrue((self.player / "existing.txt").exists())
-        rc, output = self._pty(b"cwyqqq", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"})
-        self.assertEqual(rc, 0, output)
+        self.assertIn("Sync complete: 0 album(s).", output)
         self.assertEqual(list(self.player.iterdir()), [])
 
     def test_rsync_and_sync_failures_preserve_selection_then_retry(self) -> None:
@@ -508,16 +529,47 @@ class PlayerContentCreatorTests(unittest.TestCase):
         write_exec(self.bin / "rsync", "#!/usr/bin/env bash\n[[ ${1:-} == --help ]] && exit 0\n[[ ${FAIL_RSYNC:-0} == 1 ]] && exit 7\nexit 0\n")
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\n[[ ${FAIL_SYNC:-0} == 1 ]] && exit 9\nexit 0\n")
         for failure_env in ({"FAIL_RSYNC": "1"}, {"FAIL_SYNC": "1"}):
-            rc, output = self._pty(b"cwyqqq", failure_env)
+            rc, output = self._pty(b"cw", failure_env, followup=(b"Sync failed", b"qq"))
             self.assertEqual(rc, 0, output)
-            self.assertIn("Synchronization failed", output)
-            self.assertNotIn("Synchronization completed", output)
+            self.assertIn("Sync failed", output)
+            self.assertNotIn("Sync complete", output)
             con = sqlite3.connect(self.db)
             self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("artist", "album", 2001)])
             con.close()
-        rc, output = self._pty(b"cwyqqq")
+        rc, output = self._pty(b"cw", followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
-        self.assertIn("Synchronization completed", output)
+        self.assertIn("Sync complete", output)
+
+    def test_failure_retry_replaces_result_and_narrow_canvas_keeps_outcome_readable(self) -> None:
+        self._add_album(1, "Artist", "Album", 2001)
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT INTO player_content_selection VALUES('artist','album',2001)")
+        con.commit(); con.close()
+        calls = self.root / "rsync-calls"
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "printf x >>\"${RSYNC_CALLS:?}\"\n"
+            "[[ $(wc -c <\"${RSYNC_CALLS:?}\") -eq 1 ]] && exit 7\n"
+            "exit 0\n",
+        )
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+        rc, output = self._pty(
+            b"cw",
+            {"RSYNC_CALLS": str(calls)},
+            rows=12,
+            columns=20,
+            followups=[(b"Sync failed", b"w"), (b"Sync complete:", b"qq")],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(calls.read_text(encoding="utf-8"), "xx", output)
+        self.assertIn("Sync failed", output)
+        self.assertIn("Sync complete", output)
+        final_output = output.rsplit("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
+        final_screen = test_ui_regression.UiRegressionTests._render_terminal(final_output, columns=20, rows=12)
+        visible = "\n".join(final_screen)
+        self.assertIn("Sync complete", visible)
+        self.assertNotIn("Sync failed", visible)
 
     def test_literal_metacharacter_relative_path_and_db_path_fallback(self) -> None:
         if shutil.which("rsync") is None:
@@ -527,7 +579,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         con = sqlite3.connect(self.db)
         con.execute("INSERT INTO player_content_selection VALUES(?,?,?)", (artist.lower(), album.lower(), 2001))
         con.commit(); con.close()
-        rc, output = self._pty(b"cwyqqq", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"})
+        rc, output = self._pty(b"cw", {"RSYNC_BIN": shutil.which("rsync") or "rsync", "SYNC_BIN": "sync"}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
         self.assertEqual((self.player / artist / f"2001 - {album}" / "01 track.flac").read_bytes(), b"literal")
         # Direct Maintenance still resolves the conventional database path.

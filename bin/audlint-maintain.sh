@@ -392,14 +392,12 @@ player_content_sync() {
   player_rsync_payload_filters rsync_args
   rsync_args+=("${selected_rules[@]}")
   rsync_args+=(--exclude='*')
-  printf '\nDestination: %s\nSelected: %s album(s), %s\nAll player content not in this selection will be deleted.\n[y synchronize, any other key cancel] > ' "$player_real" "$selected_count" "$(player_human_size_label "$total_bytes")"
-  local confirm=""; tty_read_key confirm 1 || confirm="n"; printf '\n'
-  if [[ "${confirm,,}" != "y" ]]; then rm -f "$manifest"; printf 'Synchronization cancelled.\n'; return 0; fi
-  printf 'Synchronizing player...\n'
-  if "$RSYNC_BIN" "${rsync_args[@]}" "$library_real"/ "$player_real"/ && "$SYNC_BIN"; then
-    rm -f "$manifest"; printf 'Synchronization completed: %s album(s).\n' "$selected_count"; return 0
+  # The selector owns the visible outcome.  Discard verbose tool output so a
+  # large rsync listing cannot be retained in memory or leak into its canvas.
+  if "$RSYNC_BIN" "${rsync_args[@]}" "$library_real"/ "$player_real"/ >/dev/null 2>&1 && "$SYNC_BIN" >/dev/null 2>&1; then
+    rm -f "$manifest"; printf 'Sync complete: %s album(s).\n' "$selected_count"; return 0
   fi
-  rm -f "$manifest"; printf 'Synchronization failed; selection was preserved.\n'; return 1
+  rm -f "$manifest"; printf 'Sync failed; selection was preserved.\n'; return 1
 }
 
 player_content_creator() {
@@ -408,7 +406,7 @@ player_content_creator() {
   local -a artist_lcs=() artist_norms=() album_lcs=() album_norms=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
   local -a selector_drawn=()
   local row artist_lc artist_norm album_lc album_norm year_int artist album source_path is_checked directory_artist total=0 selected=0 cursor=0 offset=0 key idx sizing_pending=0 sizing_cursor=0
-  local selector_fd="" selector_state="" selector_active=false selector_footer="" selector_body_title="" selector_status="" selector_needs_status=true selector_cols=0 selector_scroll_region_active=false done=false
+  local selector_fd="" selector_state="" selector_active=false selector_footer="" selector_body_title="" selector_status="" selector_result="" selector_needs_status=true selector_cols=0 selector_scroll_region_active=false done=false
   while IFS=$'\x1f' read -r artist_lc artist_norm album_lc album_norm year_int artist album source_path is_checked; do
     [[ -n "$artist_lc$album_lc$year_int" ]] || continue
     directory_artist=""
@@ -512,7 +510,8 @@ player_content_creator() {
       selector_status="$status"
       selector_needs_status=false
     fi
-    desired="$(paint "$C_TITLE" "$(player_content_selector_clean_label 'Player Content Creator' "$cols")")"
+    desired="${selector_result:-Player Content Creator}"
+    desired="$(paint "$C_TITLE" "$(player_content_selector_clean_label "$desired" "$cols")")"
     if [[ "$selector_body_title" != "$desired" ]]; then
       player_content_selector_write_row "$body_title_row" "$desired"
       selector_body_title="$desired"
@@ -562,12 +561,34 @@ player_content_creator() {
       ((sizing_pending > 0)) && player_content_size_batch 1
       continue
     fi
+    case "$key" in up|down|' '|jump:*|w) selector_result="";; esac
     case "$key" in
       up) ((cursor > 0)) && cursor=$((cursor - 1));;
       down) ((cursor + 1 < ${#artists[@]})) && cursor=$((cursor + 1));;
       ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; if [[ "${sizes[cursor]:-0}" == "-1" ]]; then sizes[$cursor]=-2; sizing_pending=$((sizing_pending - 1)); else total=$((total - sizes[cursor])); fi; selected=$((selected - 1)); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_size_at "$cursor"; [[ "${available[$cursor]}" == 1 ]] && player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
       jump:*) idx="$(player_content_selector_jump "${key#jump:}" "$cursor")"; [[ "$idx" =~ ^[0-9]+$ ]] && cursor="$idx" ;;
-      w) player_content_selector_restore_terminal; printf '\033[%s;1H' "$list_top"; player_content_sync "$selected" "$total" || true; printf '[any key Continue] > '; tty_read_key key 1 || true; player_content_selector_enter_raw || { printf 'Player Content Creator unavailable: terminal input cannot enter raw mode.\n'; done=true; }; selector_drawn=(); selector_footer=""; selector_body_title=""; selector_needs_status=true;;
+      w)
+        for ((idx=body_title_row; idx<=footer_row; idx++)); do
+          player_content_selector_write_row "$idx" ""
+        done
+        player_content_selector_write_row "$body_title_row" "$(paint "$C_TITLE" "Synchronizing player...")"
+        selector_drawn=(); selector_footer=""; selector_body_title=""
+        player_content_selector_restore_terminal
+        if ! selector_result="$(player_content_sync "$selected" "$total" 2>&1)"; then
+          :
+        fi
+        selector_result="${selector_result##*$'\n'}"
+        [[ -n "$selector_result" ]] || selector_result="Sync failed; selection was preserved."
+        if ! player_content_selector_enter_raw; then
+          printf 'Player Content Creator unavailable: terminal input cannot enter raw mode.\n'
+          done=true
+          continue
+        fi
+        # Commands typed while synchronization was active do not become a
+        # second destructive request when the selector returns.
+        while IFS= read -r -t 0.01 -n 1 -u "$selector_fd" key 2>/dev/null; do :; done
+        selector_needs_status=true
+        ;;
       q) done=true;;
     esac
   done

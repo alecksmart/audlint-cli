@@ -9,7 +9,7 @@ Source-available Bash 5 and Python CLI/TUI for inspecting and maintaining local 
 
 - Do not use MCP servers or MCP-backed knowledge stores; use the local shell and repository files.
 - Do not read, create, or restore runbook files. Put product intent in BMAD artifacts and implemented behavior in code, tests, and focused public docs.
-- Never operate on a real music library, live SQLite database, mounted sync destination, or destructive audio/tag/artwork workflow without explicit user approval; use temporary fixtures for automated verification.
+- Never operate on a real music library, live SQLite database, mounted sync destination, or destructive audio/tag/artwork workflow without explicit user approval; use temporary fixtures for automated verification. See [ADR-0004](docs/decisions/0004-ADR-real-resource-verification-safety.md).
 - Do not treat BMAD planning output as implemented behavior; verify claims against current code and tests.
 
 ## Where things are
@@ -24,12 +24,12 @@ Source-available Bash 5 and Python CLI/TUI for inspecting and maintaining local 
 ## Running and verifying
 
 - Prefer the closest targeted unittest while iterating; the complete local suite takes about six minutes.
-- No CI workflow is currently tracked, so local Makefile checks are the release gate.
+- No CI workflow is currently tracked, so local Makefile checks are the release gate. The fail-closed source audit is governed by [ADR-0005](docs/decisions/0005-ADR-source-control-safety-gate.md).
 
 ## Conventions that differ from defaults
 
-- Extend an existing helper in `lib/sh/` or `lib/py/` instead of duplicating parsing, encoding, artwork, SQLite, or terminal UI policy in an entry script.
-- Preserve Bash 5 plus macOS/Linux portability, including BSD/GNU command differences and portable `mktemp` templates.
+- Extend an existing helper in `lib/sh/` or `lib/py/` instead of duplicating parsing, encoding, artwork, SQLite, or terminal UI policy in an entry script. See [ADR-0006](docs/decisions/0006-ADR-shell-python-responsibility-boundary.md).
+- Preserve Bash 5 plus macOS/Linux portability, including BSD/GNU command differences and portable `mktemp` templates. See [ADR-0003](docs/decisions/0003-ADR-bash5-portability.md).
 - Keep audio profiles in canonical `SR_HZ/BITS` form after shared normalization.
 
 ## Known pitfalls

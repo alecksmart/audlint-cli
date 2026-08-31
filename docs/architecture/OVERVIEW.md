@@ -4,9 +4,9 @@
 
 ## Architectural shape
 
-Audlint is a local, modular shell pipeline with Python analysis kernels and a SQLite operational catalog. Bash entry commands own interaction and workflow control, shared Bash libraries own cross-command policy and mechanics, and Python modules own signal analysis, grading, image analysis, and rendering.
+Audlint is a local, modular shell pipeline with Python analysis kernels and a SQLite operational catalog. Bash entry commands own interaction and workflow control, shared Bash libraries own cross-command policy and mechanics, and Python modules own signal analysis, grading, image analysis, and rendering. [ADR-0006](../decisions/0006-ADR-shell-python-responsibility-boundary.md) records this preferred responsibility boundary and its exceptions.
 
-Audio files and embedded tags are authoritative for media content. SQLite stores derived quality results and scan queues alongside mutable operator flags, annotations, and fetched lyrics; do not assume that the database is wholly reconstructible without loss.
+Audio files and embedded tags are authoritative for media content. SQLite stores derived quality results and scan queues alongside mutable operator flags, annotations, and fetched lyrics; do not assume that the database is wholly reconstructible without loss. [ADR-0001](../decisions/0001-ADR-music-library-authority-and-sqlite-state.md) records this authority and persistence boundary.
 
 ```mermaid
 flowchart LR
@@ -81,7 +81,7 @@ The normal dependency direction is `bin/*` orchestration → `lib/sh/*` policy a
 ## Cross-component contracts
 
 - Profile normalization produces `SR_HZ/BITS`, where `BITS` can be an integer, `32f`, or `64f`. Analyzer and recode machine boundaries currently require targets with integer `BITS` values.
-- Album identity comes from the first recognized track, prefers `album_artist`, falls back to path names, and normalizes an invalid year to `0`. `(artist_lc, album_lc, year_int)` is unique; `source_path` is indexed but not unique, and the task prunes stale identities for a path.
+- Album identity comes from the first recognized track, prefers `album_artist`, falls back to path names, and normalizes an invalid year to `0`. `(artist_lc, album_lc, year_int)` is unique; `source_path` is indexed but not unique, and the task prunes stale identities for a path. See [ADR-0002](../decisions/0002-ADR-natural-album-identity.md).
 - In default mode, `audlint-analyze.sh` can emit a canonical target or the successful literal `Re-encoding not needed`; consumers that require a target then read `.sox_album_profile`. JSON mode is the detailed analysis boundary.
 - `audlint-value.sh` emits the quality JSON consumed by the scanner, comparison flow, and browser inspection. Scanner success requires nonempty `recodeTo`, `drTotal`, and `grade` values; consumers supply defaults for other fields.
 - `lib/sh/sqlite.sh` owns schema migration and primary upsert behavior. Callers preserve its normalization and derived-index columns rather than defining competing schema contracts.
@@ -96,7 +96,7 @@ The normal dependency direction is `bin/*` orchestration → `lib/sh/*` policy a
 - `AUDL_PARANOIA_MODE=1` activates the shared pre-write album backup guard. It verifies the configured paths and copied audio files, but it is opt-in, does not cover every mutation command, and does not prove that the backup path is on a distinct device or outside the library.
 - `any2flac.sh` rejects lossy sources unless explicitly overridden, blocks target profiles above the source, and stages each replacement through a temporary FLAC. `cue2flac.sh` caps its output profile to the lowest referenced source. Other conversion and rewrite commands have command-specific safeguards.
 - `sync_music.sh` uses `rsync --delete` and checks only that the destination is a writable directory. Its `--dry-run` still removes `._*` and `.DS_Store` files from the source before invoking rsync.
-- Default unit and smoke tests use temporary fixtures and stub external tools. An end-to-end test that uses the real crontab requires explicit `AUDLINT_USE_REAL_CRONTAB=1` opt-in; repository policy still forbids automated verification against real music libraries, databases, backup destinations, or sync targets.
+- Default unit and smoke tests use temporary fixtures and stub external tools. An end-to-end test that uses the real crontab requires explicit `AUDLINT_USE_REAL_CRONTAB=1` opt-in; repository policy still forbids automated verification against real music libraries, databases, backup destinations, or sync targets. See [ADR-0004](../decisions/0004-ADR-real-resource-verification-safety.md).
 
 ## External dependencies
 
@@ -104,7 +104,7 @@ Dependencies are command-scoped; each command performs its own checks, and `audl
 
 | Capability | Dependencies and integrations |
 | --- | --- |
-| Broad base | Bash 5, configured Python 3, FFmpeg/ffprobe, SQLite, and rsync. Browser, scanner, backup, lyrics, image, and tagging features add their own requirements. |
+| Broad base | Bash 5, configured Python 3, FFmpeg/ffprobe, SQLite, and rsync. Browser, scanner, backup, lyrics, image, and tagging features add their own requirements. [ADR-0003](../decisions/0003-ADR-bash5-portability.md) records the Bash and platform portability rule. |
 | Analysis and encoding | NumPy, `dr14meter`, SoX/`soxi`, FFmpeg, and `metaflac`. Encoder paths select SoX or FFmpeg by capability, but analyzer metadata probing currently still invokes `soxi` even when FFmpeg decoding is selected. |
 | Tags, artwork, and lyrics | `eyeD3`, AtomicParsley, `vorbiscomment`, `opustags`, `wvtag`, `curl`, and `jq`, depending on format and feature. |
 | Terminal and image tools | The Python `rich` package; OpenCV/NumPy and Tesseract for spectrogram image analysis. |
@@ -114,7 +114,7 @@ Dependencies are command-scoped; each command performs its own checks, and `audl
 ## Build, installation, and verification
 
 - There is no compiled build artifact. `make install` symlinks `bin/*.sh` commands and aliases into `PREFIX`; `install.sh` generates `.env` only.
-- `bin/audlint-source-audit.sh` is a developer-only, fail-closed Git safety gate. Its staged policy is the runtime authority; it is not installed as a product command.
+- `bin/audlint-source-audit.sh` is a developer-only, fail-closed Git safety gate. Its staged policy is the runtime authority; it is not installed as a product command. See [ADR-0005](../decisions/0005-ADR-source-control-safety-gate.md).
 - `make test` is the fast local Python loop. `make test-integration` runs the integration and deep-regression tier, while `make test-all` runs their explicit, disjoint union exactly once.
 - `make check` is the local release gate: ShellCheck, formatting check, Bash 5 consistency, `test-all`, then the authoritative source audit. Use the closest `python3 -m unittest` module or named test while iterating; reserve `make check` for release verification. `make test-spectre` remains a focused spectre smoke target.
 - `test/distro/*_check.sh` provides targeted distribution checks. No CI workflow is tracked; the local Makefile gate remains authoritative.

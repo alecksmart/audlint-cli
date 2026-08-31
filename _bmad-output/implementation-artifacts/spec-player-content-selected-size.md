@@ -33,7 +33,7 @@ context:
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|---------------|----------------------------|----------------|
 | Checked subset | 39 checked available rows in a larger temporary inventory | Progress denominator is 39; final title says `Size` and equals the shared payload sum | Unchecked rows are not sized at entry |
-| Empty selection | No checked rows | Title reports `Selected: 0 | Size: 0b` without sizing progress | N/A |
+| Empty selection | No checked rows | Title reports zero selected albums and `Size: 0b` without sizing progress | N/A |
 | Toggle available row | Unchecked available row is selected then deselected | Selection, checkbox, and title change in one redraw by exactly that row’s payload bytes | Do not persist selection when sizing fails |
 | Checked unavailable row | Persisted checked source cannot be read | Row stays checked and unavailable; unknown bytes are excluded | Existing sync block remains intact |
 

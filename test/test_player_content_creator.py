@@ -12,6 +12,7 @@ import tempfile
 import termios
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 from test import test_ui_regression
@@ -67,7 +68,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
             con.close()
         return folder
 
-    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None, resizes: list[tuple[float, int, int]] | None = None) -> tuple[int, str]:
+    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None, resizes: list[tuple[float, int, int]] | None = None, callbacks: list[tuple[float, Callable[[], None]]] | None = None) -> tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "TERM": "xterm", "NO_COLOR": "1", "AUDLINT_LIBRARY_ROOT": str(self.library),
@@ -88,6 +89,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         pending = list(followups or ([] if followup is None else [followup]))
         delayed = list(delayed_keys or [])
         resize_events = list(resizes or [])
+        scheduled_callbacks = list(callbacks or [])
         output = bytearray(); sent = False; sent_at = 0.0; deadline = time.monotonic() + timeout_s
         try:
             while time.monotonic() < deadline:
@@ -99,6 +101,9 @@ class PlayerContentCreatorTests(unittest.TestCase):
                 while sent and delayed and time.monotonic() - sent_at >= delayed[0][0]:
                     _, delayed_bytes = delayed.pop(0)
                     os.write(master, delayed_bytes)
+                while sent and scheduled_callbacks and time.monotonic() - sent_at >= scheduled_callbacks[0][0]:
+                    _, callback = scheduled_callbacks.pop(0)
+                    callback()
                 while sent and resize_events and time.monotonic() - sent_at >= resize_events[0][0]:
                     _, resize_rows, resize_columns = resize_events.pop(0)
                     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", resize_rows, resize_columns, 0, 0))
@@ -281,11 +286,11 @@ class PlayerContentCreatorTests(unittest.TestCase):
             b"c",
             followups=[
                 (b"1 of 1", b" "),
-                (b"Selected: 0 | Total: 0b", b"qq"),
+                (b"Selected: 0 | Size: 0b", b"qq"),
             ],
         )
         self.assertEqual(rc, 0, output)
-        self.assertIn("Selected: 0 | Total: 0b", output)
+        self.assertIn("Selected: 0 | Size: 0b", output)
 
     def test_cancelled_and_accepted_manifest_mirror(self) -> None:
         source = self._add_album(1, "Artist", "Selected", 2001, b"selected")
@@ -375,8 +380,8 @@ class PlayerContentCreatorTests(unittest.TestCase):
         # The initial title is unselected/zero; Space immediately updates it.
         rc, output = self._pty(b"c", {"AUDL_MEDIA_PLAYER_PATH": ""}, followup=(b"1 of 1", b" q q"))
         self.assertEqual(rc, 0, output)
-        self.assertIn("Total: sizing… (0/1 albums)", output)
-        self.assertIn("SD: not mounted | Selected: 1 | Total: 15b", output)
+        self.assertNotIn("sizing…", output)
+        self.assertIn("SD: not mounted | Selected: 1 | Size: 15b", output)
         missing = self.root / "missing-player"
         rc, output = self._pty(b"cqq", {"AUDL_MEDIA_PLAYER_PATH": str(missing)})
         self.assertEqual(rc, 0, output)
@@ -389,6 +394,65 @@ class PlayerContentCreatorTests(unittest.TestCase):
         rc, output = self._pty(b"cqq")
         self.assertEqual(rc, 0, output)
         self.assertIn("SD: mounted", output)
+
+    def test_selected_size_checked_subset_progress_uses_checked_denominator(self) -> None:
+        for ident in range(41):
+            self._add_album(ident + 1, f"Artist {ident:02d}", "Album", 2000, b"x" * 10)
+        con = sqlite3.connect(self.db)
+        con.executemany(
+            "INSERT INTO player_content_selection VALUES(?,?,?)",
+            [(f"artist {ident:02d}", "album", 2000) for ident in range(39)],
+        )
+        con.commit(); con.close()
+
+        rc, output = self._pty(
+            b"c",
+            delayed_keys=[(8.3, b"qq")],
+            timeout_s=12,
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("Size: sizing… (0/39 albums)", output)
+        self.assertIn("SD: mounted | Selected: 39 | Size: 585b", output)
+        self.assertNotIn("/41 albums", output)
+
+    def test_selected_size_zero_selection_skips_sizing(self) -> None:
+        for ident in range(3):
+            self._add_album(ident + 1, f"Artist {ident}", "Album", 2000, b"x" * 10)
+        rc, output = self._pty(b"c", followup=(b"Selected: 0 | Size: 0b", b"qq"))
+        self.assertEqual(rc, 0, output)
+        self.assertIn("SD: mounted | Selected: 0 | Size: 0b", output)
+        self.assertNotIn("sizing…", output)
+
+    def test_selected_size_toggle_applies_exact_payload_delta_immediately(self) -> None:
+        self._add_album(1, "Artist", "Album", 2001, b"x" * 20)
+        rc, output = self._pty(
+            b"c",
+            delayed_keys=[(0.2, b" "), (0.5, b" "), (0.8, b"qq")],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("Selected: 1 | Size: 25b", output)
+        self.assertGreaterEqual(output.count("Selected: 0 | Size: 0b"), 2, output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [])
+        finally:
+            con.close()
+
+    def test_selected_size_toggle_keeps_disappeared_source_unchecked(self) -> None:
+        source = self._add_album(1, "Artist", "Album", 2001, b"x" * 20)
+        rc, output = self._pty(
+            b"c",
+            callbacks=[(0.15, lambda: shutil.rmtree(source))],
+            delayed_keys=[(0.3, b" "), (0.6, b"qq")],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("> [ ] 2001 - Album [unavailable]", output)
+        self.assertIn("Selected: 0 | Size: 0b", output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [])
+        finally:
+            con.close()
 
     def test_large_selector_is_ordered_bounded_and_reaches_both_boundaries(self) -> None:
         rows = []
@@ -481,10 +545,16 @@ class PlayerContentCreatorTests(unittest.TestCase):
     def test_selector_sizes_without_repainting_its_fixed_rows(self) -> None:
         for ident in range(3):
             self._add_album(ident + 1, f"Artist {ident}", f"Album {ident}", 2000 + ident)
+        con = sqlite3.connect(self.db)
+        con.executemany(
+            "INSERT INTO player_content_selection VALUES(?,?,?)",
+            [(f"artist {ident}", f"album {ident}", 2000 + ident) for ident in range(3)],
+        )
+        con.commit(); con.close()
         rc, output = self._pty(b"c", followup=(b"sizing\xe2\x80\xa6 (2/3 albums)", b"qq"), rows=16, columns=100)
         self.assertEqual(rc, 0, output)
-        self.assertIn("sizing… (0/3 albums)", output)
-        self.assertIn("sizing… (2/3 albums)", output)
+        self.assertIn("Size: sizing… (0/3 albums)", output)
+        self.assertIn("Size: sizing… (2/3 albums)", output)
         self.assertNotIn("\x1b[J", output)
         self.assertNotIn("\x1b[2J", output)
         self.assertEqual(output.count("Artist 0"), 1, output)

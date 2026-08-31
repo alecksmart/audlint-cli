@@ -142,10 +142,10 @@ player_content_status_title() {
   [[ -n "$MEDIA_PLAYER_PATH" && -d "$MEDIA_PLAYER_PATH" ]] && card="mounted"
   if [[ "$sizing_pending" =~ ^[0-9]+$ && "$sizing_total" =~ ^[0-9]+$ ]] && ((sizing_pending > 0)); then
     sized=$((sizing_total - sizing_pending))
-    printf 'SD: %s | Selected: %s | Total: sizing… (%s/%s albums)' "$card" "$selected" "$sized" "$sizing_total"
+    printf 'SD: %s | Selected: %s | Size: sizing… (%s/%s albums)' "$card" "$selected" "$sized" "$sizing_total"
     return 0
   fi
-  printf 'SD: %s | Selected: %s | Total: %s' "$card" "$selected" "$(player_human_size_label "$total")"
+  printf 'SD: %s | Selected: %s | Size: %s' "$card" "$selected" "$(player_human_size_label "$total")"
 }
 
 player_content_term_lines() {
@@ -299,15 +299,19 @@ player_content_selector_sort_rows() {
 }
 
 player_content_size_at() {
-  local index="$1" bytes=""
-  [[ "${sizes[$index]:--1}" == "-1" ]] || return 0
+  local index="$1" bytes="" was_pending=false
+  case "${sizes[$index]:--3}" in
+    -1) was_pending=true ;;
+    -2) ;;
+    *) return 0 ;;
+  esac
   if bytes="$(player_payload_size_bytes_for_dir "${sources[$index]}" 2>/dev/null)" && [[ "$bytes" =~ ^[0-9]+$ ]]; then
     sizes[$index]="$bytes"
   else
     sizes[$index]=0
     available[$index]=0
   fi
-  sizing_pending=$((sizing_pending - 1))
+  [[ "$was_pending" == true ]] && sizing_pending=$((sizing_pending - 1))
   [[ "${checked[$index]}" == 1 ]] && total=$((total + sizes[index]))
   return 0
 }
@@ -416,7 +420,16 @@ player_content_creator() {
       artist_norm="${directory_artist,,}"
     fi
     artist_lcs+=("$artist_lc"); artist_norms+=("$artist_norm"); album_lcs+=("$album_lc"); album_norms+=("$album_norm"); years+=("$year_int"); artists+=("$artist"); albums+=("$album"); sources+=("$source_path"); checked+=("$is_checked")
-    if [[ -n "$directory_artist" && -d "$source_path" && -r "$source_path" ]]; then sizes+=(-1); available+=(1); sizing_pending=$((sizing_pending + 1)); else sizes+=(0); available+=(0); fi
+    if [[ -n "$directory_artist" && -d "$source_path" && -r "$source_path" ]]; then
+      if [[ "$is_checked" == 1 ]]; then
+        sizes+=(-1); sizing_pending=$((sizing_pending + 1))
+      else
+        sizes+=(-2)
+      fi
+      available+=(1)
+    else
+      sizes+=(0); available+=(0)
+    fi
     [[ "$is_checked" == 1 ]] && selected=$((selected + 1))
   done < <(sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT aq.artist_lc,aq.artist_norm,aq.album_lc,aq.album_norm,aq.year_int,aq.artist,aq.album,aq.source_path,CASE WHEN pcs.artist_lc IS NULL THEN 0 ELSE 1 END FROM album_quality aq LEFT JOIN player_content_selection pcs ON pcs.artist_lc=aq.artist_lc AND pcs.album_lc=aq.album_lc AND pcs.year_int=aq.year_int WHERE COALESCE(aq.source_path,'')<>'' OR pcs.artist_lc IS NOT NULL ORDER BY aq.artist_norm,aq.album_norm,aq.year_int,aq.id;" 2>/dev/null)
   player_content_selector_sort_rows
@@ -493,7 +506,7 @@ player_content_creator() {
       done
     fi
 
-    status="$(player_content_status_title "$selected" "$total" "$sizing_pending" "${#artists[@]}")"
+    status="$(player_content_status_title "$selected" "$total" "$sizing_pending" "$selected")"
     if [[ "$selector_needs_status" == true || "$status" != "$selector_status" ]]; then
       VIRTWIN_TITLE_ROW="${VIRTWIN_TITLE_ROW:-6}" VIRTWIN_TERM_COLS="$cols" virtwin_set_right_hint "$status"
       selector_status="$status"
@@ -552,7 +565,7 @@ player_content_creator() {
     case "$key" in
       up) ((cursor > 0)) && cursor=$((cursor - 1));;
       down) ((cursor + 1 < ${#artists[@]})) && cursor=$((cursor + 1));;
-      ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; [[ "${sizes[cursor]:-0}" == "-1" ]] || total=$((total - sizes[cursor])); selected=$((selected - 1)); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_size_at "$cursor"; [[ "${available[$cursor]}" == 1 ]] && player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
+      ' ') if [[ "${checked[$cursor]}" == 1 ]]; then player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 0 && { checked[$cursor]=0; if [[ "${sizes[cursor]:-0}" == "-1" ]]; then sizes[$cursor]=-2; sizing_pending=$((sizing_pending - 1)); else total=$((total - sizes[cursor])); fi; selected=$((selected - 1)); }; elif [[ "${available[$cursor]:-0}" == 1 ]]; then player_content_size_at "$cursor"; [[ "${available[$cursor]}" == 1 ]] && player_content_selection_toggle "$AUDL_DB_PATH" "${artist_lcs[$cursor]}" "${album_lcs[$cursor]}" "${years[$cursor]}" 1 && { checked[$cursor]=1; selected=$((selected + 1)); total=$((total + sizes[cursor])); }; fi;;
       jump:*) idx="$(player_content_selector_jump "${key#jump:}" "$cursor")"; [[ "$idx" =~ ^[0-9]+$ ]] && cursor="$idx" ;;
       w) player_content_selector_restore_terminal; printf '\033[%s;1H' "$list_top"; player_content_sync "$selected" "$total" || true; printf '[any key Continue] > '; tty_read_key key 1 || true; player_content_selector_enter_raw || { printf 'Player Content Creator unavailable: terminal input cannot enter raw mode.\n'; done=true; }; selector_drawn=(); selector_footer=""; selector_body_title=""; selector_needs_status=true;;
       q) done=true;;

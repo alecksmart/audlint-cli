@@ -258,10 +258,10 @@ player_content_selector_row_before() {
   local left="$1" right="$2"
   if [[ "${artist_norms[$left]}" != "${artist_norms[$right]}" ]]; then
     [[ "${artist_norms[$left]}" < "${artist_norms[$right]}" ]]
-  elif [[ "${album_norms[$left]}" != "${album_norms[$right]}" ]]; then
-    [[ "${album_norms[$left]}" < "${album_norms[$right]}" ]]
   elif ((years[left] != years[right])); then
     ((years[left] < years[right]))
+  elif [[ "${album_norms[$left]}" != "${album_norms[$right]}" ]]; then
+    [[ "${album_norms[$left]}" < "${album_norms[$right]}" ]]
   else
     ((left < right))
   fi

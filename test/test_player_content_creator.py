@@ -183,12 +183,12 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(visible.count("_VA"), 1, visible)
         self.assertNotIn("\n2002\n", visible)
         self.assertIn("Artist", visible)
-        self.assertLess(visible.index("Direct Compilation"), visible.index("Nested Compilation"), visible)
+        self.assertLess(visible.index("Nested Compilation"), visible.index("Direct Compilation"), visible)
         con = sqlite3.connect(self.db)
         try:
             self.assertEqual(
                 con.execute("SELECT artist_lc,album_lc,year_int FROM player_content_selection").fetchall(),
-                [("various artists", "nested compilation", 2002)],
+                [("various artists", "direct compilation", 2003)],
             )
         finally:
             con.close()

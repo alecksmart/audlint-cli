@@ -1,3 +1,4 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-player-content-sync-flow.md`
-  summary: Repair the source-audit Markdown-table parser or the pre-existing selected-size implementation spec so `make check` can complete its source-audit stage.
-  evidence: `make check` ran all 470 tests successfully, then `bin/audlint-source-audit.sh` reproducibly failed with `AUDIT_PARSE_FAILED` while scanning the committed `_bmad-output/implementation-artifacts/spec-player-content-selected-size.md`, before the current sync-flow artifact.
+  status: resolved
+  summary: Repair the malformed Markdown table in the selected-size implementation spec so the source-audit stage can complete.
+  evidence: `make check` ran all 470 tests successfully with one skip, then `bin/audlint-source-audit.sh` failed with `AUDIT_PARSE_FAILED` while scanning the committed selected-size spec. Documentation-only commit `a4c6fb3` corrected the extra table delimiter, and the authoritative `make source-audit` then passed with zero findings and zero errors.

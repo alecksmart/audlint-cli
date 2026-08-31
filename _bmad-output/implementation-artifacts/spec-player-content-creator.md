@@ -3,7 +3,7 @@ title: 'Player Content Creator'
 type: 'feature'
 created: '2026-08-30'
 status: 'done'
-review_loop_iteration: 0
+review_loop_iteration: 1
 baseline_commit: 'e233a6e3448fbedd703264a171a16941ec99e291'
 context:
   - 'docs/ai/bmad-lite.md'
@@ -106,3 +106,15 @@ The new mirror must not reuse the browser's per-album runner: it cannot remove u
 
 - Exercises persistence, mirrors, failures, safety, scrolling, and unusual paths.
   [`test_player_content_creator.py:24`](../../test/test_player_content_creator.py#L24)
+
+## Four-Fix Campaign Closure
+
+The approved child specs supersede the frozen original interaction details where they differ. The completed capability now keeps year-first album ordering, groups every album below the `_VA` subtree under `_VA`, supports Escape plus a Cyrillic letter for artist-group jumps, reports the current checked payload size, and starts synchronization or exits directly without confirmation or continuation prompts.
+
+- Prompt 1 (`_VA` grouping): accepted after implementation commits `7f348bc` and `84034c7` and operator verification.
+- Prompt 2 (Cyrillic jumps): accepted at implementation commit `7e8656c` after the focused test and all 23 then-current Player Content Creator tests passed.
+- Prompt 3 (selected size): accepted at implementation commit `80d7adc` after four focused tests and all 27 then-current Player Content Creator tests passed.
+- Prompt 4 (direct clean synchronization): accepted at implementation commit `9784c24` after eight focused tests, all 28 Player Content Creator tests, and 37 related smoke tests with one skip passed.
+- The planned single `make check` run completed all 470 tests with one skip. Documentation-only commit `a4c6fb3` repaired the pre-existing selected-size spec table that blocked the final source-audit stage; a separate authoritative `make source-audit` then passed with zero findings and zero errors.
+
+All four child tasks and the parent Player Content Creator fix campaign are closed as of 2026-08-31. No real library, live database, mounted destination, or destructive operator resource was used for automated verification.

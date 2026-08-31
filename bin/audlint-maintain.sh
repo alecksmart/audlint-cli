@@ -171,13 +171,13 @@ player_content_read_selector_key() {
         B) read_key="down" ;;
         *) read_key="" ;;
       esac
-    elif [[ "$rest" =~ ^[A-Za-z]$ ]]; then
+    elif [[ "$rest" =~ ^[[:alpha:]]$ ]]; then
       read_key="jump:${rest}"
     elif [[ -z "$rest" ]]; then
       # Human-paced Escape-letter input is intentionally allowed to take a
       # second.  A bare Escape is harmless after this bounded wait.
       IFS= read -r -t 1.05 -n 1 -u "$tty_fd" rest 2>/dev/null || true
-      if [[ "$rest" =~ ^[A-Za-z]$ ]]; then
+      if [[ "$rest" =~ ^[[:alpha:]]$ ]]; then
         read_key="jump:${rest}"
       else
         read_key=""

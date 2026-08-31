@@ -556,3 +556,41 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("2 of 3", output)
         self.assertIn("3 of 3", output)
         self.assertGreaterEqual(output.count("2 of 3"), 2, output)
+
+    def test_selector_escape_cyrillic_letter_jumps_groups_cycles_wraps_and_ignores_unmatched(self) -> None:
+        self._add_album(1, "Zeta", "First", 2000)
+        self._add_album(2, "Ада", "Second", 2001)
+        self._add_album(3, "Арія", "Third", 2002)
+        rc, output = self._pty(
+            b"c",
+            {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
+            rows=16,
+            columns=100,
+            delayed_keys=[
+                # The unmatched letter leaves the initial Zeta row selected,
+                # so Space selects Zeta before the matching jump cycle begins.
+                (0.20, b"\x1b"), (0.45, "Ж".encode("utf-8")),
+                (0.60, b" "),
+                # This first match reaches the initial 50 ms Escape probe;
+                # later matches cover the delayed human-paced input path.
+                (0.85, b"\x1b" + "А".encode("utf-8")),
+                (1.10, b"\x1b"), (1.35, "А".encode("utf-8")),
+                (1.60, b"\x1b"), (1.85, "А".encode("utf-8")),
+                (2.10, b"qq"),
+            ],
+        )
+        self.assertEqual(rc, 0, output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(
+                con.execute("SELECT artist_lc, album_lc, year_int FROM player_content_selection").fetchall(),
+                [("zeta", "first", 2000)],
+            )
+        finally:
+            con.close()
+        before_first_match = output.split("2 of 3", 1)[0]
+        self.assertEqual(before_first_match.count("1 of 3"), 1, output)
+        self.assertNotIn("3 of 3", before_first_match, output)
+        self.assertIn("2 of 3", output)
+        self.assertIn("3 of 3", output)
+        self.assertGreaterEqual(output.count("2 of 3"), 2, output)

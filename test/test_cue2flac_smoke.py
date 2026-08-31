@@ -9,7 +9,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_SCRIPT = REPO_ROOT / "bin" / "cue2flac.sh"
-SRC_LIB_SH = REPO_ROOT / "lib" / "sh"
 
 # Minimal 3-track CUE sheet for a FLAC source.
 SAMPLE_CUE = textwrap.dedent("""\
@@ -53,17 +52,14 @@ class Cue2FlacCliSmokeTests(unittest.TestCase):
         self.work_dir = self.tmpdir / "work"
         self.script_dir = self.work_dir / "audio-encoder"
         self.script_dir.mkdir(parents=True, exist_ok=True)
-        self.lib_sh_dir = self.work_dir / "lib" / "sh"
-        self.lib_sh_dir.mkdir(parents=True, exist_ok=True)
+        # The script is mutable in a few analyzer scenarios, but its shared
+        # shell helpers are read-only.  Point at the source library instead
+        # of recopying it for every isolated album fixture.
+        (self.work_dir / "lib").symlink_to(REPO_ROOT / "lib", target_is_directory=True)
 
         self.script = self.script_dir / "cue2flac.sh"
         self.script.write_text(SRC_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
         self.script.chmod(self.script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-        for helper in SRC_LIB_SH.glob("*.sh"):
-            target = self.lib_sh_dir / helper.name
-            target.write_text(helper.read_text(encoding="utf-8"), encoding="utf-8")
-            target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         # Output dir that tests can verify track files in
         self.output_root = self.tmpdir / "encoded"

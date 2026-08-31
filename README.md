@@ -154,8 +154,16 @@ sudo make install PREFIX="/usr/local/bin"
 3. Run tests:
 
 ```bash
-make test
+make test                 # fast local development loop
+make test-integration     # integration and deep regression coverage
+make test-all             # every supported Python test, once
+make check                # release gate: quality checks, test-all, source audit
 ```
+
+Use `make test` while editing. Before release, use `make check`; it runs the
+complete Python suite through `make test-all`, then the authoritative source
+audit. The focused `make test-spectre` target remains available for spectre
+smoke work.
 
 For a release-candidate source-control audit, stage
 `.audlint-source-audit-policy.json` and run:
@@ -166,8 +174,8 @@ make source-audit
 ```
 
 `--prospective` checks only the staged index while preparing a repair; it is not
-the release gate. `make check` runs the normal tests before the authoritative
-audit. The developer-only audit command is intentionally not installed.
+the release gate. The developer-only audit command is intentionally not
+installed.
 
 4. Launch browser:
 

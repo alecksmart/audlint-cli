@@ -1,6 +1,7 @@
 from array import array
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -16,20 +17,49 @@ ANALYZE_PY = REPO_ROOT / "lib" / "py" / "audlint_analyze.py"
 
 
 def _write_exec(path: Path, content: str) -> None:
+    # A few scenarios replace a class-level fixture stub.  Remove a possible
+    # hard link first so that writing the replacement cannot alter another
+    # test's immutable fixture.
+    if path.exists() or path.is_symlink():
+        path.unlink()
     path.write_text(textwrap.dedent(content).lstrip(), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _copy_immutable_stubs(source: Path, destination: Path) -> None:
+    try:
+        shutil.copytree(source, destination, copy_function=os.link)
+    except OSError:
+        # Some filesystems do not support hard links.  Remove any partial
+        # tree before falling back so this test keeps a complete private copy.
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination, copy_function=shutil.copy2)
+
+
 class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        # The normal decoder/probe stubs are immutable.  Hard links remove the
+        # repeated shell-fixture assembly while every album, cache, payload,
+        # log, and replacement stub remains owned by its individual test.
+        cls._stub_tmp = tempfile.TemporaryDirectory()
+        cls._stub_bin = Path(cls._stub_tmp.name) / "bin"
+        cls._stub_bin.mkdir(parents=True, exist_ok=True)
+        cls._install_stubs(cls._stub_bin)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._stub_tmp.cleanup()
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmpdir = Path(self._tmp.name)
         self.bin_dir = self.tmpdir / "bin"
-        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        _copy_immutable_stubs(type(self)._stub_bin, self.bin_dir)
         self.album_dir = self.tmpdir / "album"
         self.album_dir.mkdir(parents=True, exist_ok=True)
         (self.album_dir / "01-track.wav").write_text("seed-a", encoding="utf-8")
-        self._install_stubs()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -41,9 +71,10 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
         path.write_bytes(payload.tobytes())
         return path
 
-    def _install_stubs(self) -> None:
+    @staticmethod
+    def _install_stubs(bin_dir: Path) -> None:
         _write_exec(
-            self.bin_dir / "soxi",
+            bin_dir / "soxi",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -64,7 +95,7 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
             ),
         )
         _write_exec(
-            self.bin_dir / "sox",
+            bin_dir / "sox",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -77,7 +108,7 @@ class AudlintAnalyzeCacheSmokeTests(unittest.TestCase):
             ),
         )
         _write_exec(
-            self.bin_dir / "ffprobe",
+            bin_dir / "ffprobe",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -157,7 +188,7 @@ EOF
             ),
         )
         _write_exec(
-            self.bin_dir / "ffmpeg",
+            bin_dir / "ffmpeg",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash

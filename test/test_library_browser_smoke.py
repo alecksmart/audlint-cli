@@ -1438,7 +1438,9 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         isolated_browser = isolated_bin / "audlint.sh"
         shutil.copy2(LIBRARY_BROWSER, isolated_browser)
         isolated_browser.chmod(isolated_browser.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        shutil.copytree(REPO_ROOT / "lib", isolated_root / "lib")
+        # The browser only sources these helpers.  Keep each test's script,
+        # database, and .env isolated while sharing the immutable library tree.
+        (isolated_root / "lib").symlink_to(REPO_ROOT / "lib", target_is_directory=True)
         (isolated_root / ".env").write_text(
             "\n".join(
                 [
@@ -1571,7 +1573,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         isolated_browser = isolated_bin / "audlint.sh"
         shutil.copy2(LIBRARY_BROWSER, isolated_browser)
         isolated_browser.chmod(isolated_browser.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        shutil.copytree(REPO_ROOT / "lib", isolated_root / "lib")
+        (isolated_root / "lib").symlink_to(REPO_ROOT / "lib", target_is_directory=True)
         library_root = self.tmpdir / "library"
         (isolated_root / ".env").write_text(
             "\n".join(
@@ -1776,7 +1778,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         isolated_browser = isolated_bin / "audlint.sh"
         shutil.copy2(LIBRARY_BROWSER, isolated_browser)
         isolated_browser.chmod(isolated_browser.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        shutil.copytree(REPO_ROOT / "lib", isolated_root / "lib")
+        (isolated_root / "lib").symlink_to(REPO_ROOT / "lib", target_is_directory=True)
         library_root = self.tmpdir / "library"
         (isolated_root / ".env").write_text(
             "\n".join(
@@ -2006,7 +2008,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         isolated_browser = isolated_bin / "audlint.sh"
         shutil.copy2(LIBRARY_BROWSER, isolated_browser)
         isolated_browser.chmod(isolated_browser.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        shutil.copytree(REPO_ROOT / "lib", isolated_root / "lib")
+        (isolated_root / "lib").symlink_to(REPO_ROOT / "lib", target_is_directory=True)
         library_root = self.tmpdir / "library"
         (isolated_root / ".env").write_text(
             "\n".join(
@@ -2487,7 +2489,7 @@ fi
         isolated_browser = isolated_bin / "audlint.sh"
         shutil.copy2(LIBRARY_BROWSER, isolated_browser)
         isolated_browser.chmod(isolated_browser.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        shutil.copytree(REPO_ROOT / "lib", isolated_root / "lib")
+        (isolated_root / "lib").symlink_to(REPO_ROOT / "lib", target_is_directory=True)
         (isolated_root / ".env").write_text("", encoding="utf-8")
 
         bootstrap = self._run(["--no-interactive", "--db", str(self.db_path)], script_path=isolated_browser)

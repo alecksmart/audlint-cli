@@ -18,7 +18,49 @@ SHFMT_TARGETS ?= test/sh
 SHFMT_EXTRA ?= install.sh
 SHELLCHECK_OPTS ?= -e SC2004,SC2015,SC2029,SC2034,SC2162,SC2178,SC2181,SC2221,SC2222,SC2235
 
-.PHONY: help install uninstall relink install-env lint fmt-check bash5-check test test-core test-spectre test-legacy source-audit check db-reset
+FAST_TEST_FILES := \
+	test/legacy/test_legacy_qty_compare_cli.py \
+	test/test_audio_probe_smoke.py \
+	test/test_audlint_analyze_logic.py \
+	test/test_audlint_dataset_smoke.py \
+	test/test_audlint_doctor_smoke.py \
+	test/test_audlint_source_audit_smoke.py \
+	test/test_audlint_task_smoke.py \
+	test/test_audlint_value_smoke.py \
+	test/test_bootstrap_portability.py \
+	test/test_bootstrap_tty.py \
+	test/test_deps_path_smoke.py \
+	test/test_dr_grade.py \
+	test/test_install_sh_smoke.py \
+	test/test_makefile_contract.py \
+	test/test_lyrics_smoke.py \
+	test/test_player_content_creator.py \
+	test/test_profile_norm.py \
+	test/test_secure_backup.py \
+	test/test_spectre_calibration_cases.py \
+	test/test_spectre_cli_smoke.py \
+	test/test_spectre_image.py \
+	test/test_sqlite_profile_normalization.py \
+	test/test_sqlite_query_plan_smoke.py \
+	test/test_sync_music_smoke.py
+
+INTEGRATION_TEST_FILES := \
+	test/legacy/test_legacy_audlint_task_db.py \
+	test/legacy/test_legacy_boost_audio_cli_smoke.py \
+	test/legacy/test_legacy_tags_scripts.py \
+	test/test_any2flac_smoke.py \
+	test/test_audlint_analyze_cache_smoke.py \
+	test/test_audlint_analyze_corpus_baseline.py \
+	test/test_audlint_analyze_corpus_benchmark.py \
+	test/test_audlint_analyze_corpus_smoke.py \
+	test/test_audlint_maintain_smoke.py \
+	test/test_cover_smoke.py \
+	test/test_cue2flac_smoke.py \
+	test/test_dff2flac_smoke.py \
+	test/test_library_browser_smoke.py \
+	test/test_ui_regression.py
+
+.PHONY: help install uninstall relink install-env lint fmt-check bash5-check test test-integration test-all test-spectre source-audit check db-reset
 
 help:
 	@printf "%s\n" \
@@ -30,12 +72,12 @@ help:
 		"  lint         Run shellcheck on shell scripts" \
 		"  fmt-check    Run shfmt -d on shell scripts" \
 		"  bash5-check  Validate Bash 5 shebang/parse consistency" \
-		"  test-core    Run baseline Python unit tests in test/" \
+		"  test         Run the fast Python development suite" \
+		"  test-integration Run integration and deep-regression Python tests" \
+		"  test-all     Run every supported Python test once (release suite)" \
 		"  test-spectre Run spectre.sh smoke tests" \
-		"  test-legacy  Run migrated legacy test suite in test/legacy" \
-		"  test         Run test-core + test-legacy" \
 		"  source-audit Audit commit candidates for prohibited content" \
-		"  check        Run lint + fmt-check + bash5-check + test + source-audit" \
+		"  check        Run lint + fmt-check + bash5-check + test-all + source-audit" \
 		"  db-reset     Truncate album_quality + scan_roadmap (requires AUDL_DB_PATH env var)"
 
 install:
@@ -77,27 +119,28 @@ fmt-check:
 bash5-check:
 	@test/sh/bash5_consistency.sh lib/sh bin
 
-test-core:
-	@$(AUDL_PYTHON_BIN) -m unittest discover -s test -p 'test_*.py'
-
 test-spectre:
 	@$(AUDL_PYTHON_BIN) -m unittest discover -s test -p 'test_spectre_cli_smoke.py' -v
 
-test-legacy:
-	@$(AUDL_PYTHON_BIN) -m unittest discover -s test/legacy -p 'test_*.py'
+test:
+	@$(AUDL_PYTHON_BIN) -m unittest $(FAST_TEST_FILES)
 
-test: test-core test-legacy
+test-integration:
+	@$(AUDL_PYTHON_BIN) -m unittest $(INTEGRATION_TEST_FILES)
+
+test-all:
+	@$(AUDL_PYTHON_BIN) -m unittest $(FAST_TEST_FILES) $(INTEGRATION_TEST_FILES)
 
 source-audit:
 	@bin/audlint-source-audit.sh
 
 # The recipe, rather than parallel prerequisites, keeps the authoritative audit
-# strictly after the unchanged test target even under `make -j`.
+# strictly after the complete Python suite even under `make -j`.
 check:
 	@$(MAKE) lint
 	@$(MAKE) fmt-check
 	@$(MAKE) bash5-check
-	@$(MAKE) test
+	@$(MAKE) test-all
 	@$(MAKE) source-audit
 
 db-reset:

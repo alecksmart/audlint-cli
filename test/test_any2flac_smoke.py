@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -16,22 +17,48 @@ def _write_exec(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _copy_immutable_stubs(source: Path, destination: Path) -> None:
+    try:
+        shutil.copytree(source, destination, copy_function=os.link)
+    except OSError:
+        # Filesystems may reject hard links (for example across volumes).  A
+        # partial hard-link tree is not a valid fixture, so replace it with a
+        # fully independent copy before the test uses it.
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination, copy_function=shutil.copy2)
+
+
 class Any2FlacSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Stubs are immutable; hard-linking them into each temporary album
+        # retains filesystem isolation without recreating six shell programs
+        # for every conversion scenario.
+        cls._stub_tmp = tempfile.TemporaryDirectory()
+        cls._stub_bin = Path(cls._stub_tmp.name) / "bin"
+        cls._stub_bin.mkdir(parents=True, exist_ok=True)
+        cls._install_stubs(cls._stub_bin)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._stub_tmp.cleanup()
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmpdir = Path(self._tmp.name)
         self.bin_dir = self.tmpdir / "bin"
-        self.bin_dir.mkdir(parents=True, exist_ok=True)
-        self._install_stubs()
+        _copy_immutable_stubs(type(self)._stub_bin, self.bin_dir)
         self.album_dir = self.tmpdir / "album"
         self.album_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _install_stubs(self) -> None:
+    @staticmethod
+    def _install_stubs(bin_dir: Path) -> None:
         _write_exec(
-            self.bin_dir / "ffprobe",
+            bin_dir / "ffprobe",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -132,16 +159,18 @@ EOF
             ),
         )
         _write_exec(
-            self.bin_dir / "ffmpeg",
+            bin_dir / "ffmpeg",
             textwrap.dedent(
-                f"""\
+                """\
                 #!/usr/bin/env bash
-                printf '%s\\n' "$*" >> "{self.tmpdir / 'ffmpeg.log'}"
+                if [[ -n "${STUB_LOG_DIR:-}" ]]; then
+                  printf '%s\\n' "$*" >> "$STUB_LOG_DIR/ffmpeg.log"
+                fi
                 if [[ "$*" == *"loudnorm=I=-23:TP=-1.5:LRA=11:print_format=summary"* ]]; then
-                  echo "Input True Peak: ${{STUB_TRUE_PEAK:--2.0}} dBTP" >&2
+                  echo "Input True Peak: ${STUB_TRUE_PEAK:--2.0} dBTP" >&2
                   exit 0
                 fi
-                out="${{@: -1}}"
+                out="${@: -1}"
                 mkdir -p "$(dirname "$out")"
                 : > "$out"
                 exit 0
@@ -152,12 +181,14 @@ EOF
         # The effects chain args (rate, dither, gain, ...) follow the output path,
         # so the output is the first non-option arg after the input.
         _write_exec(
-            self.bin_dir / "sox",
+            bin_dir / "sox",
             textwrap.dedent(
-                f"""\
+                """\
                 #!/usr/bin/env bash
-                printf '%s\\n' "$*" >> "{self.tmpdir / 'sox.log'}"
-                if [[ "${{1:-}}" == "--help-format" || "${{1:-}}" == "--help" ]]; then
+                if [[ -n "${STUB_LOG_DIR:-}" ]]; then
+                  printf '%s\\n' "$*" >> "$STUB_LOG_DIR/sox.log"
+                fi
+                if [[ "${1:-}" == "--help-format" || "${1:-}" == "--help" ]]; then
                   echo "AUDIO FILE FORMATS: flac wav aiff aif aifc caf dsf dff wv ape mp4 mp3 aac ogg opus ffmpeg"
                   exit 0
                 fi
@@ -165,22 +196,22 @@ EOF
                 args=("$@")
                 positionals=()
                 i=0
-                while (( i < ${{#args[@]}} )); do
-                  case "${{args[$i]}}" in
+                while (( i < ${#args[@]} )); do
+                  case "${args[$i]}" in
                     -b|-r|-c|-e|-t|-L|-R|-C|--compression) (( i += 2 )) || true ;;
                     -*) (( i++ )) || true ;;
-                    *) positionals+=("${{args[$i]}}"); (( i++ )) || true ;;
+                    *) positionals+=("${args[$i]}"); (( i++ )) || true ;;
                   esac
                 done
-                out="${{positionals[1]:-}}"
-                [[ -n "$out" ]] && {{ mkdir -p "$(dirname "$out")"; : > "$out"; }}
+                out="${positionals[1]:-}"
+                [[ -n "$out" ]] && { mkdir -p "$(dirname "$out")"; : > "$out"; }
                 exit 0
                 """
             ),
         )
         # metaflac stub: succeed silently for tag export/import operations.
         _write_exec(
-            self.bin_dir / "metaflac",
+            bin_dir / "metaflac",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -189,7 +220,7 @@ EOF
             ),
         )
         _write_exec(
-            self.bin_dir / "audlint-analyze.sh",
+            bin_dir / "audlint-analyze.sh",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -205,12 +236,14 @@ EOF
             ),
         )
         _write_exec(
-            self.bin_dir / "cover_album.sh",
+            bin_dir / "cover_album.sh",
             textwrap.dedent(
-                f"""\
+                """\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                printf '%s|%s\\n' "$(pwd)" "$*" >> "{self.tmpdir / 'cover.log'}"
+                if [[ -n "${STUB_LOG_DIR:-}" ]]; then
+                  printf '%s|%s\\n' "$(pwd)" "$*" >> "$STUB_LOG_DIR/cover.log"
+                fi
                 printf 'Art: OK | cover.jpg | JPEG 600x600 | embedded 1/1 | sidecars cleared=0 | extra embeds cleared=0\\n'
                 """
             ),
@@ -222,6 +255,7 @@ EOF
         env["NO_COLOR"] = "1"
         env["AUDLINT_ANALYZE_BIN"] = str(self.bin_dir / "audlint-analyze.sh")
         env["AUDL_ARTWORK_AUTO"] = "0"
+        env["STUB_LOG_DIR"] = str(self.tmpdir)
         if extra_env:
             env.update(extra_env)
         return subprocess.run(

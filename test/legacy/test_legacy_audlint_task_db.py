@@ -27,6 +27,30 @@ class AudlintTaskDbTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         if shutil.which("sqlite3") is None:
             raise unittest.SkipTest("sqlite3 binary is required")
+        # The task and its shell helpers are read-only test inputs.  Building
+        # this runtime once avoids copying the complete shell library for each
+        # database scenario; each test still owns its lock, cache, database,
+        # media fixture, and executable stubs.
+        cls._runtime_tmp = tempfile.TemporaryDirectory()
+        runtime_root = Path(cls._runtime_tmp.name)
+        cls.script_dir = runtime_root / "bin"
+        cls.script_dir.mkdir(parents=True, exist_ok=True)
+        lib_sh_dir = runtime_root / "lib" / "sh"
+        lib_sh_dir.mkdir(parents=True, exist_ok=True)
+        cls.audlint_task = cls.script_dir / "audlint-task.sh"
+        cls.audlint_task.write_text(SRC_AUDLINT_TASK.read_text(encoding="utf-8"), encoding="utf-8")
+        cls.audlint_task.chmod(cls.audlint_task.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        tag_writer = cls.script_dir / "tag_writer.sh"
+        tag_writer.write_text(SRC_TAG_WRITER.read_text(encoding="utf-8"), encoding="utf-8")
+        tag_writer.chmod(tag_writer.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        for helper in SRC_LIB_SH.glob("*.sh"):
+            target = lib_sh_dir / helper.name
+            target.write_text(helper.read_text(encoding="utf-8"), encoding="utf-8")
+            target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._runtime_tmp.cleanup()
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -35,21 +59,13 @@ class AudlintTaskDbTests(unittest.TestCase):
         self.bin_dir = self.tmpdir / "bin"
         self.bin_dir.mkdir(parents=True, exist_ok=True)
 
-        self.work_dir = self.tmpdir / "work"
-        self.script_dir = self.work_dir / "bin"
-        self.script_dir.mkdir(parents=True, exist_ok=True)
-        self.lib_sh_dir = self.work_dir / "lib" / "sh"
-        self.lib_sh_dir.mkdir(parents=True, exist_ok=True)
-        self.audlint_task = self.script_dir / "audlint-task.sh"
-        self.audlint_task.write_text(SRC_AUDLINT_TASK.read_text(encoding="utf-8"), encoding="utf-8")
-        self.audlint_task.chmod(self.audlint_task.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        tag_writer = self.script_dir / "tag_writer.sh"
-        tag_writer.write_text(SRC_TAG_WRITER.read_text(encoding="utf-8"), encoding="utf-8")
-        tag_writer.chmod(tag_writer.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        for helper in SRC_LIB_SH.glob("*.sh"):
-            target = self.lib_sh_dir / helper.name
-            target.write_text(helper.read_text(encoding="utf-8"), encoding="utf-8")
-            target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        self.script_dir = type(self).script_dir
+        self.audlint_task = type(self).audlint_task
+        # The task command and source libraries are immutable class fixtures,
+        # but value/analyzer helpers are per-case stubs because scenarios may
+        # alter their behavior through environment variables.
+        self.stub_script_dir = self.tmpdir / "command-stubs"
+        self.stub_script_dir.mkdir(parents=True, exist_ok=True)
 
         _write_exec(
             self.bin_dir / "ffmpeg",
@@ -286,7 +302,7 @@ OUT
         # STUB_AUDVALUE_RECODE_TO env vars.  Defaults: grade=A, DR=9, recode=96000/24.
         # Set STUB_AUDVALUE_FAIL=1 to simulate tool failure (exits 1).
         _write_exec(
-            self.script_dir / "audlint-value.sh",
+            self.stub_script_dir / "audlint-value.sh",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -332,7 +348,7 @@ OUT
             ),
         )
         _write_exec(
-            self.script_dir / "audlint-analyze.sh",
+            self.stub_script_dir / "audlint-analyze.sh",
             textwrap.dedent(
                 """\
                 #!/usr/bin/env bash
@@ -352,7 +368,7 @@ OUT
     def _run(self, args, cwd: Path, db_path: Path, extra_env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
         import shutil as _shutil
         env = os.environ.copy()
-        env["PATH"] = f"{self.bin_dir}{os.pathsep}{self.script_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["PATH"] = f"{self.bin_dir}{os.pathsep}{self.stub_script_dir}{os.pathsep}{self.script_dir}{os.pathsep}{env.get('PATH', '')}"
         env["TERM"] = "xterm"
         env["AUDL_DB_PATH"] = str(db_path)
         # Use real python3 for JSON parsing in audio.sh.
@@ -362,7 +378,8 @@ OUT
         env["AUDLINT_TASK_LOCK_DIR"] = str(self.lock_dir)
         env["AUDLINT_TASK_DISCOVERY_CACHE_FILE"] = str(self.tmpdir / "audlint_task_last_discovery")
         # Point directly at the audlint-value.sh stub so audio.sh resolves it correctly.
-        env["AUDLINT_VALUE_BIN"] = str(self.script_dir / "audlint-value.sh")
+        env["AUDLINT_VALUE_BIN"] = str(self.stub_script_dir / "audlint-value.sh")
+        env["AUDLINT_ANALYZE_BIN"] = str(self.stub_script_dir / "audlint-analyze.sh")
         if extra_env:
             env.update(extra_env)
         return subprocess.run(

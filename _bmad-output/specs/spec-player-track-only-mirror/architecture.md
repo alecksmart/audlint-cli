@@ -66,14 +66,14 @@ The Player Content invocation is structurally:
 
 ```bash
 "$RSYNC_BIN" \
-  -r --prune-empty-dirs \
+  -r --size-only --prune-empty-dirs \
   --delete --delete-excluded \
   --itemize-changes \
   -f ". $rules_file" \
   "$library_real/" "$player_real/"
 ```
 
-`-r` copies the selected regular-file content and required directory structure without preserving source permissions, timestamps, group, or owner metadata. This deliberately avoids AppleDouble `._*` sidecars on removable filesystems that cannot represent those metadata writes. `--delete-excluded` makes the final exclusion eligible for destination deletion rather than protection. Do not add `--ignore-errors`.
+`-r` copies the selected regular-file content and required directory structure without preserving source permissions, timestamps, group, or owner metadata. `--size-only` prevents equal-size tracks from being recopied solely because destination timestamps deliberately differ. This deliberately avoids AppleDouble `._*` sidecars on removable filesystems that cannot represent those metadata writes. `--delete-excluded` makes the final exclusion eligible for destination deletion rather than protection. Do not add `--ignore-errors`.
 
 Browser transfer uses the same options and an album-rooted exact rule file for each requested source and destination pair.
 

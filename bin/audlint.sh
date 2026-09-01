@@ -3949,7 +3949,7 @@ virtwin_status_set() {
 }
 
 printf 'Media player path: %s\n\n' "$player_path"
-rsync_args=(-r --prune-empty-dirs --delete --delete-excluded --itemize-changes)
+rsync_args=(-r --size-only --prune-empty-dirs --delete --delete-excluded --itemize-changes)
 if "$rsync_bin" --help 2>/dev/null | grep -q -- '--info'; then
   rsync_args+=(--info=progress2,name1)
   printf 'rsync mode: verbose + itemize + progress2\n\n'

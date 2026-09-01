@@ -1517,7 +1517,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertEqual(rc, 0, msg=clean)
         self.assertTrue(rsync_args_log.exists(), msg=clean)
         args_text = rsync_args_log.read_text(encoding="utf-8")
-        self.assertIn("-r --prune-empty-dirs", args_text)
+        self.assertIn("-r --size-only --prune-empty-dirs", args_text)
         self.assertNotIn("-a", args_text)
         self.assertIn("--delete --delete-excluded", args_text)
         self.assertIn("-f . /", args_text)

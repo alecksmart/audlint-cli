@@ -79,7 +79,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         finally:
             con.close()
 
-    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None, resizes: list[tuple[float, int, int]] | None = None, callbacks: list[tuple[float, Callable[[], None]]] | None = None) -> tuple[int, str]:
+    def _pty(self, keys: bytes, env_more: dict[str, str] | None = None, timeout_s: float = 8, followup: tuple[bytes, bytes] | None = None, followups: list[tuple[bytes, bytes]] | None = None, rows: int | None = None, columns: int | None = None, delayed_keys: list[tuple[float, bytes]] | None = None, resizes: list[tuple[float, int, int]] | None = None, callbacks: list[tuple[float, Callable[[], None]]] | None = None, command: Path = MAINTAIN) -> tuple[int, str]:
         env = os.environ.copy()
         env.update({
             "TERM": "xterm", "NO_COLOR": "1", "AUDLINT_LIBRARY_ROOT": str(self.library),
@@ -95,7 +95,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         master, slave = pty.openpty()
         if rows is not None and columns is not None:
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-        proc = subprocess.Popen([str(MAINTAIN)], cwd=REPO_ROOT, env=env, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+        proc = subprocess.Popen([str(command)], cwd=REPO_ROOT, env=env, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
         os.close(slave)
         pending = list(followups or ([] if followup is None else [followup]))
         delayed = list(delayed_keys or [])
@@ -281,7 +281,15 @@ class PlayerContentCreatorTests(unittest.TestCase):
             self.skipTest("rsync is required for exact mirror verification")
         self._add_album(1, "Artist", "Album", 2001, b"selected")
         calls = self.root / "rsync-calls"
-        write_exec(self.bin / "rsync", "#!/usr/bin/env bash\nset -eu\nprintf x >>\"${RSYNC_CALLS:?}\"\nexec \"${SYSTEM_RSYNC:?}\" \"$@\"\n")
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --help ]] && exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "[[ ${1:-} == --outbuf=L && ${2:-} == --version ]] && exit 0\n"
+            "printf x >>\"${RSYNC_CALLS:?}\"\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
+        )
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
         # c opens the selector; Space commits the selection before w starts
         # its one guarded root mirror, then q immediately exits the selector.
@@ -361,6 +369,8 @@ class PlayerContentCreatorTests(unittest.TestCase):
             self.bin / "rsync",
             "#!/usr/bin/env bash\nset -eu\n"
             "[[ ${1:-} == --help ]] && exit 0\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "[[ ${1:-} == --outbuf=L && ${2:-} == --version ]] && exit 0\n"
             "printf x >>\"${RSYNC_CALLS:?}\"\n"
             "stty -a >\"${RSYNC_TTY_STATE:?}\"\n"
             "while [[ ! -e ${RSYNC_RELEASE:?} ]]; do sleep 0.02; done\n"
@@ -379,7 +389,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         self.assertEqual(calls.read_text(encoding="utf-8"), "x", output)
         self.assertIn("icanon", tty_state.read_text(encoding="utf-8"), output)
-        self.assertNotIn("verbose rsync line", output)
+        self.assertIn("verbose rsync line", output)
         running_at = output.index("Synchronizing player...")
         for row in range(8, 16):
             self.assertIn(f"\x1b[{row};1H\x1b[2K", output[:running_at])
@@ -388,6 +398,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("Synchronizing player...", running_screen[7])
         self.assertTrue(all(not line for line in running_screen[8:15]), running_screen)
         self.assertNotIn("Artist", "\n".join(running_screen))
+        self.assertIn("\x1b[10;1H\x1b[2Kverbose rsync line", output)
         final_output = output.rsplit("\x1b[?25l", 1)[1].split("\x1b[?25h", 1)[0]
         final_screen = test_ui_regression.UiRegressionTests._render_terminal(final_output, columns=100, rows=16)
         self.assertEqual("\n".join(final_screen).count("Sync complete:"), 1, final_screen)
@@ -395,6 +406,252 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertNotIn("[any key Continue]", output)
         self.assertTrue((source / "01 track.flac").exists())
         self.assertTrue((unchecked / "01 track.flac").exists())
+
+    def test_progress_capable_rsync_renders_aggregate_feedback_during_one_root_mirror(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
+        source = self._add_album(1, "Artist", "Album", 2001, b"selected")
+        self._select(source)
+        calls = self.root / "rsync-calls"
+        args = self.root / "rsync-args"
+        release = self.root / "release-rsync"
+        progress = chr(13) + "      123,456  50%    1.00MB/s    0:00:01"
+        wrapper = self.bin / "maintain-wrapper"
+        virtwin = REPO_ROOT / "lib" / "sh" / "virtwin.sh"
+        write_exec(
+            wrapper,
+            f'#!/usr/bin/env bash\nsource "{virtwin}"\n'
+            f'virtwin_run_command 5 24 100 maintain --no-wait "{MAINTAIN}"\n',
+        )
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "if [[ ${1:-} == --help ]]; then printf '%s\\n' '--info' '--outbuf'; exit 0; fi\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "[[ ${1:-} == --outbuf=L && ${2:-} == --version ]] && exit 0\n"
+            "printf x >>\"${RSYNC_CALLS:?}\"\n"
+            "printf '%s' \"$*\" >\"${RSYNC_ARGS:?}\"\n"
+            "printf '%s' \"${RSYNC_PROGRESS:?}\"\n"
+            "while [[ ! -e ${RSYNC_RELEASE:?} ]]; do sleep 0.02; done\n"
+            "printf '\\n%s' \"${RSYNC_SOURCE_NAME:?}\"\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
+        )
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+
+        rc, output = self._pty(
+            b"cw",
+            {"RSYNC_CALLS": str(calls), "RSYNC_ARGS": str(args), "RSYNC_RELEASE": str(release), "RSYNC_PROGRESS": progress, "RSYNC_SOURCE_NAME": "a source name now shown" + chr(10), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
+            callbacks=[(0.5, lambda: release.touch())],
+            followups=[(b"123,456", b""), (b"Sync complete:", b"qq")],
+            command=wrapper,
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(calls.read_text(encoding="utf-8"), "x", output)
+        self.assertIn("--size-only", args.read_text(encoding="utf-8"))
+        self.assertIn("--info=progress2", args.read_text(encoding="utf-8"))
+        self.assertIn("--outbuf=L", args.read_text(encoding="utf-8"))
+        self.assertIn("123,456", output)
+        self.assertLess(output.index("123,456"), output.index("Sync complete:"), output)
+        self.assertIn("a source name now shown", output)
+        self.assertIn("\x1b[9;1H\x1b[2KRsync:", output)
+        self.assertNotIn("\x1b[6;31HRsync:", output)
+        maintain_source = MAINTAIN.read_text(encoding="utf-8")
+        self.assertIn("tty_open_output_fd selector_output_fd", maintain_source)
+        self.assertNotIn('exec {selector_progress_fd}>&"$selector_fd"', maintain_source)
+
+    def test_real_rsync_progress_is_visible_before_root_mirror_completes(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for live progress verification")
+        source = self._add_album(1, "Artist", "Album", 2001, b"x" * 1_200_000)
+        self._select(source)
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n"
+            "[[ ${1:-} == --outbuf=L && ${2:-} == --version ]] && exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n"
+            "exec \"${SYSTEM_RSYNC:?}\" --bwlimit=200 \"$@\"\n",
+        )
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+
+        rc, output = self._pty(
+            b"cw",
+            {"SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
+            timeout_s=15,
+            followups=[(b"Rsync:", b""), (b"Sync complete:", b"qq")],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertLess(output.index("Rsync:"), output.index("Sync complete:"), output)
+
+    def test_progress_transcript_shows_sanitized_rsync_itemized_output(self) -> None:
+        source = self._add_album(1, "Artist", "Album", 2001, b"selected")
+        self._select(source)
+        release = self.root / "release-rsync"
+        progress = chr(13) + "      123,456  50%    1.00MB/s    0:00:01" + chr(10)
+        itemized = ">f+++++++++ A/Artist/2001 - Album/01 track.flac" + chr(10)
+        unsafe = chr(27) + "[2Jfilename-with-control" + chr(10)
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "[[ ${1:-} == --outbuf=L && ${2:-} == --version ]] && exit 0\n"
+            "printf '%s' \"${RSYNC_PROGRESS:?}\" \"${RSYNC_ITEMIZED:?}\" \"${RSYNC_UNSAFE:?}\"\n"
+            "while [[ ! -e ${RSYNC_RELEASE:?} ]]; do sleep 0.02; done\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
+        )
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+
+        rc, output = self._pty(
+            b"cw",
+            {"RSYNC_PROGRESS": progress, "RSYNC_ITEMIZED": itemized, "RSYNC_UNSAFE": unsafe, "RSYNC_RELEASE": str(release), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
+            callbacks=[(0.5, lambda: release.touch())],
+            followups=[(b"01 track.flac", b""), (b"Sync complete:", b"qq")],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("01 track.flac", output)
+        self.assertIn("filename-with-control", output)
+        self.assertNotIn("\x1b[2Jfilename-with-control", output)
+        self.assertIn("\x1b[10;1H\x1b[2K>f+++++++++", output)
+
+    def test_progress_transcript_scrolls_up_at_the_canvas_bottom(self) -> None:
+        source = self._add_album(1, "Artist", "Album", 2001, b"selected")
+        self._select(source)
+        release = self.root / "release-rsync"
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "[[ ${1:-} == --outbuf=L && ${2:-} == --version ]] && exit 0\n"
+            "printf '%s' \"${RSYNC_LINES:?}\"\n"
+            "while [[ ! -e ${RSYNC_RELEASE:?} ]]; do sleep 0.02; done\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
+        )
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+
+        rc, output = self._pty(
+            b"cw",
+            {"RSYNC_LINES": "line one\nline two\nline three\n", "RSYNC_RELEASE": str(release), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
+            rows=12,
+            columns=100,
+            callbacks=[(0.5, lambda: release.touch())],
+            followups=[(b"line one", b""), (b"Sync complete:", b"qq")],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("\x1b[10;1H\x1b[2Kline one", output)
+        self.assertIn("\x1b[11;1H\x1b[2Kline two", output)
+        self.assertIn("\x1b[10;11r\x1b[11;1H\x1b[2Kline three\r\n", output)
+        self.assertNotIn("\x1b[10;1H\x1b[2Kline three", output)
+
+    def test_rejected_progress_probe_keeps_existing_root_mirror_contract(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
+        source = self._add_album(1, "Artist", "Album", 2001, b"selected")
+        self._select(source)
+        args = self.root / "rsync-args"
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --help ]] && { printf '%s\\n' '--info'; exit 0; }\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 1\n"
+            "printf '%s' \"$*\" >\"${RSYNC_ARGS:?}\"\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
+        )
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+
+        rc, output = self._pty(
+            b"cw",
+            {"RSYNC_ARGS": str(args), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
+            followup=(b"Sync complete:", b"qq"),
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertNotIn("--info=progress2", args.read_text(encoding="utf-8"))
+        self.assertNotIn("--outbuf=L", args.read_text(encoding="utf-8"))
+        self.assertNotIn("Rsync:", output)
+
+    def test_progress_channel_failure_falls_back_to_the_existing_root_mirror(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
+        source = self._add_album(1, "Artist", "Album", 2001, b"selected")
+        self._select(source)
+        args = self.root / "rsync-args"
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --help ]] && { printf '%s\\n' '--info'; exit 0; }\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "printf '%s' \"$*\" >\"${RSYNC_ARGS:?}\"\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
+        )
+        write_exec(self.bin / "mkfifo", "#!/usr/bin/env bash\nexit 1\n")
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+
+        rc, output = self._pty(
+            b"cw",
+            {"RSYNC_ARGS": str(args), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
+            followup=(b"Sync complete:", b"qq"),
+        )
+        self.assertEqual(rc, 0, output)
+        invoked = args.read_text(encoding="utf-8")
+        self.assertNotIn("--info=progress2", invoked)
+        self.assertNotIn("--outbuf=L", invoked)
+        self.assertIn("--size-only", invoked)
+        self.assertNotIn("Rsync:", output)
+
+    def test_progress_feedback_discards_controls_and_clips_in_a_narrow_terminal(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
+        source = self._add_album(1, "Artist", "Album", 2001, b"selected")
+        self._select(source)
+        release = self.root / "release-rsync"
+        unsafe_progress = chr(27) + "[2J      111  10%    1.00MB/s    0:00:01 (xfr#1, to-chk=9/10)" + chr(13)
+        clipped_progress = "      987,654,321  99%    123.45MB/s    0:00:01 (xfr#9, to-chk=0/10)" + chr(13)
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --help ]] && { printf '%s\\n' '--info'; exit 0; }\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "for _ in $(seq 1 600); do printf x; done; printf '%s' \"${RSYNC_CR:?}\"\n"
+            "printf '%s' \"${RSYNC_UNSAFE_PROGRESS:?}\" \"${RSYNC_CLIPPED_PROGRESS:?}\"\n"
+            "while [[ ! -e ${RSYNC_RELEASE:?} ]]; do sleep 0.02; done\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
+        )
+        write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
+
+        rc, output = self._pty(
+            b"cw",
+            {"RSYNC_RELEASE": str(release), "RSYNC_UNSAFE_PROGRESS": unsafe_progress, "RSYNC_CLIPPED_PROGRESS": clipped_progress, "RSYNC_CR": chr(13), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
+            rows=16,
+            columns=20,
+            callbacks=[(0.5, lambda: release.touch())],
+            followups=[(b"Rsync:", b""), (b"Sync complete:", b"qq")],
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertIn("Rsync:", output)
+        self.assertIn("…", output)
+        self.assertNotIn("\x1b[2J", output)
+        self.assertNotIn("987,654,321", output)
+
+    def test_progress_then_rsync_failure_keeps_selection_and_reports_real_status(self) -> None:
+        source = self._add_album(1, "Artist", "Album", 2001, b"selected")
+        self._select(source)
+        progress = "      123,456  50%    1.00MB/s    0:00:01 (xfr#1, to-chk=1/2)" + chr(13)
+        write_exec(
+            self.bin / "rsync",
+            "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --help ]] && { printf '%s\\n' '--info'; exit 0; }\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "printf '%s' \"${RSYNC_PROGRESS:?}\"\n"
+            "exit 23\n",
+        )
+
+        rc, output = self._pty(b"cw", {"RSYNC_PROGRESS": progress}, followups=[(b"123,456", b""), (b"rsync exited 23", b"qq")])
+        self.assertEqual(rc, 0, output)
+        self.assertIn("rsync exited 23", output)
+        self.assertNotIn("Sync complete:", output)
+        con = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 8)])
+        finally:
+            con.close()
 
     def test_unsafe_sync_never_calls_rsync(self) -> None:
         source = self._add_album(1, "Artist", "Album", 2001)
@@ -627,6 +884,9 @@ class PlayerContentCreatorTests(unittest.TestCase):
         write_exec(
             self.bin / "rsync",
             "#!/usr/bin/env bash\nset -eu\n"
+            "[[ ${1:-} == --help ]] && exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n"
+            "[[ ${1:-} == --info=progress2 && ${2:-} == --version ]] && exit 0\n"
+            "[[ ${1:-} == --outbuf=L && ${2:-} == --version ]] && exit 0\n"
             "printf x >>\"${RSYNC_CALLS:?}\"\n"
             "[[ $(wc -c <\"${RSYNC_CALLS:?}\") -eq 1 ]] && exit 7\n"
             "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",

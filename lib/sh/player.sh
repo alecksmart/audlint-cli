@@ -145,7 +145,8 @@ player_human_size_label() {
 # `relative-path US f US logical-bytes`.  Source and destination comparisons
 # consume this one representation; no compatibility snapshot format exists.
 player_secure_temp_create() {
-  local label="$1" out_var="$2" candidate="${TMPDIR:-/tmp}" protected resolved db_dir fallback_ok=1
+  local label="$1" out_var="$2" kind="${3:-file}" candidate="${TMPDIR:-/tmp}" protected resolved db_dir fallback_ok=1
+  [[ "$kind" == file || "$kind" == directory ]] || return 1
   [[ "$label" =~ ^[A-Za-z0-9_-]+$ && -n "$out_var" ]] || return 1
   resolved="$(path_resolve "$candidate" 2>/dev/null || true)"
   [[ -n "$resolved" && -d "$resolved" && -w "$resolved" ]] || { candidate=/tmp; resolved="$(path_resolve /tmp 2>/dev/null || true)"; }
@@ -169,8 +170,13 @@ player_secure_temp_create() {
   fi
   [[ -n "$resolved" && -d "$resolved" && -w "$resolved" && "$fallback_ok" == 1 ]] || return 1
   local made=""
-  made="$(umask 077; mktemp "$resolved/audlint_${label}.XXXXXX" 2>/dev/null)" || return 1
-  [[ -n "$made" && -f "$made" ]] || return 1
+  if [[ "$kind" == directory ]]; then
+    made="$(umask 077; mktemp -d "$resolved/audlint_${label}.XXXXXX" 2>/dev/null)" || return 1
+    [[ -n "$made" && -d "$made" ]] || return 1
+  else
+    made="$(umask 077; mktemp "$resolved/audlint_${label}.XXXXXX" 2>/dev/null)" || return 1
+    [[ -n "$made" && -f "$made" ]] || return 1
+  fi
   printf -v "$out_var" '%s' "$made"
 }
 

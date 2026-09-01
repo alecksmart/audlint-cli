@@ -98,6 +98,12 @@ the requested library-relative album subtrees. Neither workflow reports success
 until rsync, flush, and the owned destination path/type/size comparison pass.
 Transfers preserve content and paths, not source ownership, permissions, or
 timestamps, so removable filesystems do not create AppleDouble `._*` sidecars.
+They use `--size-only`, so equal-size tracks do not copy again solely because
+their destination timestamps intentionally differ.
+When its installed rsync advertises `--info`, Player Content streams only
+aggregate `progress2` records into the selector's bounded title-status field.
+This is optional live feedback: the single root mirror, its exit status, and
+the final postchecked result remain authoritative.
 
 ## Cross-component contracts
 

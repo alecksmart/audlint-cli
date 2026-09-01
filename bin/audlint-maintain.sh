@@ -191,12 +191,14 @@ player_content_selector_write_row() {
 }
 
 player_content_selector_clean_label() {
-  local raw="$1" width="$2" suffix="…"
-  raw="${raw//$'\r'/ }"
-  raw="${raw//$'\n'/ }"
-  raw="${raw//$'\e'/}"
+  local raw="$1" width="$2" suffix="…" cleaned="" char idx
   [[ "$width" =~ ^[0-9]+$ ]] || width=1
   ((width > 0)) || { printf ''; return 0; }
+  for ((idx=0; idx<${#raw}; idx++)); do
+    char="${raw:idx:1}"
+    [[ "$char" == [[:print:]] ]] && cleaned+="$char"
+  done
+  raw="$cleaned"
   if ((${#raw} > width)); then
     if ((width == 1)); then
       raw="${raw:0:1}"
@@ -205,6 +207,76 @@ player_content_selector_clean_label() {
     fi
   fi
   printf '%s' "$raw"
+}
+
+player_content_progress_render() {
+  local raw="$1" width="$2" progress_fd="$3" progress_row="$4" char idx
+  [[ "$width" =~ ^[0-9]+$ && "$progress_fd" =~ ^[0-9]+$ && "$progress_row" =~ ^[0-9]+$ ]] || return 0
+  # Only render a complete aggregate progress2 record in the dedicated meter.
+  for ((idx=0; idx<${#raw}; idx++)); do
+    char="${raw:idx:1}"
+    [[ "$char" == [[:print:]] ]] || return 0
+  done
+  [[ "$raw" =~ ^[[:space:]]*[0-9][0-9,]*[[:space:]]+[0-9]{1,3}%[[:space:]]+[0-9.]+[[:alpha:]]*/s[[:space:]]+[0-9:]+([[:space:]]+\(xfr#[0-9]+,\ to-chk=[0-9]+/[0-9]+\))?[[:space:]]*$ ]] || return 0
+  raw="$(player_content_selector_clean_label "Rsync: $raw" "$width")"
+  [[ -n "$raw" ]] || return 0
+  # The selector's cleared work area owns transfer feedback. Do not replace
+  # the virtual-window header's normal maintenance status while it runs.
+  printf '\0337\033[%s;1H\033[2K%s\0338' "$progress_row" "$raw" 1>&"$progress_fd" 2>/dev/null || true
+}
+
+player_content_progress_is_aggregate() {
+  local raw="$1" char idx
+  for ((idx=0; idx<${#raw}; idx++)); do
+    char="${raw:idx:1}"
+    [[ "$char" == [[:print:]] ]] || return 1
+  done
+  [[ "$raw" =~ ^[[:space:]]*[0-9][0-9,]*[[:space:]]+[0-9]{1,3}%[[:space:]]+[0-9.]+[[:alpha:]]*/s[[:space:]]+[0-9:]+([[:space:]]+\\(xfr#[0-9]+,\\ to-chk=[0-9]+/[0-9]+\\))?[[:space:]]*$ ]]
+}
+
+player_content_transcript_render() {
+  local raw="$1" width="$2" progress_fd="$3" transcript_top="$4" transcript_bottom="$5" transcript_row="$6"
+  [[ "$width" =~ ^[0-9]+$ && "$progress_fd" =~ ^[0-9]+$ && "$transcript_top" =~ ^[0-9]+$ && "$transcript_bottom" =~ ^[0-9]+$ && "$transcript_row" =~ ^[0-9]+$ ]] || return 0
+  ((transcript_top <= transcript_bottom)) || return 0
+  raw="$(player_content_selector_clean_label "$raw" "$width")"
+  [[ -n "$raw" ]] || return 0
+  if ((transcript_row <= transcript_bottom)); then
+    printf '\0337\033[%s;1H\033[2K%s\0338' "$transcript_row" "$raw" 1>&"$progress_fd" 2>/dev/null || true
+  else
+    # Once the transcript is full, constrain a real terminal line-feed scroll
+    # to these rows. The aggregate meter directly above it remains fixed.
+    printf '\0337\033[%s;%sr\033[%s;1H\033[2K%s\n\0338' "$transcript_top" "$transcript_bottom" "$transcript_bottom" "$raw" 1>&"$progress_fd" 2>/dev/null || true
+  fi
+}
+
+player_content_progress_consume() {
+  local progress_pipe="$1" width="$2" progress_fd="$3" progress_row="$4" transcript_bottom="$5" progress_record="" progress_char="" progress_overflow=false transcript_row
+  transcript_row=$((progress_row + 1))
+  # Rsync progress2 begins each update with CR and can leave it unterminated
+  # while a large file is still copying. Render the aggregate status as soon as
+  # its bounded numeric record is complete; stream all newline records below it.
+  while IFS= read -r -N 1 progress_char || [[ -n "$progress_char" ]]; do
+    if [[ "$progress_char" == $'\r' ]]; then
+        [[ "$progress_overflow" == false ]] && player_content_progress_render "$progress_record" "$width" "$progress_fd" "$progress_row"
+        progress_record=""
+        progress_overflow=false
+    elif [[ "$progress_char" == $'\n' ]]; then
+      if [[ "$progress_overflow" == false ]] && ! player_content_progress_is_aggregate "$progress_record"; then
+        player_content_transcript_render "$progress_record" "$width" "$progress_fd" "$((progress_row + 1))" "$transcript_bottom" "$transcript_row"
+        transcript_row=$((transcript_row + 1))
+      fi
+      progress_record=""
+      progress_overflow=false
+    elif [[ "$progress_overflow" == false ]]; then
+        if ((${#progress_record} < 512)); then
+          progress_record+="$progress_char"
+          player_content_progress_render "$progress_record" "$width" "$progress_fd" "$progress_row"
+        else
+          progress_record=""
+          progress_overflow=true
+        fi
+      fi
+  done <"$progress_pipe"
 }
 
 player_content_selector_restore_terminal() {
@@ -218,6 +290,10 @@ player_content_selector_restore_terminal() {
 player_content_selector_cleanup() {
   player_content_selector_restore_terminal
   [[ "${selector_scroll_region_active:-false}" == true ]] && printf '\033[;r'
+  if [[ "${selector_progress_fd:-}" =~ ^[0-9]+$ ]]; then
+    exec {selector_progress_fd}>&- 2>/dev/null || true
+  fi
+  selector_progress_fd=""
   [[ -n "${selector_fd:-}" ]] && tty_close_input_fd "$selector_fd"
   selector_fd=""
 }
@@ -426,10 +502,54 @@ player_content_sync() {
     return 1
   fi
   rm -f "$selection_verify"
-  # The selector owns the visible outcome.  Discard verbose tool output so a
-  # large rsync listing cannot be retained in memory or leak into its canvas.
-  local command_status
-  if "$RSYNC_BIN" -r --prune-empty-dirs --delete --delete-excluded --itemize-changes -f ". $rules" "$library_real"/ "$player_real"/ >/dev/null 2>&1; then
+  # The selector owns the visible outcome. With a capable rsync, pass only
+  # aggregate progress2 records to its reserved title field; all other tool
+  # output stays streamed and discarded.
+  local command_status progress_fd="${selector_progress_fd:-}" progress_width="${selector_cols:-}" progress_row="${selector_progress_row:-}" transcript_bottom="${selector_progress_bottom_row:-}" progress_supported=false
+  local -a rsync_args=(-r --size-only --prune-empty-dirs --delete --delete-excluded --itemize-changes)
+  local -a rsync_progress_args=()
+  # Probe the exact optional flags without a transfer.  A binary may advertise
+  # --info yet not accept progress2, so any failed probe keeps the established
+  # root-mirror command intact.
+  if "$RSYNC_BIN" --info=progress2 --version >/dev/null 2>&1; then
+    progress_supported=true
+    rsync_progress_args=("${rsync_args[@]}" --info=progress2)
+    "$RSYNC_BIN" --outbuf=L --version >/dev/null 2>&1 && rsync_progress_args+=(--outbuf=L)
+  fi
+  local progress_dir="" progress_pipe="" progress_reader="" progress_active=false
+  if [[ "$progress_supported" == true && "$progress_fd" =~ ^[0-9]+$ && "$progress_width" =~ ^[0-9]+$ && "$progress_row" =~ ^[0-9]+$ && "$transcript_bottom" =~ ^[0-9]+$ && "$transcript_bottom" -gt "$progress_row" ]]; then
+    player_secure_temp_create progress progress_dir directory || progress_dir=""
+    if [[ -n "$progress_dir" ]]; then
+      progress_pipe="$progress_dir/progress"
+      if mkfifo -m 600 "$progress_pipe"; then
+        progress_active=true
+      else
+        rm -f "$progress_pipe"
+        rmdir "$progress_dir" 2>/dev/null || true
+        progress_dir=""
+        progress_pipe=""
+      fi
+    fi
+  fi
+  if [[ "$progress_active" == true ]]; then
+    (
+      player_content_progress_consume "$progress_pipe" "$progress_width" "$progress_fd" "$progress_row" "$transcript_bottom"
+    ) &
+    progress_reader=$!
+    if "$RSYNC_BIN" "${rsync_progress_args[@]}" -f ". $rules" "$library_real"/ "$player_real"/ >"$progress_pipe" 2>&1; then
+      command_status=0
+    else
+      command_status=$?
+    fi
+    wait "$progress_reader" || true
+    rm -f "$progress_pipe"
+    rmdir "$progress_dir" 2>/dev/null || true
+  elif "$RSYNC_BIN" "${rsync_args[@]}" -f ". $rules" "$library_real"/ "$player_real"/ >/dev/null 2>&1; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  if ((command_status == 0)); then
     if "$SYNC_BIN" >/dev/null 2>&1; then
       : >"$verify_snapshot"
       while IFS=$'\x1f' read -r source_path rel; do
@@ -451,7 +571,6 @@ player_content_sync() {
     printf 'Sync failed: sync command exited %s; selection was preserved.\n' "$command_status"
     return 1
   fi
-  command_status=$?
   rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
   printf 'Sync failed: rsync exited %s; selection was preserved.\n' "$command_status"
   return 1
@@ -496,7 +615,7 @@ player_content_creator() {
   local -a relative_paths=() artist_norms=() album_norms=() years=() artists=() albums=() sources=() checked=() sizes=() available=()
   local -a selector_drawn=()
   local row relative_path source_path artist artist_norm year album album_norm selected_size is_checked total=0 selected=0 cursor=0 offset=0 key idx
-  local selector_fd="" selector_state="" selector_active=false selector_footer="" selector_body_title="" selector_status="" selector_result="" selector_needs_status=true selector_cols=0 selector_scroll_region_active=false done=false
+  local selector_fd="" selector_progress_fd="" selector_progress_row="" selector_progress_bottom_row="" selector_state="" selector_active=false selector_footer="" selector_body_title="" selector_status="" selector_result="" selector_needs_status=true selector_cols=0 selector_scroll_region_active=false done=false
   local -A selected_sizes=()
   while IFS=$'\x1f' read -r relative_path selected_size; do
     [[ -n "$relative_path" ]] || continue
@@ -543,6 +662,15 @@ player_content_creator() {
     tty_close_input_fd "$selector_fd"
     printf 'Player Content Creator unavailable: terminal input cannot enter raw mode.\n'
     return 0
+  fi
+  # Duplicate terminal output before command substitution turns stdout into
+  # the final-result capture pipe. A literal FD 1 would otherwise be captured.
+  local selector_output_fd=""
+  if tty_open_output_fd selector_output_fd; then
+    { exec {selector_progress_fd}>&"$selector_output_fd"; } 2>/dev/null || selector_progress_fd=""
+    [[ "$selector_output_fd" == 1 ]] || exec {selector_output_fd}>&- 2>/dev/null || true
+  else
+    selector_progress_fd=""
   fi
   trap 'player_content_selector_cleanup' EXIT
   trap 'player_content_selector_cleanup; exit 130' HUP INT TERM
@@ -684,6 +812,8 @@ player_content_creator() {
           player_content_selector_write_row "$idx" ""
         done
         player_content_selector_write_row "$body_title_row" "$(paint "$C_TITLE" "Synchronizing player...")"
+        selector_progress_row=$((body_title_row + 1))
+        selector_progress_bottom_row="$footer_row"
         selector_drawn=(); selector_footer=""; selector_body_title=""
         player_content_selector_restore_terminal
         if ! selector_result="$(player_content_sync "$selected" "$total" 2>&1)"; then

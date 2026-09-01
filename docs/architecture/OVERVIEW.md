@@ -88,6 +88,17 @@ from those relative paths, and then overlays checked rows from
 continue to use `album_quality` and its natural identity. A rename is therefore
 a dropped checked path plus a new unchecked path, not an inferred continuation.
 
+Both Player Content and browser transfer use one completed, track-only source
+snapshot per requested album. A track is a non-symlink regular file with a
+canonical audio extension and no hidden path component. The snapshot supplies
+the cached byte count and a temporary ordered rsync rule file; it is rebuilt
+after copying to confirm source stability. Player Content owns and exactly
+mirrors the whole validated player root. Browser transfer exactly mirrors only
+the requested library-relative album subtrees. Neither workflow reports success
+until rsync, flush, and the owned destination path/type/size comparison pass.
+Transfers preserve content and paths, not source ownership, permissions, or
+timestamps, so removable filesystems do not create AppleDouble `._*` sidecars.
+
 ## Cross-component contracts
 
 - Profile normalization produces `SR_HZ/BITS`, where `BITS` can be an integer, `32f`, or `64f`. Analyzer and recode machine boundaries currently require targets with integer `BITS` values.

@@ -73,7 +73,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         try:
             con.executemany(
                 "INSERT INTO player_content_selection(relative_path,size_bytes) VALUES(?,?)",
-                [(str(folder.relative_to(self.library)), sum(path.stat().st_size for path in folder.rglob("*") if path.is_file() and path.name not in {"front.jpg", ".audlint_inspect_cache.json"})) for folder in folders],
+                [(str(folder.relative_to(self.library)), (folder / "01 track.flac").stat().st_size) for folder in folders],
             )
             con.commit()
         finally:
@@ -140,7 +140,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("Player Content Creator", output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 25)])
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 20)])
             self.assertEqual(con.execute("SELECT sql FROM sqlite_master WHERE name='player_content_selection'").fetchone() is not None, True)
         finally:
             con.close()
@@ -175,7 +175,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertGreaterEqual(output.count("1 of 3"), 2, output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("K/Knopfler, Mark/2001 - Second", 10)])
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("K/Knopfler, Mark/2001 - Second", 5)])
         finally:
             con.close()
 
@@ -277,13 +277,15 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn('if [[ "$selector_cols" != "$cols" ]]', source)
 
     def test_space_persists_selection_before_direct_root_mirror(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
         self._add_album(1, "Artist", "Album", 2001, b"selected")
         calls = self.root / "rsync-calls"
-        write_exec(self.bin / "rsync", "#!/usr/bin/env bash\nset -eu\nprintf x >>\"${RSYNC_CALLS:?}\"\n")
+        write_exec(self.bin / "rsync", "#!/usr/bin/env bash\nset -eu\nprintf x >>\"${RSYNC_CALLS:?}\"\nexec \"${SYSTEM_RSYNC:?}\" \"$@\"\n")
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
         # c opens the selector; Space commits the selection before w starts
         # its one guarded root mirror, then q immediately exits the selector.
-        rc, output = self._pty(b"c w", {"RSYNC_CALLS": str(calls)}, followup=(b"Sync complete:", b"qq"))
+        rc, output = self._pty(b"c w", {"RSYNC_CALLS": str(calls), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
         self.assertIn("Sync complete", output)
         self.assertNotIn("[y synchronize, any other key cancel]", output)
@@ -291,7 +293,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(calls.read_text(encoding="utf-8"), "x", output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 13)])
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 8)])
         finally:
             con.close()
 
@@ -344,6 +346,8 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("Selected: 0 | Size: 0b", output)
 
     def test_direct_manifest_mirror_clears_canvas_restores_tty_and_drains_repeated_w(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
         source = self._add_album(1, "Artist", "Selected", 2001, b"selected")
         unchecked = self._add_album(2, "Artist", "Unchecked", 2002, b"unchecked")
         self._select(source)
@@ -360,14 +364,15 @@ class PlayerContentCreatorTests(unittest.TestCase):
             "printf x >>\"${RSYNC_CALLS:?}\"\n"
             "stty -a >\"${RSYNC_TTY_STATE:?}\"\n"
             "while [[ ! -e ${RSYNC_RELEASE:?} ]]; do sleep 0.02; done\n"
-            "for _ in $(seq 1 1000); do printf 'verbose rsync line\\n'; done\n",
+            "for _ in $(seq 1 1000); do printf 'verbose rsync line\\n'; done\n"
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
         )
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
         # The second w is queued while rsync blocks.  It must be discarded
         # before the selector redraws; q is sent only after that redraw.
         rc, output = self._pty(
             b"cww",
-            {"RSYNC_CALLS": str(calls), "RSYNC_RELEASE": str(release), "RSYNC_TTY_STATE": str(tty_state)},
+            {"RSYNC_CALLS": str(calls), "RSYNC_RELEASE": str(release), "RSYNC_TTY_STATE": str(tty_state), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
             callbacks=[(0.3, lambda: release.touch())],
             followup=(b"Sync complete:", b"qq"),
         )
@@ -427,7 +432,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         target = self.player / "A" / "Artist" / "2001 - Selected"
         self.assertEqual((target / "01 track.flac").read_bytes(), b"selected-audio")
-        self.assertTrue((target / "cover.jpg").exists())
+        self.assertFalse((target / "cover.jpg").exists())
         self.assertFalse((target / "front.jpg").exists())
         self.assertFalse((target / ".audlint_inspect_cache.json").exists())
         self.assertFalse(stale.exists())
@@ -441,7 +446,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         rc, output = self._pty(b"c", {"AUDL_MEDIA_PLAYER_PATH": ""}, followup=(b"1 of 1", b" q q"))
         self.assertEqual(rc, 0, output)
         self.assertNotIn("sizing…", output)
-        self.assertIn("SD: unavailable | Selected: 1 | Size: 15b", output)
+        self.assertIn("SD: unavailable | Selected: 1 | Size: 10b", output)
         missing = self.root / "missing-player"
         rc, output = self._pty(b"cqq", {"AUDL_MEDIA_PLAYER_PATH": str(missing)})
         self.assertEqual(rc, 0, output)
@@ -471,7 +476,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0, output)
         self.assertIn("SD: ", output)
-        self.assertIn("Selected: 39 | Size: 585b", output)
+        self.assertIn("Selected: 39 | Size: 390b", output)
         self.assertNotIn("sizing…", output)
 
     def test_selected_size_zero_selection_skips_sizing(self) -> None:
@@ -490,7 +495,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
             delayed_keys=[(0.2, b" "), (0.5, b" "), (0.8, b"qq")],
         )
         self.assertEqual(rc, 0, output)
-        self.assertIn("Selected: 1 | Size: 25b", output)
+        self.assertIn("Selected: 1 | Size: 20b", output)
         self.assertGreaterEqual(output.count("Selected: 0 | Size: 0b"), 2, output)
         con = sqlite3.connect(self.db)
         try:
@@ -511,7 +516,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertIn("absent from the live inventory", output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 25)])
+            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 20)])
         finally:
             con.close()
 
@@ -570,7 +575,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         self.assertIn("suspiciously empty", output)
         con = sqlite3.connect(self.db)
-        self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Gone", 10)])
+        self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Gone", 5)])
         con.close()
 
     def test_empty_selection_directly_empties_player(self) -> None:
@@ -583,19 +588,21 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(list(self.player.iterdir()), [])
 
     def test_rsync_and_sync_failures_preserve_selection_then_retry(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
         source = self._add_album(1, "Artist", "Album", 2001)
         self._select(source)
-        write_exec(self.bin / "rsync", "#!/usr/bin/env bash\n[[ ${1:-} == --help ]] && exit 0\n[[ ${FAIL_RSYNC:-0} == 1 ]] && exit 7\nexit 0\n")
+        write_exec(self.bin / "rsync", "#!/usr/bin/env bash\n[[ ${FAIL_RSYNC:-0} == 1 ]] && exit 7\nexec \"${SYSTEM_RSYNC:?}\" \"$@\"\n")
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\n[[ ${FAIL_SYNC:-0} == 1 ]] && exit 9\nexit 0\n")
         for failure_env in ({"FAIL_RSYNC": "1"}, {"FAIL_SYNC": "1"}):
-            rc, output = self._pty(b"cw", failure_env, followup=(b"Sync failed", b"qq"))
+            rc, output = self._pty(b"cw", {**failure_env, "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"}, followup=(b"Sync failed", b"qq"))
             self.assertEqual(rc, 0, output)
             self.assertIn("Sync failed", output)
             self.assertNotIn("Sync complete", output)
             con = sqlite3.connect(self.db)
-            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 10)])
+            self.assertEqual(con.execute("SELECT * FROM player_content_selection").fetchall(), [("A/Artist/2001 - Album", 5)])
             con.close()
-        rc, output = self._pty(b"cw", followup=(b"Sync complete:", b"qq"))
+        rc, output = self._pty(b"cw", {"SYSTEM_RSYNC": shutil.which("rsync") or "rsync"}, followup=(b"Sync complete:", b"qq"))
         self.assertEqual(rc, 0, output)
         self.assertIn("Sync complete", output)
 
@@ -607,11 +614,13 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT size_bytes FROM player_content_selection").fetchone(), (15,))
+            self.assertEqual(con.execute("SELECT size_bytes FROM player_content_selection").fetchone(), (10,))
         finally:
             con.close()
 
     def test_failure_retry_replaces_result_and_narrow_canvas_keeps_outcome_readable(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact mirror verification")
         source = self._add_album(1, "Artist", "Album", 2001)
         self._select(source)
         calls = self.root / "rsync-calls"
@@ -620,12 +629,12 @@ class PlayerContentCreatorTests(unittest.TestCase):
             "#!/usr/bin/env bash\nset -eu\n"
             "printf x >>\"${RSYNC_CALLS:?}\"\n"
             "[[ $(wc -c <\"${RSYNC_CALLS:?}\") -eq 1 ]] && exit 7\n"
-            "exit 0\n",
+            "exec \"${SYSTEM_RSYNC:?}\" \"$@\"\n",
         )
         write_exec(self.bin / "sync", "#!/usr/bin/env bash\nexit 0\n")
         rc, output = self._pty(
             b"cw",
-            {"RSYNC_CALLS": str(calls)},
+            {"RSYNC_CALLS": str(calls), "SYSTEM_RSYNC": shutil.which("rsync") or "rsync"},
             rows=12,
             columns=20,
             followups=[(b"Sync failed", b"w"), (b"Sync complete:", b"qq")],
@@ -664,9 +673,9 @@ class PlayerContentCreatorTests(unittest.TestCase):
     def test_selector_sizes_without_repainting_its_fixed_rows(self) -> None:
         folders = [self._add_album(ident + 1, f"Artist {ident}", f"Album {ident}", 2000 + ident) for ident in range(3)]
         self._select(*folders)
-        rc, output = self._pty(b"c", followup=(b"Selected: 3 | Size: 30b", b"qq"), rows=16, columns=100)
+        rc, output = self._pty(b"c", followup=(b"Selected: 3 | Size: 15b", b"qq"), rows=16, columns=100)
         self.assertEqual(rc, 0, output)
-        self.assertIn("Selected: 3 | Size: 30b", output)
+        self.assertIn("Selected: 3 | Size: 15b", output)
         self.assertNotIn("sizing…", output)
         self.assertNotIn("\x1b[J", output)
         self.assertNotIn("\x1b[2J", output)
@@ -778,7 +787,7 @@ class PlayerContentCreatorTests(unittest.TestCase):
         self.assertEqual(rc, 0, output)
         con = sqlite3.connect(self.db)
         try:
-            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("Z/Zeta/2000 - First", 10)])
+            self.assertEqual(con.execute("SELECT relative_path,size_bytes FROM player_content_selection").fetchall(), [("Z/Zeta/2000 - First", 5)])
         finally:
             con.close()
         before_first_match = output.split("2 of 3", 1)[0]

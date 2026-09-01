@@ -13,6 +13,8 @@ The player root must also converge in one deletion-capable operation. An exact f
 
 The mechanism must preserve Bash 5 and macOS/Linux portability, avoid source-side rule files, and fail closed before destructive work when any snapshot or rule artifact is incomplete.
 
+On 2026-09-01, a removable player destination produced 4 KB `._*` AppleDouble sidecars for copied directory metadata. Those sidecars prevented deselected directories from becoming empty and therefore contradicted exact track-only convergence. This amends the original metadata-preservation assumption while retaining the snapshot and deletion mechanism.
+
 ## Decision
 Before any player rsync, build a complete snapshot of eligible regular track paths beneath the owned source scope. Use that same snapshot for per-album logical byte totals and transfer membership.
 
@@ -23,6 +25,8 @@ Stream selection manifests, track snapshots, size rows, and rules through secure
 Create temporary artifacts with restrictive permissions and checked writes outside the library, player, repository, and database directory. Expose only complete artifacts to rsync and clean owned temporary paths on normal and trappable failure exits.
 
 Player Content uses one library-root rsync with deletion enabled. Browser transfer uses the same compiled policy in album-scoped rsync calls after every requested source and destination passes preflight. Use excluded-content deletion so the terminal exclusion removes rather than protects unwanted destination objects. Do not enable source symlink, device, or special-file transfer, and do not use `--ignore-errors`.
+
+Player transfers use recursive content copying only (`-r`), without preserving source permissions, timestamps, group, or owner metadata. Some removable player filesystems represent those directory metadata writes as macOS AppleDouble `._*` sidecars; those files violate the exact track-only destination contract and can prevent empty deselected directories from being pruned. Destination metadata is therefore intentionally outside the mirror contract.
 
 Report success only after rsync and the existing flush command succeed, the source path/type/logical-size snapshot remains unchanged, and the owned destination scope contains exactly the expected paths, object types, and logical sizes. This postcondition relies on rsync for content copying and does not add independent checksumming.
 
@@ -51,6 +55,7 @@ Postcondition verification prevents a zero rsync status from becoming a false su
 - Destination filesystems that collapse names by case or normalization can fail postcondition verification.
 - Control-character track paths fail closed rather than being silently dropped or ambiguously encoded.
 - Successful Player Content synchronization removes excluded and deselected destination content in the same root-wide rsync operation.
+- Removable filesystems do not receive AppleDouble sidecars merely from directory metadata preservation; destination permissions, ownership, and timestamps are not preserved.
 - A future mechanism may replace compiled merge filters only by explicitly superseding this ADR while preserving ADR-0007.
 
 ## Alternatives

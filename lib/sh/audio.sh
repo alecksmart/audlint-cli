@@ -4,6 +4,33 @@ AUDIO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$AUDIO_LIB_DIR/profile.sh"
 
+# The one canonical set of extensions recognised as audio payloads.  Keep
+# membership here; callers must use audio_name_has_track_extension rather than
+# copy a glob list (in particular, player snapshots use this policy).
+AUDIO_TRACK_EXTENSIONS=(flac alac m4a wav aiff aif aifc caf dsf dff wv ape dts dca mp4 mp3 aac ogg opus)
+
+audio_track_extensions() {
+  local out_var="$1"
+  local -n out_ref="$out_var"
+  out_ref=("${AUDIO_TRACK_EXTENSIONS[@]}")
+}
+
+audio_name_has_track_extension() {
+  local base_name="${1:-}" extension
+  [[ -n "$base_name" && "$base_name" == *.* && "$base_name" != .* ]] || return 1
+  extension="${base_name##*.}"
+  extension="${extension,,}"
+  local candidate
+  for candidate in "${AUDIO_TRACK_EXTENSIONS[@]}"; do
+    [[ "$extension" == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+# Compatibility name for existing non-player callers.  New code uses the
+# public policy name above.
+audio_basename_is_track() { audio_name_has_track_extension "$1"; }
+
 audio_collect_files() {
   local dir="${1:-.}"
   local out_var="${2:-AUDIO_FILES}"
@@ -16,51 +43,21 @@ audio_collect_files() {
   shopt -q nocaseglob && had_nocaseglob=1
 
   shopt -s nullglob nocaseglob
-  if [[ "$dir" == "." ]]; then
-    out_ref=(
-      *.flac
-      *.alac
-      *.m4a
-      *.wav
-      *.aiff *.aif *.aifc
-      *.caf
-      *.dsf
-      *.dff
-      *.wv
-      *.ape
-      *.dts
-      *.dca
-      *.mp4
-      *.mp3
-      *.aac
-      *.ogg
-      *.opus
-    )
-  else
-    out_ref=(
-      "$dir"/*.flac
-      "$dir"/*.alac
-      "$dir"/*.m4a
-      "$dir"/*.wav
-      "$dir"/*.aiff "$dir"/*.aif "$dir"/*.aifc
-      "$dir"/*.caf
-      "$dir"/*.dsf
-      "$dir"/*.dff
-      "$dir"/*.wv
-      "$dir"/*.ape
-      "$dir"/*.dts
-      "$dir"/*.dca
-      "$dir"/*.mp4
-      "$dir"/*.mp3
-      "$dir"/*.aac
-      "$dir"/*.ogg
-      "$dir"/*.opus
-    )
-  fi
+  local -a extensions=()
+  local extension
+  audio_track_extensions extensions
+  out_ref=()
+  for extension in "${extensions[@]}"; do
+    if [[ "$dir" == "." ]]; then
+      out_ref+=( *."$extension" )
+    else
+      out_ref+=( "$dir"/*."$extension" )
+    fi
+  done
   local path
   local filtered=()
   for path in "${out_ref[@]}"; do
-    if [[ -f "$path" || -L "$path" ]]; then
+    if [[ -f "$path" || -L "$path" ]] && audio_name_has_track_extension "$(basename "$path")"; then
       filtered+=("$path")
     fi
   done
@@ -78,26 +75,12 @@ audio_collect_files() {
 # The list is the authoritative set of audio extensions recognised by audlint.
 # Keep this in sync with audio_collect_files above.
 audio_find_iname_args() {
-  printf '%s ' \
-    '-iname' '*.flac' \
-    '-o' '-iname' '*.alac' \
-    '-o' '-iname' '*.m4a' \
-    '-o' '-iname' '*.wav' \
-    '-o' '-iname' '*.aiff' \
-    '-o' '-iname' '*.aif' \
-    '-o' '-iname' '*.aifc' \
-    '-o' '-iname' '*.caf' \
-    '-o' '-iname' '*.dsf' \
-    '-o' '-iname' '*.dff' \
-    '-o' '-iname' '*.wv' \
-    '-o' '-iname' '*.ape' \
-    '-o' '-iname' '*.dts' \
-    '-o' '-iname' '*.dca' \
-    '-o' '-iname' '*.mp4' \
-    '-o' '-iname' '*.mp3' \
-    '-o' '-iname' '*.aac' \
-    '-o' '-iname' '*.ogg' \
-    '-o' '-iname' '*.opus'
+  local extension first=1
+  for extension in "${AUDIO_TRACK_EXTENSIONS[@]}"; do
+    ((first)) || printf '%s ' '-o'
+    printf '%s %s ' '-iname' "*.${extension}"
+    first=0
+  done
 }
 
 audio_has_files() {

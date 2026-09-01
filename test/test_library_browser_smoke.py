@@ -1386,7 +1386,9 @@ printf 'qty_compare_stub\\n'
         )
         self.assertIn("[x Remove] | [Q Compare]", clean)
 
-    def test_transfer_keeps_canonical_cover_and_excludes_other_picture_files_from_rsync(self) -> None:
+    def test_transfer_converges_requested_album_to_tracks_only(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact browser transfer verification")
         album_dir = self.tmpdir / "library" / "Dire Straits" / "1985 - Brothers In Arms"
         album_dir.mkdir(parents=True, exist_ok=True)
         (album_dir / "01. So Far Away.flac").write_bytes(b"s" * 2048)
@@ -1400,9 +1402,12 @@ printf 'qty_compare_stub\\n'
 
         player_dir = self.tmpdir / "player"
         player_dir.mkdir(parents=True, exist_ok=True)
-        existing_dest_dir = player_dir / "D" / "Dire Straits" / "1985 - Brothers In Arms"
+        existing_dest_dir = player_dir / "Dire Straits" / "1985 - Brothers In Arms"
         existing_dest_dir.mkdir(parents=True, exist_ok=True)
-        (existing_dest_dir / "already-there.txt").write_text("keep me until rsync decides", encoding="utf-8")
+        (existing_dest_dir / "already-there.txt").write_text("remove from requested album", encoding="utf-8")
+        untouched_dest_dir = player_dir / "Other" / "Untouched"
+        untouched_dest_dir.mkdir(parents=True, exist_ok=True)
+        (untouched_dest_dir / "keep.txt").write_text("keep", encoding="utf-8")
         rsync_args_log = self.tmpdir / "rsync-args.log"
         transfer_log = self.tmpdir / "transfer.log"
         sync_calls_log = self.tmpdir / "sync-calls.log"
@@ -1419,7 +1424,7 @@ if [[ "${1:-}" == "--help" ]]; then
   exit 0
 fi
 printf '%s\\n' "$*" >> "${RSYNC_ARGS_LOG:?}"
-exit 0
+exec "${SYSTEM_RSYNC:?}" "$@"
 """,
         )
 
@@ -1505,37 +1510,42 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
                 "RSYNC_ARGS_LOG": str(rsync_args_log),
                 "SYNC_CALLS_LOG": str(sync_calls_log),
                 "LIBRARY_BROWSER_TRANSFER_LOG": str(transfer_log),
+                "SYSTEM_RSYNC": shutil.which("rsync") or "rsync",
             },
         )
         clean = self._strip_ansi(out)
         self.assertEqual(rc, 0, msg=clean)
         self.assertTrue(rsync_args_log.exists(), msg=clean)
         args_text = rsync_args_log.read_text(encoding="utf-8")
-        self.assertIn("--exclude=.audlint_inspect_cache.json", args_text)
-        self.assertIn("--exclude=.any2flac_truepeak_cache.tsv", args_text)
-        self.assertIn("--exclude=.sox_album_done", args_text)
-        self.assertIn("--exclude=.sox_album_profile", args_text)
-        self.assertIn("--include=[cC][oO][vV][eE][rR].[jJ][pP][gG]", args_text)
-        self.assertIn("--exclude=*.[jJ][pP][gG]", args_text)
-        self.assertIn("--exclude=*.[pP][nN][gG]", args_text)
-        self.assertIn("--delete", args_text)
+        self.assertIn("-r --prune-empty-dirs", args_text)
+        self.assertNotIn("-a", args_text)
+        self.assertIn("--delete --delete-excluded", args_text)
+        self.assertIn("-f . /", args_text)
+        self.assertNotIn("--include=", args_text)
+        self.assertNotIn("--exclude=", args_text)
         self.assertTrue(sync_calls_log.exists(), msg=clean)
         self.assertIn("sync", sync_calls_log.read_text(encoding="utf-8"))
         self.assertTrue(transfer_log.exists(), msg=clean)
         transfer_text = transfer_log.read_text(encoding="utf-8")
-        self.assertIn("total_size_bytes=2560 total_size_label=2.5Kb", transfer_text)
+        self.assertIn("total_size_bytes=2048 total_size_label=2Kb", transfer_text)
         self.assertIn("transfer rc=0", transfer_text)
-        self.assertTrue((existing_dest_dir / "already-there.txt").exists(), msg=clean)
+        self.assertEqual((existing_dest_dir / "01. So Far Away.flac").read_bytes(), b"s" * 2048, msg=clean)
+        self.assertFalse((existing_dest_dir / "already-there.txt").exists(), msg=clean)
+        self.assertFalse((existing_dest_dir / "cover.jpg").exists(), msg=clean)
+        self.assertFalse((existing_dest_dir / "cover.png").exists(), msg=clean)
+        self.assertEqual((untouched_dest_dir / "keep.txt").read_text(encoding="utf-8"), "keep", msg=clean)
         screen_text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
         screen_text = screen_text.replace("\x1b7", "").replace("\x1b8", "")
         self.assertIn(
-            "1 of 1 | Dire Straits - 1985 - Brothers In Arms | transferring 2.5Kb...",
+            "1 of 1 | Dire Straits - 1985 - Brothers In Arms | transferring 2Kb...",
             screen_text,
             msg=screen_text,
         )
         self.assertNotIn("deleting existing destination", screen_text, msg=screen_text)
 
     def test_transfer_snapshots_visible_filtered_page_before_selection(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact browser transfer verification")
         player_dir = self.tmpdir / "player"
         player_dir.mkdir(parents=True, exist_ok=True)
         rsync_args_log = self.tmpdir / "rsync-args.log"
@@ -1554,7 +1564,7 @@ if [[ "${1:-}" == "--help" ]]; then
   exit 0
 fi
 printf '%s\\n' "$*" >> "${RSYNC_ARGS_LOG:?}"
-exit 0
+exec "${SYSTEM_RSYNC:?}" "$@"
 """,
         )
 
@@ -1646,6 +1656,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
                 "RSYNC_ARGS_LOG": str(rsync_args_log),
                 "SYNC_CALLS_LOG": str(sync_calls_log),
                 "LIBRARY_BROWSER_TRANSFER_LOG": str(transfer_log),
+                "SYSTEM_RSYNC": shutil.which("rsync") or "rsync",
             }
         )
 
@@ -1741,6 +1752,8 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertIn("transfer rc=0", transfer_text, msg=transfer_text)
 
     def test_transfer_uses_snapshot_if_selected_row_is_rewritten_before_submit(self) -> None:
+        if shutil.which("rsync") is None:
+            self.skipTest("rsync is required for exact browser transfer verification")
         player_dir = self.tmpdir / "player"
         player_dir.mkdir(parents=True, exist_ok=True)
         rsync_args_log = self.tmpdir / "rsync-args.log"
@@ -1759,7 +1772,7 @@ if [[ "${1:-}" == "--help" ]]; then
   exit 0
 fi
 printf '%s\\n' "$*" >> "${RSYNC_ARGS_LOG:?}"
-exit 0
+exec "${SYSTEM_RSYNC:?}" "$@"
 """,
         )
 
@@ -1851,6 +1864,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
                 "RSYNC_ARGS_LOG": str(rsync_args_log),
                 "SYNC_CALLS_LOG": str(sync_calls_log),
                 "LIBRARY_BROWSER_TRANSFER_LOG": str(transfer_log),
+                "SYSTEM_RSYNC": shutil.which("rsync") or "rsync",
             }
         )
 
@@ -1970,7 +1984,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertNotIn("abort: row not found id=6", transfer_text, msg=transfer_text)
         self.assertIn("transfer rc=0", transfer_text, msg=transfer_text)
 
-    def test_transfer_falls_back_to_live_duplicate_source_path_for_non_first_page_selection(self) -> None:
+    def test_transfer_rejects_missing_selected_source_without_catalog_fallback(self) -> None:
         player_dir = self.tmpdir / "player"
         player_dir.mkdir(parents=True, exist_ok=True)
         rsync_args_log = self.tmpdir / "rsync-args.log"
@@ -2219,8 +2233,7 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
             read_until(b"page=2/2")
             read_until(b"q=quit >")
             os.write(master_fd, b"t2\n")
-            read_until(b"[any key Continue] >")
-            os.write(master_fd, b" ")
+            read_until(b"Transfer failed: source path unavailable")
             read_until(b"q=quit >")
             os.write(master_fd, b"q")
             read_until(b"Quit application?")
@@ -2251,9 +2264,10 @@ printf 'sync\\n' >> "${SYNC_CALLS_LOG:?}"
         self.assertTrue(transfer_log.exists(), msg=clean)
         transfer_text = transfer_log.read_text(encoding="utf-8")
         self.assertIn("transfer start ids=7", transfer_text, msg=transfer_text)
-        self.assertIn("fallback: row id=7 resolved via row id=8", transfer_text, msg=transfer_text)
-        self.assertIn(f"source={live_dir}", transfer_text, msg=transfer_text)
-        self.assertIn("transfer rc=0", transfer_text, msg=transfer_text)
+        self.assertIn("abort: source missing for id=7", transfer_text, msg=transfer_text)
+        self.assertNotIn("fallback:", transfer_text, msg=transfer_text)
+        self.assertNotIn("transfer rc=0", transfer_text, msg=transfer_text)
+        self.assertFalse(rsync_args_log.exists(), msg=transfer_text)
 
     def test_search_dedupes_hyphenated_artist_variants_across_pages(self) -> None:
         bootstrap = self._run(["--no-interactive", "--db", str(self.db_path)])

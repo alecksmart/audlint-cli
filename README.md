@@ -61,6 +61,18 @@ flowchart TD
 
 In other words, the library root contains letter buckets such as `A`, `B`, and `C` for the first letters of artist names; each letter bucket contains artist folders, and each artist folder contains album folders named like `<year> - <album>`.
 
+## Player transfers
+
+Player Content and browser transfers copy tracks only: regular non-symlink
+files with audlint's canonical audio extensions, excluding hidden paths and
+artwork. Player Content makes the validated player root match its checked
+albums exactly; browser transfer does the same only for the album subtrees you
+requested. A transfer may leave a partial destination after an error, but it
+keeps the selection and a retry rebuilds the snapshot before trying again.
+Player transfers deliberately do not preserve source ownership, permissions, or
+timestamps: removable filesystems can encode those metadata writes as unwanted
+macOS `._*` sidecars.
+
 ## Dependencies
 
 Required runtime tools:

@@ -543,16 +543,34 @@ player_content_selection_totals() {
     "SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM player_content_selection;" 2>/dev/null
 }
 
-player_content_selection_update_sizes() {
-  local db="$1" sizes_file="$2" rel size sql=""
+# Refreshing cached Player Content sizes is deliberately all-or-nothing.  The
+# policy marker moves only with the complete snapshot-derived size rows, so a
+# failed pre-transfer refresh cannot leave a mixed cache version behind.
+player_content_selection_refresh_snapshot_sizes() {
+  local db="$1" sizes_file="$2" rel size count="" expected=""
   [[ -f "$sizes_file" ]] || return 1
-  sql='BEGIN IMMEDIATE;'
   while IFS=$'\x1f' read -r rel size; do
-    [[ -n "$rel" && "$size" =~ ^[0-9]+$ ]] || return 1
-    sql+=" UPDATE player_content_selection SET size_bytes=$size WHERE relative_path='$(sql_escape "$rel")';"
+    [[ -n "$rel" && "$rel" != *[[:cntrl:]]* && "$size" =~ ^[0-9]+$ ]] || return 1
   done <"$sizes_file"
-  sql+=' COMMIT;'
-  sqlite3 "$db" "$sql" >/dev/null 2>&1
+  count="$(wc -l <"$sizes_file" | tr -d '[:space:]')"
+  expected="$(sqlite3 -noheader "$db" "SELECT COUNT(*) FROM player_content_selection;" 2>/dev/null || true)"
+  [[ "$count" =~ ^[0-9]+$ && "$expected" == "$count" ]] || return 1
+  {
+    printf '%s\n' 'BEGIN IMMEDIATE;'
+    printf '%s\n' 'CREATE TEMP TABLE player_content_snapshot_sizes(relative_path TEXT PRIMARY KEY, size_bytes INTEGER NOT NULL);'
+    while IFS=$'\x1f' read -r rel size; do
+      printf "INSERT INTO player_content_snapshot_sizes(relative_path,size_bytes) VALUES('%s',%s);\n" "$(sql_escape "$rel")" "$size"
+    done <"$sizes_file"
+    printf '%s\n' 'CREATE TEMP TABLE player_content_snapshot_guard(value INTEGER NOT NULL CHECK(value = 0));'
+    printf '%s\n' 'INSERT INTO player_content_snapshot_guard SELECT 1 WHERE (SELECT COUNT(*) FROM player_content_snapshot_sizes) <> (SELECT COUNT(*) FROM player_content_selection) OR EXISTS (SELECT relative_path FROM player_content_snapshot_sizes EXCEPT SELECT relative_path FROM player_content_selection) OR EXISTS (SELECT relative_path FROM player_content_selection EXCEPT SELECT relative_path FROM player_content_snapshot_sizes);'
+    printf '%s\n' 'UPDATE player_content_selection SET size_bytes=(SELECT size_bytes FROM player_content_snapshot_sizes WHERE relative_path=player_content_selection.relative_path) WHERE relative_path IN (SELECT relative_path FROM player_content_snapshot_sizes);'
+    printf '%s\n' "INSERT INTO app_meta(key,value) VALUES('player_content_payload_policy_version','track-only-v1') ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+    printf '%s\n' 'DROP TABLE player_content_snapshot_guard; DROP TABLE player_content_snapshot_sizes; COMMIT;'
+  } | sqlite3 "$db" >/dev/null 2>&1
+}
+
+player_content_selection_update_sizes() {
+  player_content_selection_refresh_snapshot_sizes "$@"
 }
 
 player_content_selection_reconcile_inventory() {

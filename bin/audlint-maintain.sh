@@ -313,27 +313,9 @@ player_content_size_at() {
   return 0
 }
 
-player_content_filter_escape() {
-  local raw="$1"
-  raw="${raw//\\/\\\\}"
-  raw="${raw//\*/\\*}"; raw="${raw//\?/\\?}"; raw="${raw//\[/\\[}"
-  printf '%s' "$raw"
-}
-
-player_content_safe_destination() {
-  local destination="$1" library="$2" db_dir="$3" repo="$4" system_tmp="" system_root="/"
-  system_tmp="$(path_resolve "${system_root}tmp" 2>/dev/null || true)"
-  case "$destination" in ""|/|/Volumes|/Users|/System|/private|/tmp|"$system_tmp"|/var|"$HOME"|"$library"|"$db_dir"|"$repo") return 1;; esac
-  case "$destination" in "$library"/*|"$repo"/*) return 1;; esac
-  case "$library" in "$destination"/*) return 1;; esac
-  case "$db_dir" in "$destination"/*) return 1;; esac
-  case "$repo" in "$destination"/*) return 1;; esac
-  return 0
-}
-
 player_content_sync() {
   local selected_count="$1" total_bytes="$2"
-  local library_real player_real db_real db_dir_real repo_real rel source_path expected_relative escaped prefix source_bytes=0
+  local library_real player_real db_real db_dir_real repo_real rel source_path expected_relative source_bytes=0
   library_real="$(path_resolve "$AUDLINT_LIBRARY_ROOT" 2>/dev/null || true)"
   player_real="$(path_resolve "$MEDIA_PLAYER_PATH" 2>/dev/null || true)"
   db_real="$(path_resolve "$AUDL_DB_PATH" 2>/dev/null || true)"
@@ -341,12 +323,12 @@ player_content_sync() {
   repo_real="$(path_resolve "$REPO_ROOT" 2>/dev/null || true)"
   [[ -n "$library_real" && -d "$library_real" && -r "$library_real" ]] || { printf 'Sync failed: library root is not a readable directory.\n'; return 1; }
   [[ -n "$player_real" && -d "$player_real" && -w "$player_real" ]] || { printf 'Sync failed: player path is not a writable mounted directory.\n'; return 1; }
-  player_content_safe_destination "$player_real" "$library_real" "$db_dir_real" "$repo_real" || { printf 'Sync failed: unsafe player destination.\n'; return 1; }
+  player_transfer_destination_is_safe "$player_real" "$library_real" "$db_dir_real" "$repo_real" || { printf 'Sync failed: unsafe player destination.\n'; return 1; }
   command -v "$RSYNC_BIN" >/dev/null 2>&1 || { printf 'Sync failed: rsync not found (%s).\n' "$RSYNC_BIN"; return 1; }
   command -v "$SYNC_BIN" >/dev/null 2>&1 || { printf 'Sync failed: sync command not found (%s).\n' "$SYNC_BIN"; return 1; }
 
-  local inventory_file selected_file sizes_file manifest expected_count=0 actual_count=0 sync_error=""
-  inventory_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_inventory.XXXXXX" 2>/dev/null || true)"
+  local inventory_file selected_file sizes_file manifest snapshot rules verify_snapshot expected_count=0 actual_count=0 sync_error=""
+  player_secure_temp_create inventory inventory_file || inventory_file=""
   [[ -n "$inventory_file" ]] || { printf 'Sync failed: unable to create inventory.\n'; return 1; }
   if ! seek_walk_player_content "$library_real" player_content_inventory_row_from_dir >"$inventory_file"; then
     rm -f "$inventory_file"
@@ -360,24 +342,25 @@ player_content_sync() {
     inventory_sources["$rel"]="$source_path"
   done <"$inventory_file"
 
-  sizes_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_sizes.XXXXXX" 2>/dev/null || true)"
-  manifest="$(mktemp "${TMPDIR:-/tmp}/audlint_player_manifest.XXXXXX" 2>/dev/null || true)"
-  if [[ -z "$sizes_file" || -z "$manifest" ]]; then
-    rm -f "$inventory_file" "$sizes_file" "$manifest"
+  player_secure_temp_create sizes sizes_file || sizes_file=""
+  player_secure_temp_create manifest manifest || manifest=""
+  player_secure_temp_create snapshot snapshot || snapshot=""
+  player_secure_temp_create rules rules || rules=""
+  player_secure_temp_create verify verify_snapshot || verify_snapshot=""
+  if [[ -z "$sizes_file" || -z "$manifest" || -z "$snapshot" || -z "$rules" || -z "$verify_snapshot" ]]; then
+    rm -f "$inventory_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
     printf 'Sync failed: unable to create manifest.\n'
     return 1
   fi
-  local -a rsync_args=(-av --delete --delete-excluded --itemize-changes) parent_rules=() selected_rules=()
-  # Directory rules make only the checked source-relative albums traversable;
-  # shared payload filters then retain exactly the browser transfer payload.
-  selected_file="$(mktemp "${TMPDIR:-/tmp}/audlint_player_selection.XXXXXX" 2>/dev/null || true)"
+  : >"$snapshot"
+  player_secure_temp_create selection selected_file || selected_file=""
   if [[ -z "$selected_file" ]] || ! sqlite3 -separator $'\x1f' -noheader "$AUDL_DB_PATH" "SELECT relative_path,size_bytes FROM player_content_selection ORDER BY relative_path;" >"$selected_file" 2>/dev/null; then
-    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
     printf 'Sync failed: selected state could not be read.\n'
     return 1
   fi
   expected_count="$(wc -l <"$selected_file" | tr -d '[:space:]')"
-  [[ "$expected_count" =~ ^[0-9]+$ ]] || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"; printf 'Sync failed: selected state could not be counted.\n'; return 1; }
+  [[ "$expected_count" =~ ^[0-9]+$ ]] || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"; printf 'Sync failed: selected state could not be counted.\n'; return 1; }
   while IFS=$'\x1f' read -r rel _cached_size; do
     [[ -n "$rel" ]] || continue
     if [[ -z "${inventory_sources[$rel]+present}" ]]; then
@@ -390,52 +373,86 @@ player_content_sync() {
       sync_error="checked path changed or is unreadable ($rel)"
       break
     fi
-    source_bytes="$(player_payload_size_bytes_for_dir "$source_path" 2>/dev/null || true)"
+    local album_snapshot
+    player_secure_temp_create album_snapshot album_snapshot || album_snapshot=""
+    [[ -n "$album_snapshot" ]] || { sync_error="unable to stage track snapshot"; break; }
+    if ! player_snapshot_build "$source_path" "$album_snapshot"; then
+      rm -f "$album_snapshot"; sync_error="checked path cannot be snapshotted ($rel)"; break
+    fi
+    source_bytes="$(player_snapshot_total_bytes "$album_snapshot" 2>/dev/null || true)"
     if [[ ! "$source_bytes" =~ ^[0-9]+$ ]]; then
       sync_error="checked path cannot be sized ($rel)"
       break
     fi
+    if ! player_snapshot_append_prefixed "$album_snapshot" "$rel" "$snapshot"; then
+      rm -f "$album_snapshot"; sync_error="checked path snapshot could not be combined ($rel)"; break
+    fi
+    rm -f "$album_snapshot"
     printf '%s\x1f%s\n' "$rel" "$source_bytes" >>"$sizes_file"
     printf '%s\x1f%s\n' "$source_path" "$rel" >>"$manifest"
-    escaped="$(player_content_filter_escape "$rel")"
-    prefix=""
-    IFS='/' read -r -a _pcs_parts <<<"$escaped"
-    local _pcs_part
-    for _pcs_part in "${_pcs_parts[@]}"; do prefix="${prefix:+$prefix/}${_pcs_part}"; parent_rules+=("--include=/${prefix}/"); done
-    selected_rules+=("--include=/${escaped}/***")
     actual_count=$((actual_count + 1))
   done <"$selected_file"
   if [[ -n "$sync_error" ]]; then
-    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
     printf 'Sync failed: %s.\n' "$sync_error"
     return 1
   fi
-  [[ "$actual_count" == "$expected_count" ]] || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"; printf 'Sync failed: checked state changed during inventory.\n'; return 1; }
-  if ! player_content_selection_update_sizes "$AUDL_DB_PATH" "$sizes_file"; then
-    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+  [[ "$actual_count" == "$expected_count" ]] || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"; printf 'Sync failed: checked state changed during inventory.\n'; return 1; }
+  if ! player_snapshot_compile_rules "$snapshot" "$rules"; then
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
+    printf 'Sync failed: rsync rules could not be compiled.\n'
+    return 1
+  fi
+  local selection_verify
+  player_secure_temp_create selection_verify selection_verify || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"; printf 'Sync failed: selected state could not be rechecked.\n'; return 1; }
+  if ! sqlite3 -noheader "$AUDL_DB_PATH" "SELECT relative_path FROM player_content_selection ORDER BY relative_path;" >"$selection_verify" 2>/dev/null \
+    || ! cut -d $'\x1f' -f1 "$selected_file" | cmp -s - "$selection_verify"; then
+    rm -f "$inventory_file" "$selected_file" "$selection_verify" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
+    printf 'Sync failed: checked state changed before transfer.\n'
+    return 1
+  fi
+  rm -f "$selection_verify"
+  player_transfer_destination_is_safe "$player_real" "$library_real" "$db_dir_real" "$repo_real" || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"; printf 'Sync failed: unsafe player destination.\n'; return 1; }
+  if ! player_content_selection_refresh_snapshot_sizes "$AUDL_DB_PATH" "$sizes_file"; then
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
     printf 'Sync failed: cached sizes could not be updated.\n'
     return 1
   fi
-  rsync_args+=("${parent_rules[@]}")
-  player_rsync_payload_filters rsync_args
-  rsync_args+=("${selected_rules[@]}")
-  rsync_args+=(--exclude='*')
+  player_secure_temp_create selection_verify selection_verify || { rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"; printf 'Sync failed: selected state could not be rechecked.\n'; return 1; }
+  if ! sqlite3 -noheader "$AUDL_DB_PATH" "SELECT relative_path FROM player_content_selection ORDER BY relative_path;" >"$selection_verify" 2>/dev/null \
+    || ! cut -d $'\x1f' -f1 "$selected_file" | cmp -s - "$selection_verify"; then
+    rm -f "$inventory_file" "$selected_file" "$selection_verify" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
+    printf 'Sync failed: checked state changed before transfer.\n'
+    return 1
+  fi
+  rm -f "$selection_verify"
   # The selector owns the visible outcome.  Discard verbose tool output so a
   # large rsync listing cannot be retained in memory or leak into its canvas.
   local command_status
-  if "$RSYNC_BIN" "${rsync_args[@]}" "$library_real"/ "$player_real"/ >/dev/null 2>&1; then
+  if "$RSYNC_BIN" -r --prune-empty-dirs --delete --delete-excluded --itemize-changes -f ". $rules" "$library_real"/ "$player_real"/ >/dev/null 2>&1; then
     if "$SYNC_BIN" >/dev/null 2>&1; then
-      rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
-      printf 'Sync complete: %s album(s).\n' "$actual_count"
-      return 0
+      : >"$verify_snapshot"
+      while IFS=$'\x1f' read -r source_path rel; do
+        player_secure_temp_create album_verify album_snapshot || album_snapshot=""
+        [[ -n "$album_snapshot" ]] && player_snapshot_build "$source_path" "$album_snapshot" && player_snapshot_append_prefixed "$album_snapshot" "$rel" "$verify_snapshot" || { rm -f "$album_snapshot"; command_status=1; break; }
+        rm -f "$album_snapshot"
+      done <"$manifest"
+      if (( ${command_status:-0} == 0 )) && cmp -s "$snapshot" "$verify_snapshot" && player_snapshot_matches_destination "$snapshot" "$player_real"; then
+        rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
+        printf 'Sync complete: %s album(s).\n' "$actual_count"
+        return 0
+      fi
+      rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
+      printf 'Sync failed: source or destination postcheck failed; selection was preserved.\n'
+      return 1
     fi
     command_status=$?
-    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+    rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
     printf 'Sync failed: sync command exited %s; selection was preserved.\n' "$command_status"
     return 1
   fi
   command_status=$?
-  rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest"
+  rm -f "$inventory_file" "$selected_file" "$sizes_file" "$manifest" "$snapshot" "$rules" "$verify_snapshot"
   printf 'Sync failed: rsync exited %s; selection was preserved.\n' "$command_status"
   return 1
 }

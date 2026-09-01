@@ -35,6 +35,7 @@ FAST_TEST_FILES := \
 	test/test_makefile_contract.py \
 	test/test_lyrics_smoke.py \
 	test/test_player_content_creator.py \
+	test/test_player_payload_policy.py \
 	test/test_profile_norm.py \
 	test/test_secure_backup.py \
 	test/test_spectre_calibration_cases.py \

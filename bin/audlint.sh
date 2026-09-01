@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2094
 # audlint.sh - Interactive browser for AUDL_DB_PATH.album_quality
 
 set -Eeuo pipefail
@@ -3637,6 +3638,15 @@ transfer_human_size_label() {
   player_human_size_label "$1"
 }
 
+transfer_plan_cleanup() {
+  local plan_file="$1" _a _b _c _d _e snapshot_file rules_file
+  [[ -f "$plan_file" ]] || return 0
+  while IFS=$'\x1f' read -r _a _b _c _d _e snapshot_file rules_file; do
+    rm -f "$snapshot_file" "$rules_file"
+  done <"$plan_file"
+  rm -f "$plan_file"
+}
+
 run_transfer_for_row_ids() {
   local selected_ids=("$@")
   local transfer_log="${LIBRARY_BROWSER_TRANSFER_LOG:-/tmp/library_browser_transfer.last.log}"
@@ -3674,7 +3684,7 @@ run_transfer_for_row_ids() {
   fi
 
   local manifest_file
-  manifest_file="$(mktemp "${TMPDIR:-/tmp}/library_browser_transfer_manifest.XXXXXX" 2>/dev/null || true)"
+  player_secure_temp_create browser_manifest manifest_file || manifest_file=""
   if [[ -z "$manifest_file" ]]; then
     ACTION_MESSAGE="Failed to create transfer manifest."
     if [[ -n "$transfer_log" ]]; then
@@ -3716,6 +3726,7 @@ run_transfer_for_row_ids() {
   done
 
   if ! run_transfer_manifest "$manifest_file" "$transfer_log" "${#selected_ids[@]}"; then
+    rm -f "$manifest_file"
     return 1
   fi
   ACTION_MESSAGE="Transfer completed for ${#selected_ids[@]} album(s)."
@@ -3730,30 +3741,24 @@ transfer_manifest_append_entry() {
   local album="$5"
   local year="$6"
   local source_path="$7"
-  local dest_dir transfer_year
-  local resolved_source_row=""
-  local resolved_source_id=""
-  local resolved_source_path=""
-
-  resolved_source_row="$(find_transfer_source_row "$row_id" "$artist" "$album" "$year" "$source_path" || true)"
-  if [[ -n "$resolved_source_row" ]]; then
-    IFS=$'\t' read -r resolved_source_id resolved_source_path <<< "$resolved_source_row"
-  fi
-  if [[ -z "$resolved_source_path" || ! -d "$resolved_source_path" ]]; then
+  local dest_dir transfer_year source_relative
+  if [[ -z "$source_path" || ! -d "$source_path" || -L "$source_path" ]]; then
     ACTION_MESSAGE="Transfer failed: source path unavailable for $artist - $album."
     if [[ -n "$transfer_log" ]]; then
       printf '[%s] abort: source missing for id=%s artist=%s album=%s path=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$artist" "$album" "${source_path:-<empty>}" >>"$transfer_log" 2>/dev/null || true
     fi
     return 1
   fi
-  if [[ -n "$transfer_log" && -n "$source_path" && "$resolved_source_path" != "$source_path" ]]; then
-    printf '[%s] fallback: row id=%s resolved via row id=%s path=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "${resolved_source_id:-<unknown>}" "$resolved_source_path" >>"$transfer_log" 2>/dev/null || true
+  source_path="$(path_resolve "$source_path" 2>/dev/null || true)"
+  source_relative="$(player_relative_album_path_from_source "$source_path" 2>/dev/null || true)"
+  if [[ -z "$source_relative" ]]; then
+    ACTION_MESSAGE="Transfer failed: source path is outside the library for $artist - $album."
+    return 1
   fi
-  source_path="$resolved_source_path"
 
   transfer_year="$(transfer_year_for_source "$source_path" "$year")"
   [[ "$transfer_year" =~ ^[12][0-9]{3}$ ]] || transfer_year="$year"
-  dest_dir="$(player_album_dest_dir_for_source "$source_path" "$artist" "$transfer_year" "$album")"
+  dest_dir="$MEDIA_PLAYER_PATH/$source_relative"
   if [[ -n "$transfer_log" ]]; then
     printf '[%s] row id=%s source=%s year_db=%s year_transfer=%s dest=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$row_id" "$source_path" "$year" "$transfer_year" "$dest_dir" >>"$transfer_log" 2>/dev/null || true
   fi
@@ -3807,13 +3812,51 @@ run_transfer_manifest() {
   local manifest_file="$1"
   local transfer_log="$2"
   local selected_count="$3"
-  local total_size_bytes total_size_label
-  local runner_script
-  total_size_bytes="$(transfer_payload_total_size_bytes_for_manifest "$manifest_file" || true)"
-  [[ "$total_size_bytes" =~ ^[0-9]+$ ]] || total_size_bytes=0
+  local total_size_bytes total_size_label plan_file library_real player_real db_dir_real repo_real artist album year source_path dest_dir snapshot rules rel
+  library_real="$(path_resolve "$LIBRARY_ROOT" 2>/dev/null || true)"
+  player_real="$(path_resolve "$MEDIA_PLAYER_PATH" 2>/dev/null || true)"
+  db_dir_real="$(path_resolve "$(dirname "$DB_PATH")" 2>/dev/null || true)"
+  repo_real="$(path_resolve "$REPO_ROOT" 2>/dev/null || true)"
+  [[ -n "$library_real" && -d "$library_real" && -n "$player_real" && -d "$player_real" && -w "$player_real" ]] || { ACTION_MESSAGE="Transfer failed: library or player path is unavailable."; return 1; }
+  player_transfer_destination_is_safe "$player_real" "$library_real" "$db_dir_real" "$repo_real" || { ACTION_MESSAGE="Transfer failed: player destination is unsafe."; return 1; }
+  player_secure_temp_create browser_plan plan_file || plan_file=""
+  [[ -n "$plan_file" ]] || { ACTION_MESSAGE="Failed to create transfer plan."; return 1; }
+  # Complete every source, destination, snapshot, and rule preflight before
+  # the first rsync.  Browser transfers own only these destination subtrees.
+  while IFS=$'\x1f' read -r artist album year source_path dest_dir; do
+    source_path="$(path_resolve "$source_path" 2>/dev/null || true)"
+    rel="$(LIBRARY_ROOT="$library_real" player_relative_album_path_from_source "$source_path" 2>/dev/null || true)"
+    if [[ -z "$rel" || ! -d "$source_path" || -L "$source_path" ]] || ! player_browser_destination_preflight "$player_real" "$rel"; then
+      transfer_plan_cleanup "$plan_file"
+      ACTION_MESSAGE="Transfer failed: source is outside the library or destination is unsafe."
+      return 1
+    fi
+    if awk -F $'\x1f' -v wanted="$player_real/$rel" '$5 == wanted || index($5, wanted "/") == 1 || index(wanted, $5 "/") == 1 { found=1 } END { exit !found }' "$plan_file" \
+      || awk -F $'\x1f' -v wanted="$(printf '%s' "$player_real/$rel" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')" '{ existing=tolower($5); if (existing == wanted || index(existing, wanted "/") == 1 || index(wanted, existing "/") == 1) found=1 } END { exit !found }' "$plan_file"; then
+      transfer_plan_cleanup "$plan_file"; ACTION_MESSAGE="Transfer failed: selected albums collide at one destination."; return 1
+    fi
+    player_secure_temp_create browser_snapshot snapshot || snapshot=""
+    player_secure_temp_create browser_rules rules || rules=""
+    if [[ -z "$snapshot" || -z "$rules" ]] || ! player_snapshot_build "$source_path" "$snapshot" || ! player_snapshot_compile_rules "$snapshot" "$rules"; then
+      rm -f "$snapshot" "$rules"; transfer_plan_cleanup "$plan_file"
+      ACTION_MESSAGE="Transfer failed: track snapshot or rules could not be created."
+      return 1
+    fi
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$artist" "$album" "$year" "$source_path" "$player_real/$rel" "$snapshot" "$rules" >>"$plan_file"
+  done <"$manifest_file"
+  total_size_bytes=0
+  while IFS=$'\x1f' read -r _artist _album _year _source _dest snapshot _rules; do
+    local snapshot_bytes
+    snapshot_bytes="$(player_snapshot_total_bytes "$snapshot" 2>/dev/null || true)"
+    [[ "$snapshot_bytes" =~ ^[0-9]+$ ]] || { transfer_plan_cleanup "$plan_file"; ACTION_MESSAGE="Transfer failed: snapshot sizing failed."; return 1; }
+    (( snapshot_bytes <= 9223372036854775807 - total_size_bytes )) || { transfer_plan_cleanup "$plan_file"; ACTION_MESSAGE="Transfer failed: total snapshot size is too large."; return 1; }
+    total_size_bytes=$((total_size_bytes + snapshot_bytes))
+  done <"$plan_file"
   total_size_label="$(transfer_human_size_label "$total_size_bytes")"
-  runner_script="$(mktemp "${TMPDIR:-/tmp}/library_browser_transfer.XXXXXX" 2>/dev/null || true)"
+  local runner_script
+  player_secure_temp_create browser_runner runner_script || runner_script=""
   if [[ -z "$runner_script" ]]; then
+    transfer_plan_cleanup "$plan_file"
     rm -f "$manifest_file"
     ACTION_MESSAGE="Failed to create transfer runner script."
     if [[ -n "$transfer_log" ]]; then
@@ -3836,6 +3879,15 @@ term_cols="${VIRTWIN_TERM_COLS:-0}"
 [[ -n "$player_lib" && -f "$player_lib" ]] || { printf 'player payload library unavailable\n' >&2; exit 2; }
 # shellcheck source=/dev/null
 source "$player_lib"
+cleanup_artifacts() {
+  local _artist _album _year _source _dest snapshot_file rules_file
+  [[ -f "$manifest_file" ]] || return 0
+  while IFS=$'\x1f' read -r _artist _album _year _source _dest snapshot_file rules_file; do
+    rm -f "$snapshot_file" "$rules_file"
+  done <"$manifest_file"
+}
+trap cleanup_artifacts EXIT
+trap 'exit 1' HUP INT TERM
 log_note() {
   local msg="$1"
   [[ -n "$log_file" ]] || return 0
@@ -3897,12 +3949,7 @@ virtwin_status_set() {
 }
 
 printf 'Media player path: %s\n\n' "$player_path"
-rsync_args=(
-  -av
-  --delete
-  --itemize-changes
-)
-player_rsync_payload_filters rsync_args
+rsync_args=(-r --prune-empty-dirs --delete --delete-excluded --itemize-changes)
 if "$rsync_bin" --help 2>/dev/null | grep -q -- '--info'; then
   rsync_args+=(--info=progress2,name1)
   printf 'rsync mode: verbose + itemize + progress2\n\n'
@@ -3919,7 +3966,7 @@ log_note "runner rsync args: ${rsync_args[*]}"
 total_count="$(awk 'END { print NR+0 }' "$manifest_file" 2>/dev/null || echo 0)"
 [[ "$total_count" =~ ^[0-9]+$ ]] || total_count=0
 album_count=0
-while IFS=$'\x1f' read -r artist album year source_path dest_dir; do
+while IFS=$'\x1f' read -r artist album year source_path dest_dir snapshot_file rules_file; do
   [[ -n "$source_path" ]] || continue
   album_count=$((album_count + 1))
   virtwin_status_set "$album_count" "$total_count" "$artist" "$year" "$album" "transferring..."
@@ -3927,12 +3974,22 @@ while IFS=$'\x1f' read -r artist album year source_path dest_dir; do
   printf 'source: %s\n' "$source_path"
   printf 'dest:   %s\n' "$dest_dir"
   mkdir -p "$(dirname "$dest_dir")"
-  "$rsync_bin" "${rsync_args[@]}" "$source_path"/ "$dest_dir"/
+  "$rsync_bin" "${rsync_args[@]}" -f ". $rules_file" "$source_path"/ "$dest_dir"/
   printf '\n'
 done < "$manifest_file"
 
 printf 'Running sync...\n'
 "$sync_bin"
+while IFS=$'\x1f' read -r _artist _album _year source_path dest_dir snapshot_file _rules_file; do
+  verify_file=""
+  player_secure_temp_create browser_verify verify_file || { printf 'source postcheck staging failed\n' >&2; exit 1; }
+  if ! player_snapshot_build "$source_path" "$verify_file" || ! player_snapshot_compare "$snapshot_file" "$verify_file" || ! player_snapshot_matches_destination "$snapshot_file" "$dest_dir"; then
+    rm -f "$verify_file"
+    printf 'source or destination postcheck failed\n' >&2
+    exit 1
+  fi
+  rm -f "$verify_file"
+done < "$manifest_file"
 printf 'Transfer completed: %s album(s).\n' "$album_count"
 EOF
   chmod +x "$runner_script"
@@ -3945,13 +4002,13 @@ EOF
   local transfer_ok=0
   local transfer_rc=0
   local first_title=""
-  if IFS=$'\x1f' read -r first_artist first_album first_year _first_source _first_dest <"$manifest_file"; then
+  if IFS=$'\x1f' read -r first_artist first_album first_year _first_source _first_dest <"$plan_file"; then
     if [[ -n "${first_artist:-}" ]]; then
       first_title="1 of ${selected_count} | ${first_artist} - ${first_year} - ${first_album} | transferring ${total_size_label}..."
     fi
   fi
   if VIRTWIN_RIGHT_TITLE="$first_title" virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "transfer-player" \
-    "$runner_script" "$manifest_file" "$RSYNC_BIN" "$SYNC_BIN" "$MEDIA_PLAYER_PATH" "$transfer_log" "$total_size_label" "$BOOTSTRAP_DIR/../lib/sh/player.sh"; then
+    "$runner_script" "$plan_file" "$RSYNC_BIN" "$SYNC_BIN" "$MEDIA_PLAYER_PATH" "$transfer_log" "$total_size_label" "$BOOTSTRAP_DIR/../lib/sh/player.sh"; then
     transfer_ok=1
     if [[ -n "$transfer_log" ]]; then
       printf '[%s] transfer rc=0\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$transfer_log" 2>/dev/null || true
@@ -3962,6 +4019,7 @@ EOF
       printf '[%s] transfer rc=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$transfer_rc" >>"$transfer_log" 2>/dev/null || true
     fi
   fi
+  transfer_plan_cleanup "$plan_file"
   rm -f "$runner_script" "$manifest_file"
 
   if ((transfer_ok == 1)); then
@@ -4026,7 +4084,7 @@ run_transfer_for_snapshot_entries() {
   fi
 
   local manifest_file
-  manifest_file="$(mktemp "${TMPDIR:-/tmp}/library_browser_transfer_manifest.XXXXXX" 2>/dev/null || true)"
+  player_secure_temp_create browser_manifest manifest_file || manifest_file=""
   if [[ -z "$manifest_file" ]]; then
     ACTION_MESSAGE="Failed to create transfer manifest."
     if [[ -n "$transfer_log" ]]; then
@@ -4047,6 +4105,7 @@ run_transfer_for_snapshot_entries() {
   done
 
   if ! run_transfer_manifest "$manifest_file" "$transfer_log" "${#snapshot_entries[@]}"; then
+    rm -f "$manifest_file"
     return 1
   fi
   ACTION_MESSAGE="Transfer completed for ${#snapshot_entries[@]} album(s)."

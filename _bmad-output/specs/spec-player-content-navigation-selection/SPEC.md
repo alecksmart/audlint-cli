@@ -1,6 +1,7 @@
 ---
 id: SPEC-player-content-navigation-selection
 companions:
+  - ARCHITECTURE-SPINE.md
   - interaction-contract.md
   - verification.md
   - ../spec-player-track-only-mirror/SPEC.md

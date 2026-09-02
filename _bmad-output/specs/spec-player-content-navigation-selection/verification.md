@@ -1,6 +1,6 @@
 # Verification Contract
 
-## Baseline at `22b6f28`
+## Baseline at `77ea99c`
 
 The planning baseline is current HEAD on `release/v1.4.0`. Claims below were checked against code and tests, not inferred from older BMAD artifacts.
 
@@ -12,7 +12,7 @@ The planning baseline is current HEAD on `release/v1.4.0`. Claims below were che
 | Optional aggregate rsync progress falls back to the established mirror and the final transfer/postcheck result remains authoritative. | Player Content progress functions and progress/fallback/failure tests. |
 | Bounded repaint, one Current marker, `NO_COLOR` structure, minimum terminal size, input draining, raw-mode restoration, and signal cleanup exist as the baseline to preserve. | `bin/audlint-maintain.sh` and selector layout/lifecycle tests. |
 
-`python3 -m unittest test.test_player_content_creator` passed all 42 tests in 96.348 seconds on this baseline using temporary fixtures.
+`python3 -m unittest test.test_player_content_creator` passed all 42 tests in 100.872 seconds on this baseline using temporary fixtures.
 
 ## Required acceptance proof
 

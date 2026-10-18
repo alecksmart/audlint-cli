@@ -110,26 +110,34 @@ error_exit() {
 log "Starting music sync"
 log "Source : $SRC"
 log "Dest   : $SYNC_DEST"
-log "Dry-run: ${DRY_RUN:+yes}${DRY_RUN:-no}"
+if [[ -n "$DRY_RUN" ]]; then
+  log "Dry-run: yes"
+else
+  log "Dry-run: no"
+fi
 log "Debug  : $DEBUG"
 
-# Clean macOS metadata on SOURCE only (use portable -exec … +)
-clean_metadata() {
-  local base="$1"
-  log "Cleaning macOS metadata in $base"
-  find "$base" -type f -name '._*' -exec rm -f {} +
-  find "$base" -type f -name '.DS_Store' -exec rm -f {} +
-}
-clean_metadata "$SRC"
+# A missing mount must never turn the mirror destination into a local directory.
+[[ -d "$SYNC_DEST" && ! -L "$SYNC_DEST" ]] || error_exit "Destination must be an existing directory: $SYNC_DEST"
 
-# Ensure destination exists and is writable.
-if [[ -d "$SYNC_DEST" ]]; then
-  [[ -w "$SYNC_DEST" ]] || error_exit "Destination directory '$SYNC_DEST' is not writable. Aborting."
-elif [[ -n "$DRY_RUN" ]]; then
-  log "Destination path does not exist (dry-run): $SYNC_DEST"
-else
-  mkdir -p "$SYNC_DEST"
-  [[ -w "$SYNC_DEST" ]] || error_exit "Destination directory '$SYNC_DEST' is not writable after creation. Aborting."
+mounted_entry=""
+while IFS= read -r entry; do
+  if [[ "$entry" == *" on $SYNC_DEST ("* || "$entry" == *" on $SYNC_DEST type "*" ("* ]]; then
+    mounted_entry="$entry"
+    break
+  fi
+done < <(mount)
+[[ -n "$mounted_entry" ]] || error_exit "Destination is not a mounted filesystem: $SYNC_DEST"
+
+if [[ -n "${AUDL_SYNC_MOUNT_SOURCE:-}" ]]; then
+  if [[ "$mounted_entry" != "${AUDL_SYNC_MOUNT_SOURCE} on $SYNC_DEST ("* && "$mounted_entry" != "${AUDL_SYNC_MOUNT_SOURCE} on $SYNC_DEST type "* ]]; then
+    error_exit "Expected mount ${AUDL_SYNC_MOUNT_SOURCE} is not active at $SYNC_DEST"
+  fi
+fi
+
+if [[ -z "$DRY_RUN" ]]; then
+  write_probe="$(mktemp "$SYNC_DEST/.audlint-write-test.XXXXXX" 2>/dev/null)" || error_exit "Destination is not writable: $SYNC_DEST"
+  rm -f "$write_probe" || error_exit "Could not remove write probe: $write_probe"
 fi
 
 # rsync options tuned for a mounted destination directory

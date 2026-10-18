@@ -64,7 +64,7 @@ target named in the next column, rather than repeatedly in isolation.
 | `test/test_spectre_image.py` | 21 | FAST group | FAST | `test-all` | Image-analysis unit behavior. |
 | `test/test_sqlite_profile_normalization.py` | 3 | FAST group | FAST | `test-all` | Narrow schema normalization checks. |
 | `test/test_sqlite_query_plan_smoke.py` | 8 | FAST group | FAST | `test-all` | Focused SQLite query-plan contracts. |
-| `test/test_sync_music_smoke.py` | 5 | FAST group | FAST | `test-all` | Local rsync stubs and safety checks. |
+| `test/test_sync_music_smoke.py` | 8 | FAST group | FAST | `test-all` | Local rsync and mount stubs with safety checks. |
 | `test/legacy/test_legacy_audlint_task_db.py` | 43 | 1:27.65 focused | INTEGRATION / DEEP REGRESSION | `test-all` | Broad scanner, SQLite, queue, and failure contracts. |
 | `test/legacy/test_legacy_boost_audio_cli_smoke.py` | 7 | 6.43s baseline | INTEGRATION / DEEP REGRESSION | `test-all` | Conversion and destructive-workflow coverage. |
 | `test/legacy/test_legacy_tags_scripts.py` | 21 | 14.75s baseline | INTEGRATION / DEEP REGRESSION | `test-all` | Tagging, lyrics, and filesystem safety coverage. |

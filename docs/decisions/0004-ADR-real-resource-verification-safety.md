@@ -19,7 +19,7 @@ Narrow live integration checks must require a deliberate opt-in and must not be 
 - `docs/architecture/OVERVIEW.md:91-99` documents current destructive-operation safeguards, test isolation, and the opt-in real-crontab exception.
 - `test/test_sync_music_smoke.py:20-57,101-129` uses temporary source and destination fixtures and a stubbed rsync.
 - `test/test_audlint_maintain_smoke.py:396-414` requires `AUDLINT_USE_REAL_CRONTAB=1` before the real-crontab test.
-- `docs/architecture/OVERVIEW.md:98` and `test/test_sync_music_smoke.py:101-114` establish that `sync_music.sh --dry-run` still deletes source metadata files.
+- At the time of this decision, `sync_music.sh --dry-run` still deleted source metadata files. The current implementation excludes those files from transfer without removing them; this historical observation remains the reason a dry-run label alone is not trusted.
 
 ## Rationale
 The repository explicitly identifies the protected resource classes and the human-approval boundary. Original rationale is not recoverable from repository evidence.

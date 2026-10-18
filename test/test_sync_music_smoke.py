@@ -56,12 +56,13 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _write_env(self, sync_dest: Path) -> None:
+    def _write_env(self, sync_dest: Path, mount_source: str = "") -> None:
         self.env_path.write_text(
             textwrap.dedent(
                 f"""\
                 AUDL_PATH="{self.src_dir}"
                 AUDL_SYNC_DEST="{sync_dest}"
+                AUDL_SYNC_MOUNT_SOURCE="{mount_source}"
                 """
             ),
             encoding="utf-8",
@@ -72,11 +73,16 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
             self.bin_dir / "rsync",
             "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$RSYNC_LOG\"\nexit 0\n",
         )
+        _write_exec(
+            self.bin_dir / "mount",
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"${MOUNT_OUTPUT:-}\"\n",
+        )
 
     def _run(self, args, extra_env=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["RSYNC_LOG"] = str(self.tmpdir / "rsync.log")
+        env["MOUNT_OUTPUT"] = f"fixture:/music on {self.sync_dest} (nfs, rw)"
         env["NO_COLOR"] = "1"
         if extra_env:
             env.update(extra_env)
@@ -110,31 +116,56 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
         self.assertIn(f"{self.sync_dest}/", rsync_log)
         self.assertNotIn("@", rsync_log)
 
-        self.assertFalse((self.src_dir / ".DS_Store").exists())
-        self.assertFalse((self.src_dir / "._junk").exists())
+        self.assertTrue((self.src_dir / ".DS_Store").exists())
+        self.assertTrue((self.src_dir / "._junk").exists())
 
-    def test_dry_run_allows_missing_destination_but_logs_it(self) -> None:
+    def test_dry_run_rejects_missing_destination(self) -> None:
         missing_dest = self.tmpdir / "missing-dest"
         self._write_env(sync_dest=missing_dest)
 
         proc = self._run(["--dry-run"])
-        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertIn("Destination path does not exist (dry-run)", proc.stdout)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Destination must be an existing directory", proc.stderr)
+        self.assertFalse((self.tmpdir / "rsync.log").exists())
 
-        rsync_log = (self.tmpdir / "rsync.log").read_text(encoding="utf-8")
-        self.assertIn(f"{missing_dest}/", rsync_log)
-
-    def test_non_dry_run_creates_destination_and_syncs_to_local_path(self) -> None:
+    def test_non_dry_run_rejects_missing_destination(self) -> None:
         created_dest = self.tmpdir / "created-dest"
         self._write_env(sync_dest=created_dest)
 
         proc = self._run([])
-        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
-        self.assertTrue(created_dest.exists())
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse(created_dest.exists())
+        self.assertIn("Destination must be an existing directory", proc.stderr)
+        self.assertFalse((self.tmpdir / "rsync.log").exists())
 
-        rsync_log = (self.tmpdir / "rsync.log").read_text(encoding="utf-8")
-        self.assertIn("--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r", rsync_log)
-        self.assertIn(f"{created_dest}/", rsync_log)
+    def test_expected_mount_source_must_be_active_at_destination(self) -> None:
+        source = "serv.local:/a/music"
+        self._write_env(sync_dest=self.sync_dest, mount_source=source)
+
+        absent = self._run([], {"MOUNT_OUTPUT": ""})
+        self.assertNotEqual(absent.returncode, 0)
+        self.assertIn("not a mounted filesystem", absent.stderr)
+        self.assertFalse((self.tmpdir / "rsync.log").exists())
+
+        wrong = self._run([], {"MOUNT_OUTPUT": f"other:/a/music on {self.sync_dest} (nfs, rw)"})
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertFalse((self.tmpdir / "rsync.log").exists())
+
+        mounted = self._run([], {"MOUNT_OUTPUT": f"{source} on {self.sync_dest} (nfs, rw)"})
+        self.assertEqual(mounted.returncode, 0, msg=mounted.stderr + "\n" + mounted.stdout)
+        self.assertIn(f"{self.sync_dest}/", (self.tmpdir / "rsync.log").read_text(encoding="utf-8"))
+
+    def test_existing_directory_without_mount_is_rejected(self) -> None:
+        proc = self._run(["--dry-run"], {"MOUNT_OUTPUT": ""})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("not a mounted filesystem", proc.stderr)
+        self.assertFalse((self.tmpdir / "rsync.log").exists())
+
+    def test_linux_mount_output_is_accepted(self) -> None:
+        source = "serv.local:/a/music"
+        self._write_env(sync_dest=self.sync_dest, mount_source=source)
+        proc = self._run(["--dry-run"], {"MOUNT_OUTPUT": f"{source} on {self.sync_dest} type nfs4 (rw)"})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + "\n" + proc.stdout)
 
     def test_non_dry_run_fails_when_destination_is_not_writable(self) -> None:
         locked_dest = self.tmpdir / "locked-dest"
@@ -142,7 +173,7 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
         locked_dest.chmod(0o555)
         self._write_env(sync_dest=locked_dest)
         try:
-            proc = self._run([])
+            proc = self._run([], {"MOUNT_OUTPUT": f"fixture:/music on {locked_dest} (nfs, rw)"})
         finally:
             locked_dest.chmod(0o755)
 

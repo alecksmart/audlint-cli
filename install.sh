@@ -736,7 +736,7 @@ AUDL_CACHE_PATH="${AUDL_CACHE_PATH:-\$AUDL_PATH/library.cache}"
 
 prompt_with_default_until_valid_label "AUDL_SYNC_TRANSPORT (ssh|nfs)" AUDL_SYNC_TRANSPORT "${AUDL_SYNC_TRANSPORT:-ssh}" validate_sync_transport "AUDL_SYNC_TRANSPORT"
 if [[ "$AUDL_SYNC_TRANSPORT" == nfs && -z "$DEFAULT_AUDL_SYNC_DEST" ]]; then
-	DEFAULT_AUDL_SYNC_DEST="\$HOME/Desktop/Music"
+	DEFAULT_AUDL_SYNC_DEST="\$HOME/Library/Mounts/music"
 fi
 prompt_with_default_until_valid_label "AUDL_SYNC_DEST (mounted sync destination path)" AUDL_SYNC_DEST "$DEFAULT_AUDL_SYNC_DEST" validate_optional_writable_dir "AUDL_SYNC_DEST"
 prompt_with_default_until_valid_label "AUDL_SYNC_SSH_ALIAS" AUDL_SYNC_SSH_ALIAS "${AUDL_SYNC_SSH_ALIAS:-serv}" validate_sync_ssh_alias "AUDL_SYNC_SSH_ALIAS"

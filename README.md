@@ -82,7 +82,7 @@ Set the transport in the project `.env` (or through `install.sh`):
 AUDL_SYNC_TRANSPORT="ssh"          # ssh (default) or nfs
 AUDL_SYNC_SSH_ALIAS="serv"         # existing SSH alias for the admin account
 AUDL_SYNC_SSH_PATH="/pub/a/music"  # directory on that host
-AUDL_SYNC_DEST="/path/to/mounted/music"  # used only by nfs
+AUDL_SYNC_DEST="$HOME/Library/Mounts/music"  # NFS mount path; configurable
 AUDL_SYNC_SOURCE_MOUNT=""          # optional: mounted source volume for deletion safety
 ```
 

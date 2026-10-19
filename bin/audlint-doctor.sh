@@ -328,7 +328,14 @@ fi
 if [[ -n "${AUDL_CUE2FLAC_OUTPUT_DIR:-}" ]]; then
   check_dir_writable "path:AUDL_CUE2FLAC_OUTPUT_DIR" "${AUDL_CUE2FLAC_OUTPUT_DIR:-}"
 fi
-if [[ -n "${AUDL_SYNC_DEST:-}" ]]; then
+if [[ "${AUDL_SYNC_TRANSPORT:-ssh}" != ssh && "${AUDL_SYNC_TRANSPORT:-ssh}" != nfs ]]; then
+  report_fail "config:AUDL_SYNC_TRANSPORT" "expected ssh or nfs"
+elif [[ "${AUDL_SYNC_TRANSPORT:-ssh}" == ssh ]]; then
+  report_ok "config:AUDL_SYNC_TRANSPORT" "ssh (${AUDL_SYNC_SSH_ALIAS:-serv}:${AUDL_SYNC_SSH_PATH:-/pub/a/music})"
+else
+  report_ok "config:AUDL_SYNC_TRANSPORT" "nfs"
+fi
+if [[ "${AUDL_SYNC_TRANSPORT:-ssh}" == nfs && -n "${AUDL_SYNC_DEST:-}" ]]; then
   check_dir_writable "path:AUDL_SYNC_DEST" "${AUDL_SYNC_DEST:-}"
 fi
 if [[ -n "${AUDL_MEDIA_PLAYER_PATH:-}" ]]; then

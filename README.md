@@ -73,6 +73,31 @@ Player transfers deliberately do not preserve source ownership, permissions, or
 timestamps: removable filesystems can encode those metadata writes as unwanted
 macOS `._*` sidecars.
 
+## Music library synchronization
+
+`bin/sync_music.sh` copies the contents of `AUDL_PATH` to one Music directory.
+Set the transport in the project `.env` (or through `install.sh`):
+
+```bash
+AUDL_SYNC_TRANSPORT="ssh"          # ssh (default) or nfs
+AUDL_SYNC_SSH_ALIAS="serv"         # existing SSH alias for the admin account
+AUDL_SYNC_SSH_PATH="/pub/a/music"  # directory on that host
+AUDL_SYNC_DEST="/path/to/mounted/music"  # used only by nfs
+```
+
+SSH requires key-based, noninteractive access and rsync 3.5 on both ends.
+NFS requires `AUDL_SYNC_DEST` to be an existing mounted filesystem; optional
+`AUDL_SYNC_MOUNT_SOURCE` verifies its export. Neither adapter mounts a volume.
+The same source, exclusions, timestamps, progress, and `--partial` retry behavior
+apply to both. SSH does not change remote ownership or permissions.
+
+Normal syncs use `rsync --delete`, which removes destination files absent from
+the source. Review that behavior before switching transports. For the first SSH
+migration, run `bin/sync_music.sh --dry-run --no-delete`, review the rsync item
+list and statistics, then run `bin/sync_music.sh --no-delete`. These commands
+preserve existing destination files. A later run without `--no-delete` restores
+the normal mirror deletion behavior.
+
 ## Dependencies
 
 Required runtime tools:
@@ -84,7 +109,7 @@ Required runtime tools:
 - `metaflac` — tag copy after FLAC encode
 - `dr14meter` — DR14 dynamic range measurement (installs to `~/.local/bin` via `pip install dr14meter`)
 - `zip` — backup bundle rotation/verification
-- `rsync` — transfer/sync workflows to a mounted destination directory
+- `rsync` — transfer/sync workflows; Music sync uses rsync 3.5 over SSH or a mounted destination
 - `crontab` (`cron` on Debian/Ubuntu, `cronie` on Fedora) for scheduled maintenance
 - Python 3 with `numpy` — FFT spectral analysis
 - Python 3 with `opencv-python` (`cv2`), `numpy`, and `tesseract` binary — spectrogram image OCR utility (`audlint-spectre.sh`)

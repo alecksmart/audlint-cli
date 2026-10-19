@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -41,13 +42,13 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
             target.write_text(helper.read_text(encoding="utf-8"), encoding="utf-8")
             target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-        self.src_dir = self.tmpdir / "source"
+        self.src_dir = self.tmpdir / "source with spaces"
         self.src_dir.mkdir(parents=True, exist_ok=True)
         (self.src_dir / "01.flac").write_text("", encoding="utf-8")
         (self.src_dir / ".DS_Store").write_text("", encoding="utf-8")
         (self.src_dir / "._junk").write_text("", encoding="utf-8")
 
-        self.sync_dest = self.tmpdir / "mounted-dest"
+        self.sync_dest = self.tmpdir / "mounted dest with spaces"
         self.sync_dest.mkdir(parents=True, exist_ok=True)
 
         self.env_path = self.work_dir / ".env"
@@ -61,6 +62,7 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
             textwrap.dedent(
                 f"""\
                 AUDL_PATH="{self.src_dir}"
+                AUDL_SYNC_TRANSPORT="nfs"
                 AUDL_SYNC_DEST="{sync_dest}"
                 AUDL_SYNC_MOUNT_SOURCE="{mount_source}"
                 """
@@ -71,7 +73,11 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
     def _install_stubs(self) -> None:
         _write_exec(
             self.bin_dir / "rsync",
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$RSYNC_LOG\"\nexit 0\n",
+            "#!/usr/bin/env bash\nif [[ \"${1:-}\" == --version ]]; then echo 'rsync  version 3.5.0  protocol version 32'; exit 0; fi\nprintf '<%s>\\n' \"$@\" >> \"$RSYNC_LOG\"\nexit \"${RSYNC_STATUS:-0}\"\n",
+        )
+        _write_exec(
+            self.bin_dir / "ssh",
+            "#!/usr/bin/env bash\nprintf '<%s>\\n' \"$@\" >> \"$SSH_LOG\"\n[[ \"${SSH_STATUS:-0}\" == 0 ]] && echo 'rsync  version 3.5.0  protocol version 32'\nexit \"${SSH_STATUS:-0}\"\n",
         )
         _write_exec(
             self.bin_dir / "mount",
@@ -82,6 +88,7 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["RSYNC_LOG"] = str(self.tmpdir / "rsync.log")
+        env["SSH_LOG"] = str(self.tmpdir / "ssh.log")
         env["MOUNT_OUTPUT"] = f"fixture:/music on {self.sync_dest} (nfs, rw)"
         env["NO_COLOR"] = "1"
         if extra_env:
@@ -114,6 +121,7 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
         self.assertIn("--dry-run", rsync_log)
         self.assertIn("--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r", rsync_log)
         self.assertIn(f"{self.sync_dest}/", rsync_log)
+        self.assertIn("<--delete>", rsync_log)
         self.assertNotIn("@", rsync_log)
 
         self.assertTrue((self.src_dir / ".DS_Store").exists())
@@ -179,6 +187,67 @@ class SyncMusicCliSmokeTests(unittest.TestCase):
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("is not writable", proc.stderr)
+
+    def test_ssh_dry_run_uses_remote_path_and_skips_nfs_checks(self) -> None:
+        self.env_path.write_text(f'AUDL_PATH="{self.src_dir}"\nAUDL_SYNC_TRANSPORT=ssh\nAUDL_SYNC_SSH_ALIAS=serv\nAUDL_SYNC_SSH_PATH=/pub/a/music\n', encoding="utf-8")
+        proc = self._run(["--dry-run", "--no-delete"], {"MOUNT_OUTPUT": ""})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        args = (self.tmpdir / "rsync.log").read_text(encoding="utf-8")
+        self.assertIn(f"<{self.src_dir}/>", args)
+        self.assertIn("<serv:/pub/a/music/>", args)
+        self.assertIn("<--partial>", args)
+        self.assertIn("<--no-owner>", args)
+        self.assertIn("<--dry-run>", args)
+        self.assertNotIn("<--delete>", args)
+        self.assertNotIn("--chmod", args)
+        self.assertTrue((self.tmpdir / "ssh.log").exists())
+
+    def test_ssh_is_default_and_custom_remote_path_is_quoted(self) -> None:
+        self.env_path.write_text(f'AUDL_PATH="{self.src_dir}"\nAUDL_SYNC_SSH_ALIAS=backup\nAUDL_SYNC_SSH_PATH="/pub/Music Library"\n', encoding="utf-8")
+        proc = self._run(["--dry-run", "--no-delete"], {"MOUNT_OUTPUT": ""})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("<backup:/pub/Music Library/>", (self.tmpdir / "rsync.log").read_text(encoding="utf-8"))
+        self.assertIn("test -d '/pub/Music Library'", (self.tmpdir / "ssh.log").read_text(encoding="utf-8"))
+
+    def test_ssh_failure_and_interrupted_transfer_can_retry(self) -> None:
+        self.env_path.write_text(f'AUDL_PATH="{self.src_dir}"\nAUDL_SYNC_TRANSPORT=ssh\n', encoding="utf-8")
+        failed_connection = self._run(["--no-delete"], {"SSH_STATUS": "255"})
+        self.assertNotEqual(failed_connection.returncode, 0)
+        self.assertIn("SSH destination unavailable", failed_connection.stderr)
+        self.assertFalse((self.tmpdir / "rsync.log").exists())
+
+        interrupted = self._run(["--no-delete"], {"RSYNC_STATUS": "12"})
+        self.assertEqual(interrupted.returncode, 12)
+        self.assertNotIn("Music sync complete", interrupted.stdout)
+        resumed = self._run(["--no-delete"])
+        self.assertEqual(resumed.returncode, 0, msg=resumed.stderr)
+        args = (self.tmpdir / "rsync.log").read_text(encoding="utf-8")
+        self.assertEqual(args.count("<--partial>"), 2)
+
+    def test_invalid_transport_is_rejected_before_connection(self) -> None:
+        self.env_path.write_text(f'AUDL_PATH="{self.src_dir}"\nAUDL_SYNC_TRANSPORT=bad\n', encoding="utf-8")
+        proc = self._run([])
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("invalid AUDL_SYNC_TRANSPORT", proc.stderr)
+        self.assertFalse((self.tmpdir / "rsync.log").exists())
+        self.assertFalse((self.tmpdir / "ssh.log").exists())
+
+    def test_real_rsync_dry_run_skips_matching_fixture_files(self) -> None:
+        real_rsync = shutil.which("rsync")
+        if real_rsync is None:
+            self.skipTest("rsync unavailable")
+        matching = self.src_dir / "01.flac"
+        matching.write_bytes(b"matching data")
+        shutil.copy2(matching, self.sync_dest / matching.name)
+        _write_exec(self.bin_dir / "rsync", f'#!/usr/bin/env bash\nexec "{real_rsync}" "$@"\n')
+        proc = self._run(["--dry-run", "--no-delete"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertNotIn("01.flac", proc.stdout)
+        (self.src_dir / "new file.flac").write_bytes(b"new data")
+        proc = self._run(["--dry-run", "--no-delete"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("new file.flac", proc.stdout)
+        self.assertNotIn("01.flac", proc.stdout)
 
 
 if __name__ == "__main__":

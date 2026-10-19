@@ -326,6 +326,28 @@ exit 2
         self.assertEqual(rc, 0, msg=clean)
         self.assertIn("--sort year --desc", clean)
 
+    def test_ssh_sync_key_explicitly_preserves_destination_files(self) -> None:
+        work = self.tmpdir / "isolated browser"
+        (work / "bin").mkdir(parents=True)
+        (work / "lib").symlink_to(REPO_ROOT / "lib", target_is_directory=True)
+        browser = work / "bin" / "audlint.sh"
+        _write_exec(browser, LIBRARY_BROWSER.read_text(encoding="utf-8"))
+        (work / ".env").write_text(
+            f'AUDL_PATH="{self.tmpdir}"\nAUDL_SYNC_TRANSPORT=ssh\n', encoding="utf-8"
+        )
+        sync_args = self.tmpdir / "sync-args.txt"
+        sync_stub = self.tmpdir / "sync-stub.sh"
+        _write_exec(sync_stub, '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$SYNC_ARGS_LOG"\n')
+
+        bootstrap = self._run(["--no-interactive", "--db", str(self.db_path)], script_path=browser)
+        self.assertEqual(bootstrap.returncode, 0, msg=bootstrap.stderr + "\n" + bootstrap.stdout)
+        rc, out = self._run_in_pty(
+            ["--db", str(self.db_path)], b"s\nqy", script_path=browser,
+            extra_env={"SYNC_MUSIC_BIN": str(sync_stub), "SYNC_ARGS_LOG": str(sync_args)},
+        )
+        self.assertEqual(rc, 0, msg=self._strip_ansi(out))
+        self.assertEqual(sync_args.read_text(encoding="utf-8").splitlines(), ["--no-delete"])
+
     def test_next_run_uses_managed_cron_schedule(self) -> None:
         self.cron_state_file.write_text(
             "\n".join(

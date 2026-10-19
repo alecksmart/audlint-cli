@@ -82,6 +82,7 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     "",
                     "",
                     "",
+                    "",
                     "python3",
                     "",
                     "",
@@ -134,6 +135,7 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     "",
                     str(library_root),
                     "$AUDL_PATH/library.sqlite",
+                    "",
                     "",
                     "",
                     "",
@@ -196,6 +198,7 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     "",
                     "",
                     "",
+                    "",
                     "python3",
                     "",
                     "",
@@ -235,6 +238,7 @@ class InstallScriptSmokeTests(unittest.TestCase):
             self.assertIn('AUDL_DB_PATH="$AUDL_PATH/library.sqlite"', proc.stdout)
             self.assertIn('AUDL_CACHE_PATH="$AUDL_PATH/library.cache"', proc.stdout)
             self.assertIn(f'AUDL_SYNC_DEST="{sync_dest}"', proc.stdout)
+            self.assertIn('AUDL_SYNC_SOURCE_MOUNT=""', proc.stdout)
             self.assertIn(f'AUDL_MEDIA_PLAYER_PATH="{media_player}"', proc.stdout)
             self.assertIn("AUDL_CRON_INTERVAL_MIN=20", proc.stdout)
             self.assertIn("AUDL_TASK_MAX_ALBUMS=30", proc.stdout)
@@ -267,6 +271,7 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     "",
                     str(library_root),
                     str(library_root / "library.sqlite"),
+                    "",
                     "",
                     "",
                     "",

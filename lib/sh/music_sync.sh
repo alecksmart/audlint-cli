@@ -21,22 +21,35 @@ music_sync_select() {
       MUSIC_SYNC_SSH_PATH="${MUSIC_SYNC_SSH_PATH%/}"
       [[ -n "$MUSIC_SYNC_SSH_PATH" ]] || MUSIC_SYNC_SSH_PATH=/
       MUSIC_SYNC_DEST="${MUSIC_SYNC_SSH_ALIAS}:${MUSIC_SYNC_SSH_PATH}/"
-      MUSIC_SYNC_ADAPTER_OPTS=(--no-owner -s -e 'ssh -o BatchMode=yes -o ConnectTimeout=10')
+      # --no-perms leaves existing modes alone.  The chmod rules set the
+      # incoming mode; the receiver umask then gives new files 0644 and new
+      # directories 0755 unless a destination default ACL is more restrictive.
+      MUSIC_SYNC_ADAPTER_OPTS=(
+        --no-owner
+        '--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r'
+        --rsync-path='umask 022; exec rsync'
+        -s -e 'ssh -o BatchMode=yes -o ConnectTimeout=10'
+      )
       ;;
     *) echo "ERROR: invalid AUDL_SYNC_TRANSPORT '$MUSIC_SYNC_TRANSPORT' (expected ssh or nfs)" >&2; return 1 ;;
   esac
 }
 
-music_sync_validate_nfs() {
-  local mounted_entry="" entry write_probe
-  [[ -d "$MUSIC_SYNC_DEST" && ! -L "$MUSIC_SYNC_DEST" ]] || { echo "ERROR: Destination must be an existing directory: $MUSIC_SYNC_DEST" >&2; return 1; }
+music_sync_mounted_entry() {
+  local mount_path="$1" entry
   while IFS= read -r entry; do
-    if [[ "$entry" == *" on $MUSIC_SYNC_DEST ("* || "$entry" == *" on $MUSIC_SYNC_DEST type "*" ("* ]]; then
-      mounted_entry="$entry"
-      break
+    if [[ "$entry" == *" on $mount_path ("* || "$entry" == *" on $mount_path type "*" ("* ]]; then
+      printf '%s\n' "$entry"
+      return 0
     fi
   done < <(mount)
-  [[ -n "$mounted_entry" ]] || { echo "ERROR: Destination is not a mounted filesystem: $MUSIC_SYNC_DEST" >&2; return 1; }
+  return 1
+}
+
+music_sync_validate_nfs() {
+  local mounted_entry write_probe
+  [[ -d "$MUSIC_SYNC_DEST" && ! -L "$MUSIC_SYNC_DEST" ]] || { echo "ERROR: Destination must be an existing directory: $MUSIC_SYNC_DEST" >&2; return 1; }
+  mounted_entry="$(music_sync_mounted_entry "$MUSIC_SYNC_DEST")" || { echo "ERROR: Destination is not a mounted filesystem: $MUSIC_SYNC_DEST" >&2; return 1; }
   if [[ -n "${AUDL_SYNC_MOUNT_SOURCE:-}" && "$mounted_entry" != "${AUDL_SYNC_MOUNT_SOURCE} on $MUSIC_SYNC_DEST ("* && "$mounted_entry" != "${AUDL_SYNC_MOUNT_SOURCE} on $MUSIC_SYNC_DEST type "* ]]; then
     echo "ERROR: Expected mount ${AUDL_SYNC_MOUNT_SOURCE} is not active at $MUSIC_SYNC_DEST" >&2
     return 1
@@ -45,6 +58,38 @@ music_sync_validate_nfs() {
     write_probe="$(mktemp "$MUSIC_SYNC_DEST/.audlint-write-test.XXXXXX" 2>/dev/null)" || { echo "ERROR: Destination is not writable: $MUSIC_SYNC_DEST" >&2; return 1; }
     rm -f "$write_probe" || { echo "ERROR: Could not remove write probe: $write_probe" >&2; return 1; }
   fi
+}
+
+music_sync_validate_source_for_delete() {
+  local src="${1%/}" expected_mount source_device mount_device sample
+  [[ -n "$src" ]] || src=/
+  [[ "$src" == /* && -d "$src" && ! -L "$src" ]] || { echo "ERROR: Delete blocked: source must be an existing absolute directory: $src" >&2; return 1; }
+  if [[ -n "${AUDL_SYNC_SOURCE_MOUNT:-}" ]]; then
+    expected_mount="$AUDL_SYNC_SOURCE_MOUNT"
+  else
+    expected_mount="$(dirname "$src")"
+  fi
+  expected_mount="${expected_mount%/}"
+  [[ -n "$expected_mount" ]] || expected_mount=/
+  [[ "$expected_mount" == /* && -d "$expected_mount" && ! -L "$expected_mount" ]] || { echo "ERROR: Delete blocked: invalid source mount: $expected_mount" >&2; return 1; }
+  if [[ "$expected_mount" != / && "$src" != "$expected_mount" && "$src" != "$expected_mount/"* ]]; then
+    echo "ERROR: Delete blocked: source is outside expected mount: $expected_mount" >&2
+    return 1
+  fi
+  music_sync_mounted_entry "$expected_mount" >/dev/null || { echo "ERROR: Delete blocked: source volume is not mounted at $expected_mount" >&2; return 1; }
+  if ! source_device="$(stat -c '%d' "$src" 2>/dev/null)" || ! mount_device="$(stat -c '%d' "$expected_mount" 2>/dev/null)"; then
+    source_device="$(stat -f '%d' "$src" 2>/dev/null)" && mount_device="$(stat -f '%d' "$expected_mount" 2>/dev/null)" || { echo "ERROR: Delete blocked: cannot verify source filesystem: $src" >&2; return 1; }
+  fi
+  [[ "$source_device" == "$mount_device" ]] || { echo "ERROR: Delete blocked: source is on another filesystem than $expected_mount" >&2; return 1; }
+  sample="$(find "$src" -type f ! -name '._*' \( \
+    -iname '*.flac' -o -iname '*.alac' -o -iname '*.m4a' -o -iname '*.wav' \
+    -o -iname '*.aiff' -o -iname '*.aif' -o -iname '*.aifc' -o -iname '*.caf' \
+    -o -iname '*.dsf' -o -iname '*.dff' -o -iname '*.wv' -o -iname '*.ape' \
+    -o -iname '*.dts' -o -iname '*.dca' -o -iname '*.mp4' -o -iname '*.mp3' \
+    -o -iname '*.aac' -o -iname '*.adts' -o -iname '*.ogg' -o -iname '*.oga' \
+    -o -iname '*.opus' \
+  \) -print -quit 2>/dev/null)" || { echo "ERROR: Delete blocked: cannot inspect source library: $src" >&2; return 1; }
+  [[ -n "$sample" ]] || { echo "ERROR: Delete blocked: source library has no audio files: $src" >&2; return 1; }
 }
 
 music_sync_validate_ssh() {
@@ -90,14 +135,14 @@ music_sync_validate() {
 }
 
 music_sync_run() {
-  local src="$1" dry_run="$2" no_delete="$3"
+  local src="$1" dry_run="$2" delete="$3"
   local target="${MUSIC_SYNC_DEST%/}/"
   local -a opts=(
     -a --no-perms -O --no-group -v -h
     --progress --stats --partial
     --exclude='._*' --exclude='.DS_Store'
   )
-  [[ "$no_delete" == 1 ]] || opts+=(--delete)
+  [[ "$delete" == 1 ]] && opts+=(--delete)
   opts+=("${MUSIC_SYNC_ADAPTER_OPTS[@]}")
   [[ "$dry_run" == 1 ]] && opts+=(--dry-run)
   rsync "${opts[@]}" "${src}/" "$target"

@@ -5668,7 +5668,9 @@ while true; do
     if ! show_sync_action; then
       ACTION_MESSAGE="Sync unavailable: set writable AUDL_SYNC_DEST for nfs in .env."
     elif [[ -x "$SYNC_MUSIC_BIN" ]]; then
-      if virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "sync-music" "$SYNC_MUSIC_BIN"; then
+      sync_music_args=()
+      [[ "${AUDL_SYNC_TRANSPORT:-ssh}" == ssh ]] && sync_music_args=(--no-delete)
+      if virtwin_run_command 5 "$(term_lines_value)" "$(term_cols_value)" "sync-music" "$SYNC_MUSIC_BIN" "${sync_music_args[@]}"; then
         ACTION_MESSAGE="sync-music completed."
       else
         ACTION_MESSAGE="sync-music failed."

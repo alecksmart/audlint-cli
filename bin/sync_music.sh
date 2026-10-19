@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: sync-music.sh [--dry-run] [--debug]
+# Usage: sync_music.sh [--dry-run] [--delete|--no-delete] [--debug]
 DRY_RUN=0
-NO_DELETE=0
+DELETE_MODE=auto
 DEBUG=0
 
 BOOTSTRAP_SOURCE="${BASH_SOURCE[0]}"
@@ -51,15 +51,17 @@ SRC="${AUDL_PATH:-}"
 }
 show_help() {
   cat <<EOF
-Usage: $(basename "$0") [--dry-run] [--no-delete] [--debug]
+Usage: $(basename "$0") [--dry-run] [--delete|--no-delete] [--debug]
   --dry-run   : show what would happen without making changes
-  --no-delete : preserve files already at the destination (migration runs)
+  --delete    : allow destination deletion after source mount checks
+  --no-delete : preserve files already at the destination
   --debug     : enable trace mode (set -x) and extra verbose logging
 
 Notes:
 - Config comes from .env in this folder.
 - AUDL_SYNC_TRANSPORT selects ssh (default) or nfs.
 - NFS uses AUDL_SYNC_DEST; SSH uses AUDL_SYNC_SSH_ALIAS and AUDL_SYNC_SSH_PATH.
+- SSH defaults to no deletion; NFS keeps its existing deletion default.
 EOF
 }
 
@@ -71,7 +73,13 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --no-delete)
-    NO_DELETE=1
+    [[ "$DELETE_MODE" != delete ]] || { echo 'ERROR: --delete and --no-delete cannot be combined' >&2; exit 2; }
+    DELETE_MODE=keep
+    shift
+    ;;
+  --delete)
+    [[ "$DELETE_MODE" != keep ]] || { echo 'ERROR: --delete and --no-delete cannot be combined' >&2; exit 2; }
+    DELETE_MODE=delete
     shift
     ;;
   --debug)
@@ -110,6 +118,10 @@ error_exit() {
 # Ensure source exists.
 [[ -d "$SRC" ]] || error_exit "Source directory '$SRC' does not exist. Aborting."
 music_sync_select || exit 1
+DELETE=0
+if [[ "$DELETE_MODE" == delete || ( "$DELETE_MODE" == auto && "$MUSIC_SYNC_TRANSPORT" == nfs ) ]]; then
+  DELETE=1
+fi
 
 log "Starting music sync"
 log "Source : $SRC"
@@ -121,9 +133,12 @@ else
   log "Dry-run: no"
 fi
 log "Debug  : $DEBUG"
-log "Delete: $([[ "$NO_DELETE" == 1 ]] && printf 'no' || printf 'yes')"
+log "Delete: $([[ "$DELETE" == 1 ]] && printf 'yes' || printf 'no')"
+if [[ "$DELETE" == 1 ]]; then
+  music_sync_validate_source_for_delete "$SRC" || exit 1
+fi
 music_sync_validate "$DRY_RUN" || exit 1
 log "Invoking rsync to $MUSIC_SYNC_TRANSPORT destination…"
-music_sync_run "$SRC" "$DRY_RUN" "$NO_DELETE"
+music_sync_run "$SRC" "$DRY_RUN" "$DELETE"
 
 log "Music sync complete"

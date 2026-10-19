@@ -433,6 +433,13 @@ validate_sync_ssh_path() {
 	}
 }
 
+validate_sync_source_mount() {
+	[[ -z "$1" || ("$1" == /* && "$1" != *$'\n'* && "$1" != *$'\r'*) ]] || {
+		echo 'Invalid AUDL_SYNC_SOURCE_MOUNT: expected an absolute path or empty value.' >&2
+		return 1
+	}
+}
+
 validate_log_path() {
 	local raw="$1"
 	local label="${2:-log path}"
@@ -534,6 +541,7 @@ AUDL_SYNC_DEST="$AUDL_SYNC_DEST"
 AUDL_SYNC_TRANSPORT="$AUDL_SYNC_TRANSPORT"
 AUDL_SYNC_SSH_ALIAS="$AUDL_SYNC_SSH_ALIAS"
 AUDL_SYNC_SSH_PATH="$AUDL_SYNC_SSH_PATH"
+AUDL_SYNC_SOURCE_MOUNT="$AUDL_SYNC_SOURCE_MOUNT"
 AUDL_PYTHON_BIN="$AUDL_PYTHON_BIN"
 AUDL_MEDIA_PLAYER_PATH="$AUDL_MEDIA_PLAYER_PATH"
 EOF
@@ -733,6 +741,7 @@ fi
 prompt_with_default_until_valid_label "AUDL_SYNC_DEST (mounted sync destination path)" AUDL_SYNC_DEST "$DEFAULT_AUDL_SYNC_DEST" validate_optional_writable_dir "AUDL_SYNC_DEST"
 prompt_with_default_until_valid_label "AUDL_SYNC_SSH_ALIAS" AUDL_SYNC_SSH_ALIAS "${AUDL_SYNC_SSH_ALIAS:-serv}" validate_sync_ssh_alias "AUDL_SYNC_SSH_ALIAS"
 prompt_with_default_until_valid_label "AUDL_SYNC_SSH_PATH" AUDL_SYNC_SSH_PATH "${AUDL_SYNC_SSH_PATH:-/pub/a/music}" validate_sync_ssh_path "AUDL_SYNC_SSH_PATH"
+prompt_with_default_until_valid_label "AUDL_SYNC_SOURCE_MOUNT (optional source volume mount for deletion)" AUDL_SYNC_SOURCE_MOUNT "${AUDL_SYNC_SOURCE_MOUNT:-}" validate_sync_source_mount "AUDL_SYNC_SOURCE_MOUNT"
 
 prompt_with_default_until_valid_label "AUDL_PYTHON_BIN (command or absolute path)" AUDL_PYTHON_BIN "$DEFAULT_AUDL_PYTHON_BIN" validate_bin "AUDL_PYTHON_BIN"
 

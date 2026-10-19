@@ -83,20 +83,27 @@ AUDL_SYNC_TRANSPORT="ssh"          # ssh (default) or nfs
 AUDL_SYNC_SSH_ALIAS="serv"         # existing SSH alias for the admin account
 AUDL_SYNC_SSH_PATH="/pub/a/music"  # directory on that host
 AUDL_SYNC_DEST="/path/to/mounted/music"  # used only by nfs
+AUDL_SYNC_SOURCE_MOUNT=""          # optional: mounted source volume for deletion safety
 ```
 
 SSH requires key-based, noninteractive access and rsync 3.5 on both ends.
 NFS requires `AUDL_SYNC_DEST` to be an existing mounted filesystem; optional
 `AUDL_SYNC_MOUNT_SOURCE` verifies its export. Neither adapter mounts a volume.
 The same source, exclusions, timestamps, progress, and `--partial` retry behavior
-apply to both. SSH does not change remote ownership or permissions.
+apply to both. SSH keeps existing destination file modes and ownership. New
+files use mode 0644 and new directories 0755 after the receiver umask is set to
+022; a restrictive default ACL on the server may still limit Plex access.
 
-Normal syncs use `rsync --delete`, which removes destination files absent from
-the source. Review that behavior before switching transports. For the first SSH
-migration, run `bin/sync_music.sh --dry-run --no-delete`, review the rsync item
-list and statistics, then run `bin/sync_music.sh --no-delete`. These commands
-preserve existing destination files. A later run without `--no-delete` restores
-the normal mirror deletion behavior.
+SSH syncs, including the TUI Sync action, preserve destination files by default.
+Use `bin/sync_music.sh --dry-run` to review the transfer list; a normal SSH run
+also omits `--delete`. To mirror deletions explicitly, use
+`bin/sync_music.sh --dry-run --delete` first, then `bin/sync_music.sh --delete`.
+NFS keeps its existing `--delete` default; `--no-delete` preserves extra files.
+Before either adapter sends `--delete` to rsync, Audlint requires a mounted,
+nonempty source library. It expects `AUDL_PATH` directly inside its mounted
+volume. If the library is nested more deeply or is the mount root itself, set
+`AUDL_SYNC_SOURCE_MOUNT` in `.env` to the volume's absolute mount path. A
+missing mount or empty source blocks deletion before any transfer starts.
 
 ## Dependencies
 

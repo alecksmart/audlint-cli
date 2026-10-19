@@ -79,6 +79,10 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     str(library_root),
                     str(library_root / "library.sqlite"),
                     "",
+                    "",
+                    "",
+                    "",
+                    "",
                     "python3",
                     "",
                     "",
@@ -110,6 +114,42 @@ class InstallScriptSmokeTests(unittest.TestCase):
             self.assertIn('AUDL_BIN_PATH="$HOME/.local/bin"', proc.stdout)
             self.assertNotIn("AUDL_TABLE_PYTHON_BIN", proc.stdout)
 
+    def test_new_nfs_install_defaults_to_lowercase_music_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            library = home / "source" / "Library"
+            mount = home / "Library" / "Mounts" / "music"
+            bin_dir = home / "bin"
+            player = home / "Player"
+            backup = home / "Backup"
+            encoded = home / "Encoded"
+            logs = home / "logs"
+            for directory in (library, mount, bin_dir, player, backup, encoded, logs):
+                directory.mkdir(parents=True)
+
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "TERM": "xterm",
+                "AUDL_BIN_PATH": str(bin_dir),
+                "AUDL_PATH": str(library),
+                "AUDL_SYNC_TRANSPORT": "nfs",
+                "AUDL_MEDIA_PLAYER_PATH": str(player),
+                "AUDL_BACKUP_PATH": str(backup),
+                "AUDL_CUE2FLAC_OUTPUT_DIR": str(encoded),
+                "AUDL_TASK_LOG_PATH": str(logs / "audlint-task.log"),
+            })
+            env.pop("AUDL_SYNC_DEST", None)
+            answers = "\n".join([""] * 8 + ["python3"] + [""] * 9) + "\n"
+            proc = subprocess.run(
+                [str(INSTALL_SH), "--dry-run"], cwd=str(REPO_ROOT), env=env,
+                input=answers, text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            self.assertIn('AUDL_SYNC_DEST="$HOME/Library/Mounts/music"', proc.stdout)
+            self.assertNotIn("Desktop/Music", proc.stdout)
+
     def test_dry_run_accepts_audl_path_reference_in_db_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -131,6 +171,10 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     "",
                     str(library_root),
                     "$AUDL_PATH/library.sqlite",
+                    "",
+                    "",
+                    "",
+                    "",
                     "",
                     "python3",
                     "",
@@ -187,6 +231,10 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     "",
                     "",
                     "",
+                    "",
+                    "",
+                    "",
+                    "",
                     "python3",
                     "",
                     "",
@@ -226,6 +274,7 @@ class InstallScriptSmokeTests(unittest.TestCase):
             self.assertIn('AUDL_DB_PATH="$AUDL_PATH/library.sqlite"', proc.stdout)
             self.assertIn('AUDL_CACHE_PATH="$AUDL_PATH/library.cache"', proc.stdout)
             self.assertIn(f'AUDL_SYNC_DEST="{sync_dest}"', proc.stdout)
+            self.assertIn('AUDL_SYNC_SOURCE_MOUNT=""', proc.stdout)
             self.assertIn(f'AUDL_MEDIA_PLAYER_PATH="{media_player}"', proc.stdout)
             self.assertIn("AUDL_CRON_INTERVAL_MIN=20", proc.stdout)
             self.assertIn("AUDL_TASK_MAX_ALBUMS=30", proc.stdout)
@@ -258,6 +307,10 @@ class InstallScriptSmokeTests(unittest.TestCase):
                     "",
                     str(library_root),
                     str(library_root / "library.sqlite"),
+                    "",
+                    "",
+                    "",
+                    "",
                     "",
                     "python3",
                     "",

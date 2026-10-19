@@ -412,6 +412,34 @@ validate_secure_mode() {
 	return 0
 }
 
+validate_sync_transport() {
+	[[ "$1" == ssh || "$1" == nfs ]] || {
+		echo 'Invalid AUDL_SYNC_TRANSPORT: expected ssh or nfs.' >&2
+		return 1
+	}
+}
+
+validate_sync_ssh_alias() {
+	[[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+		echo 'Invalid AUDL_SYNC_SSH_ALIAS.' >&2
+		return 1
+	}
+}
+
+validate_sync_ssh_path() {
+	[[ "$1" == /* && "$1" != *$'\n'* && "$1" != *$'\r'* ]] || {
+		echo 'Invalid AUDL_SYNC_SSH_PATH: expected an absolute path.' >&2
+		return 1
+	}
+}
+
+validate_sync_source_mount() {
+	[[ -z "$1" || ("$1" == /* && "$1" != *$'\n'* && "$1" != *$'\r'*) ]] || {
+		echo 'Invalid AUDL_SYNC_SOURCE_MOUNT: expected an absolute path or empty value.' >&2
+		return 1
+	}
+}
+
 validate_log_path() {
 	local raw="$1"
 	local label="${2:-log path}"
@@ -510,6 +538,10 @@ AUDL_PATH="$AUDL_PATH"
 AUDL_DB_PATH="$AUDL_DB_PATH"
 AUDL_CACHE_PATH="$AUDL_CACHE_PATH"
 AUDL_SYNC_DEST="$AUDL_SYNC_DEST"
+AUDL_SYNC_TRANSPORT="$AUDL_SYNC_TRANSPORT"
+AUDL_SYNC_SSH_ALIAS="$AUDL_SYNC_SSH_ALIAS"
+AUDL_SYNC_SSH_PATH="$AUDL_SYNC_SSH_PATH"
+AUDL_SYNC_SOURCE_MOUNT="$AUDL_SYNC_SOURCE_MOUNT"
 AUDL_PYTHON_BIN="$AUDL_PYTHON_BIN"
 AUDL_MEDIA_PLAYER_PATH="$AUDL_MEDIA_PLAYER_PATH"
 EOF
@@ -683,7 +715,7 @@ echo
 
 DEFAULT_AUDL_BIN_PATH="${AUDL_BIN_PATH:-\$HOME/.local/bin}"
 DEFAULT_AUDL_PATH="${AUDL_PATH:-/Volumes/Music/Library}"
-DEFAULT_AUDL_SYNC_DEST="${AUDL_SYNC_DEST:-\$HOME/Desktop/Music}"
+DEFAULT_AUDL_SYNC_DEST="${AUDL_SYNC_DEST:-}"
 DEFAULT_AUDL_MEDIA_PLAYER_PATH="${AUDL_MEDIA_PLAYER_PATH:-/Volumes/Music}"
 DEFAULT_AUDL_PARANOIA_MODE="${AUDL_PARANOIA_MODE:-0}"
 DEFAULT_AUDL_BACKUP_PATH="${AUDL_BACKUP_PATH:-/Volumes/Music/Backup}"
@@ -702,7 +734,14 @@ DEFAULT_AUDL_DB_PATH="${AUDL_DB_PATH:-\$AUDL_PATH/library.sqlite}"
 prompt_with_default_until_valid_label "AUDL_DB_PATH path" AUDL_DB_PATH "$DEFAULT_AUDL_DB_PATH" validate_db_path "AUDL_DB_PATH"
 AUDL_CACHE_PATH="${AUDL_CACHE_PATH:-\$AUDL_PATH/library.cache}"
 
+prompt_with_default_until_valid_label "AUDL_SYNC_TRANSPORT (ssh|nfs)" AUDL_SYNC_TRANSPORT "${AUDL_SYNC_TRANSPORT:-ssh}" validate_sync_transport "AUDL_SYNC_TRANSPORT"
+if [[ "$AUDL_SYNC_TRANSPORT" == nfs && -z "$DEFAULT_AUDL_SYNC_DEST" ]]; then
+	DEFAULT_AUDL_SYNC_DEST="\$HOME/Library/Mounts/music"
+fi
 prompt_with_default_until_valid_label "AUDL_SYNC_DEST (mounted sync destination path)" AUDL_SYNC_DEST "$DEFAULT_AUDL_SYNC_DEST" validate_optional_writable_dir "AUDL_SYNC_DEST"
+prompt_with_default_until_valid_label "AUDL_SYNC_SSH_ALIAS" AUDL_SYNC_SSH_ALIAS "${AUDL_SYNC_SSH_ALIAS:-serv}" validate_sync_ssh_alias "AUDL_SYNC_SSH_ALIAS"
+prompt_with_default_until_valid_label "AUDL_SYNC_SSH_PATH" AUDL_SYNC_SSH_PATH "${AUDL_SYNC_SSH_PATH:-/pub/a/music}" validate_sync_ssh_path "AUDL_SYNC_SSH_PATH"
+prompt_with_default_until_valid_label "AUDL_SYNC_SOURCE_MOUNT (optional source volume mount for deletion)" AUDL_SYNC_SOURCE_MOUNT "${AUDL_SYNC_SOURCE_MOUNT:-}" validate_sync_source_mount "AUDL_SYNC_SOURCE_MOUNT"
 
 prompt_with_default_until_valid_label "AUDL_PYTHON_BIN (command or absolute path)" AUDL_PYTHON_BIN "$DEFAULT_AUDL_PYTHON_BIN" validate_bin "AUDL_PYTHON_BIN"
 
